@@ -282,7 +282,8 @@ def _build_fillet_chamfer(doc, spec, kind):
                 "feature yet. Build the feature first (pad/pocket/…), then dress its edges."
             )
     names = _resolve_elements(target, spec["edges"], "Edge")
-    size = float(spec[size_key])
+    raw_size = spec[size_key]
+    size = raw_size if _is_expression(raw_size) else _number(raw_size, f"{kind} {size_key}")
     label = spec.get("name") or f"{kind.capitalize()}"
     if body is not None:
         _require_end_of_chain(body, target, kind)
@@ -296,7 +297,7 @@ def _build_fillet_chamfer(doc, spec, kind):
             return _dress_shape_usable(feat)
 
         feat.Base = (target, names)
-        setattr(feat, tip_policy.dress_size_property(kind), size)
+        _set_or_bind(feat, tip_policy.dress_size_property(kind), size)
         _remember_dress_context(kind, size, names, _probe)
         if named_body:
             # The caller named the BODY, so the reply must say which of its
@@ -304,6 +305,12 @@ def _build_fillet_chamfer(doc, spec, kind):
             # one thing a Body-named dress-up resolves for them.
             _LAST_FEATURE_INFO = {"dressed": target.Name, "body": body.Name}
         return feat
+    if _is_expression(size):
+        raise ValueError(
+            f"a Part-level {kind} stores one {size_key} per edge, which cannot be bound to an "
+            f"expression; pass a number, or build '{base.Name}' as a PartDesign Body feature "
+            "to bind it."
+        )
     feat = doc.addObject(tip_policy.dress_type(kind, False), label)
     if hasattr(feat, "EdgeLinks"):
         # FreeCAD >= 1.1 rework: Base is a plain link and per-edge sizes live
@@ -611,10 +618,12 @@ def _centered_axis_line(body, direction, center):
     reference the GUI uses for this; a free Placement is what positions it
     (MapMode "Translate" over the origin line does NOT move it — live-verified).
     """
-    vec = _vec3(center, "center")
     line = body.newObject("PartDesign::Line", "CadPilotPolarAxis")
     line.MapMode = "Deactivated"
-    line.Placement = FreeCAD.Placement(vec, FreeCAD.Rotation(FreeCAD.Vector(0, 0, 1), direction))
+    line.Placement = FreeCAD.Placement(
+        FreeCAD.Vector(), FreeCAD.Rotation(FreeCAD.Vector(0, 0, 1), direction)
+    )
+    _bind_vector(line, "Placement", center, "center")
     return line
 
 
@@ -700,8 +709,7 @@ def _build_pd_pattern(doc, body, base, spec, ptype: str, count: int):
         # reported as plain success.
         if spec.get("center"):
             link, sub = _centered_axis_line(body, direction, spec["center"]), ""
-            point = _vec3(spec["center"], "center")
-            label = f"axis through {[round(v, 4) for v in point]}"
+            label = f"axis through {spec['center']}"
         feat.Axis = (link, [sub])
     elif ptype == "linear":
         _require(spec, "spacing")
@@ -721,6 +729,8 @@ def _build_pd_pattern(doc, body, base, spec, ptype: str, count: int):
     feat.Occurrences = count
     feat.Reversed = reversed_
     doc.recompute()
+    if getattr(link, "TypeId", "") == "PartDesign::Line":
+        point = FreeCAD.Vector(link.Placement.Base)  # a bound centre is known only now
     volumes = _transform_volumes(feat)
     if volumes is not None and abs(volumes[1] - volumes[0]) < 1e-6:
         reason = _pattern_no_effect_reason(ptype, base, direction, point, label, spec)
@@ -843,13 +853,19 @@ def _build_pattern(doc, spec):
         if ptype == "linear":
             _require(spec, "spacing")
             direction = _axis_vec(spec.get("axis"), default="X")
-            feat = make_array(
-                base, direction * float(spec["spacing"]), FreeCAD.Vector(0, 0, 0), count, 1
-            )
+            spacing = spec["spacing"]
+            pitch = 1.0 if _is_expression(spacing) else _number(spacing, "pattern spacing")
+            feat = make_array(base, direction * pitch, FreeCAD.Vector(0, 0, 0), count, 1)
+            if _is_expression(spacing):
+                for axis, component in zip("xyz", direction, strict=True):
+                    if abs(component) > 1e-12:
+                        feat.setExpression(
+                            f".IntervalX.{axis}", f"({spacing[1:]}) * {float(component)!r}"
+                        )
         else:
-            center = _vec3(spec.get("center", [0, 0, 0]), "center")
-            angle = float(spec.get("angle", 360.0))
-            feat = make_array(base, center, angle, count)
+            feat = make_array(base, FreeCAD.Vector(0, 0, 0), 360.0, count)
+            _bind_vector(feat, "Center", spec.get("center", [0, 0, 0]), "center")
+            _set_or_bind(feat, "Angle", spec.get("angle", 360.0))
             axis = str(spec.get("axis", "Z")).upper()
             if axis != "Z" and hasattr(feat, "Axis"):
                 feat.Axis = _axis_vec(axis)
@@ -857,6 +873,39 @@ def _build_pattern(doc, spec):
         feat.Label = spec["name"]
     _bind_count_expression(feat, spec.get("count"), ptype)
     return feat
+
+
+def _is_expression(value) -> bool:
+    return isinstance(value, str) and value.startswith("=")
+
+
+def _number(value, what: str) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        raise ValueError(
+            f"{what} must be a number or an expression like '=Vars.depth', got {value!r}."
+        ) from None
+
+
+def _bind_vector(obj, prop: str, values, what: str):
+    """Assign an [x, y, z] whose items may be '=expr' strings; returns the numeric part."""
+    if isinstance(values, dict):
+        values = [values.get("x", 0), values.get("y", 0), values.get("z", 0)]
+    if not isinstance(values, (list, tuple)) or len(values) != 3:
+        raise ValueError(f"{what} must be [x, y, z] (items may be '=expressions'), got {values!r}")
+    numeric = FreeCAD.Vector(*(0.0 if _is_expression(v) else _number(v, what) for v in values))
+    current = getattr(obj, prop)
+    if isinstance(current, FreeCAD.Placement):
+        obj.Placement = FreeCAD.Placement(numeric, current.Rotation)
+        path = f".{prop}.Base"
+    else:
+        setattr(obj, prop, numeric)
+        path = f".{prop}"
+    for axis, value in zip("xyz", values, strict=True):
+        if _is_expression(value):
+            obj.setExpression(f"{path}.{axis}", value[1:])
+    return numeric
 
 
 def _set_or_bind(obj, prop, value):
@@ -1844,7 +1893,9 @@ def _build_datum_plane(doc, spec):
     else:
         raise ValueError(f"plane must be XY/XZ/YZ or {{'face': ...}}, got {plane!r}")
     dp.MapMode = "FlatFace"
-    offset = float(spec.get("offset", 0) or 0)
+    raw = spec.get("offset", 0) or 0
+    bound = _is_expression(raw)
+    offset = 0.0 if bound else _number(raw, "datum_plane offset")
     if center_target is not None:
         # plane={"face": [...], "center": true}: origin at the middle of the
         # face instead of its parametric origin (a corner on rectangular
@@ -1852,6 +1903,9 @@ def _build_datum_plane(doc, spec):
         sketcher_ops.center_attachment(dp, center_target[0], center_target[1], doc, offset)
     elif offset:
         dp.AttachmentOffset = FreeCAD.Placement(FreeCAD.Vector(0, 0, offset), FreeCAD.Rotation())
+    if bound:
+        # The offset runs along the plane normal, the attachment's own Z.
+        dp.setExpression(".AttachmentOffset.Base.z", raw[1:])
     return dp
 
 

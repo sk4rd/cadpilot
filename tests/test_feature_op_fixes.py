@@ -252,3 +252,20 @@ def test_unknown_keys_are_refused_with_the_valid_ones_listed():
     assert tp.unknown_spec_keys("pad", {"type": "pad", "base": "S", "length": 5}) == ""
     assert tp.unknown_spec_keys("sketch", {"geometry": [], "name": None}) == "", "None asks nothing"
     assert "unknown_spec_keys" in _src("create_feature_gui")
+
+
+# --- expression bindings ----------------------------------------------------------
+
+
+def test_numeric_parameters_can_be_bound_to_expressions():
+    """float() on '=Vars.x' used to crash the op: datum offset, polar centre,
+    pattern spacing and dress-up sizes all accept expressions now."""
+    datum = _src("_build_datum_plane")
+    assert ".AttachmentOffset.Base.z" in datum and "float(spec.get('offset'" not in datum
+    assert "_bind_vector(line, 'Placement', center" in _src("_centered_axis_line")
+    dress = _src("_build_fillet_chamfer")
+    assert "_set_or_bind(feat, tip_policy.dress_size_property(kind), size)" in dress
+    assert "float(spec[size_key])" not in dress
+    draft = _src("_build_pattern")
+    assert ".IntervalX." in draft and "_bind_vector(feat, 'Center'" in draft
+    assert "_set_or_bind(feat, 'Angle'" in draft

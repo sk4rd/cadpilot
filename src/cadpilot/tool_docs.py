@@ -96,6 +96,8 @@ base ∩ (T1 ∪ T2) instead of base ∩ T1 ∩ T2.""",
     "fillet": """\
 fillet — parametric fillet (obj_name = base object).
 Required in obj_properties: edges (selector), radius. Optional: name.
+radius accepts an "=expression" inside a Body (a Part-level fillet stores one
+size per edge and cannot be bound).
 Selectors accept "all", an index list [0,2], or a name list ["Edge1"] —
 use get_topology to find indices.
 A base inside a PartDesign Body yields a PartDesign::Fillet inside that Body
@@ -143,7 +145,8 @@ pattern — repeat a feature or solid (obj_name = base object).
 Required in obj_properties: count (>= 2, or an expression, e.g. "=Vars.n_holes";
 an expression stays BOUND, so changing the spreadsheet updates the hole count).
 Optional: pattern_type (linear/polar, default linear), spacing, axis, angle,
-  center, reversed, name.
+  center, reversed, name. spacing, angle and each center item accept
+  "=expressions" and stay bound.
 
 Two VERY different behaviours, picked by the base object:
 - Base is a PartDesign feature (a pad/pocket/… inside a Body): a
@@ -433,7 +436,8 @@ the face (the default is the face's parametric origin — a corner on
 rectangular faces; sketches attached to the datum then land there).
 The result echoes the resolved face (name/center/normal, and the datum's own
 support), so a surprise direction pick is visible.
-Optional: offset (mm along the plane normal), body.
+Optional: offset (mm along the plane normal, or an "=expression" that stays
+bound), body.
 Sketch on it with plane={"datum": name}.""",
     "hull": """\
 hull — multi-view 2D-to-3D visual hull (obj_name = result name, default "Hull",
