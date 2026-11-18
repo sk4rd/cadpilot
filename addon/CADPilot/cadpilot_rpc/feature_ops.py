@@ -810,6 +810,11 @@ def _set_linear_spacing(feat, spec, count: int) -> bool:
     raw = spec.get(key)
     numeric = isinstance(raw, (int, float)) and not isinstance(raw, bool)
     flip = numeric and raw < 0
+    if _is_expression(raw) and _expression_value(feat, raw) < 0:
+        # Offset and Length are never negative, so a negative expression bound as
+        # it stands failed the recompute ("Pattern length too small"). The sign
+        # goes to Reversed, as it does for a number; it is read once, here.
+        raw, flip = f"=-({raw[1:]})", True
     if "Mode" not in feat.PropertiesList:
         # FreeCAD < 1.1 has Extent mode only: Length spans the count-1 gaps.
         if mode == "extent" and (numeric or _is_expression(raw)):
@@ -1169,6 +1174,16 @@ def _bind_vector(obj, prop: str, values, what: str):
         if _is_expression(value):
             obj.setExpression(f"{path}.{axis}", value[1:])
     return numeric
+
+
+def _expression_value(obj, expression: str) -> float:
+    """The current value of an '=expression' evaluated in ``obj``'s context; 0 if it can't be."""
+    try:
+        value = obj.evalExpression(expression[1:])
+    except Exception:
+        return 0.0
+    value = getattr(value, "Value", value)
+    return float(value) if isinstance(value, (int, float)) else 0.0
 
 
 def _set_or_bind(obj, prop, value):
