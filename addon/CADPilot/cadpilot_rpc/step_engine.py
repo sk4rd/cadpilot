@@ -33,7 +33,7 @@ import FreeCAD
 
 from cadpilot_rpc import dbglog
 from cadpilot_rpc import step_journal as sj
-from cadpilot_rpc.feature_ops import FEATURE_TYPES, create_feature_gui
+from cadpilot_rpc.feature_ops import FEATURE_TYPES, create_feature_gui, describe_feature_reply
 from cadpilot_rpc.object_factory import (
     create_object_gui,
     delete_object_gui,
@@ -766,7 +766,10 @@ def _execute_one(doc, operation: str, params: dict[str, Any]) -> dict[str, Any]:
                 if getattr(feat, "TypeId", "") == "Sketcher::SketchObject":
                     target = feat
                 _restore_live_sketch(doc, target, params["live_sketch"])
-            return {"success": True, "object_name": feat.Name}
+            # The builders stash what describe_feature reports; left unread here,
+            # it leaked into the next direct cad() call's reply.
+            details = describe_feature_reply(feat, spec)
+            return {**details, "success": True, "object_name": feat.Name}
         except Exception as e:
             return {"success": False, "error": f"{type(e).__name__}: {e}"}
     if operation == "set_anchors":
@@ -1326,14 +1329,18 @@ def _run_steps(doc, records, limit: int | None, upto: int | None) -> dict[str, A
             logger.info("step %d (%s): skipped, not re-executable", rec.index, rec.operation)
             continue
         res = run_record(doc, records, rec)
-        executed.append(
-            {
-                "index": rec.index,
-                "operation": rec.operation,
-                "success": bool(res.get("success")),
-                "error": rec.error,
-            }
-        )
+        entry = {
+            "index": rec.index,
+            "operation": rec.operation,
+            "success": bool(res.get("success")),
+            "error": rec.error,
+        }
+        # What the op itself reported (warnings, what broke, a sketch's DoF, the
+        # body's volume): without it every run_next step needed a second call.
+        details = {k: v for k, v in res.items() if k not in ("success", "error")}
+        if details:
+            entry["result"] = details
+        executed.append(entry)
         if not res.get("success"):
             break
     if skipped:
