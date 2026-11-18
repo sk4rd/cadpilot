@@ -15,8 +15,8 @@ from pathlib import Path
 
 _ROOT = Path(__file__).resolve().parents[1]
 _ADDON = _ROOT / "addon" / "CADPilot"
-_RPC = ast.parse((_ADDON / "rpc_server" / "rpc_server.py").read_text(encoding="utf-8"))
-_ENGINE = ast.parse((_ADDON / "rpc_server" / "step_engine.py").read_text(encoding="utf-8"))
+_RPC = ast.parse((_ADDON / "cadpilot_rpc" / "rpc_server.py").read_text(encoding="utf-8"))
+_ENGINE = ast.parse((_ADDON / "cadpilot_rpc" / "step_engine.py").read_text(encoding="utf-8"))
 _CORE = ast.parse(
     (_ROOT / "src" / "cadpilot" / "operations" / "core.py").read_text(encoding="utf-8")
 )

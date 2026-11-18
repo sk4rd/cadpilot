@@ -16,7 +16,7 @@ import math
 import FreeCAD as App
 import Part
 
-from rpc_server import dbglog
+from cadpilot_rpc import dbglog
 
 logger = dbglog.get_logger("assembly")
 

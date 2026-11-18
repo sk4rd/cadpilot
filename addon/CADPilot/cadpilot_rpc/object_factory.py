@@ -10,9 +10,9 @@ import contextlib
 
 import FreeCAD
 
-from rpc_server import tip_policy
-from rpc_server.geometry_query import body_volumes, model_issues, recompute_report
-from rpc_server.property_mapper import Object, set_object_property
+from cadpilot_rpc import tip_policy
+from cadpilot_rpc.geometry_query import body_volumes, model_issues, recompute_report
+from cadpilot_rpc.property_mapper import Object, set_object_property
 
 
 def create_object_gui(doc_name: str, obj: Object, recompute: bool = True):

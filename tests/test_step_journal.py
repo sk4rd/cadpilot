@@ -9,7 +9,7 @@ _ADDON = Path(__file__).resolve().parents[1] / "addon" / "CADPilot"
 if str(_ADDON) not in sys.path:
     sys.path.insert(0, str(_ADDON))
 
-from rpc_server import step_journal as sj  # noqa: E402
+from cadpilot_rpc import step_journal as sj  # noqa: E402
 
 OPS = {"create_object", "edit_object", "delete_object", "pad", "pocket"}
 
@@ -34,7 +34,7 @@ def test_batch_executor_tolerates_operation_keyed_sub_ops():
     the latter and must not die "unknown action: None" on their INITIAL run
     (they already replayed fine thanks to sub_operation). rpc_server imports
     FreeCAD, so this parses the source instead of importing it."""
-    tree = ast.parse((_ADDON / "rpc_server" / "rpc_server.py").read_text(encoding="utf-8"))
+    tree = ast.parse((_ADDON / "cadpilot_rpc" / "rpc_server.py").read_text(encoding="utf-8"))
     func = next(
         n
         for n in ast.walk(tree)
@@ -539,7 +539,7 @@ def test_only_a_mutating_execute_code_drops_the_plan():
     journal's last snapshot, which an object the user added by hand also
     made true. The snippet's own ``changed`` flag decides.
     """
-    tree = ast.parse((_ADDON / "rpc_server" / "step_engine.py").read_text(encoding="utf-8"))
+    tree = ast.parse((_ADDON / "cadpilot_rpc" / "step_engine.py").read_text(encoding="utf-8"))
     func = next(
         n
         for n in ast.walk(tree)

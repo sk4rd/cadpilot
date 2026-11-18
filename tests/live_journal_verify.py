@@ -106,7 +106,7 @@ def panel(doc, action, select=None, answer="No", shot=None):
         f"""
         import json, FreeCADGui
         from PySide import QtCore, QtWidgets
-        from rpc_server import step_panel
+        from cadpilot_rpc import step_panel
         FreeCADGui.setActiveDocument({doc!r})
         pn = step_panel.ensure_panel()
         pn.setVisible(True)
@@ -547,7 +547,7 @@ user(
     D,
     """
     import FreeCADGui
-    from rpc_server import step_panel
+    from cadpilot_rpc import step_panel
     FreeCADGui.setActiveDocument('LJ_Gone')
     pn = step_panel.ensure_panel()
     pn.refresh()

@@ -29,7 +29,7 @@ src/cadpilot/          # MCP server package (published to PyPI)
 addon/CADPilot/             # FreeCAD workbench addon (copied to FreeCAD's Mod/ dir)
   InitGui.py              # Workbench registration, toolbar/menu, auto-start
   Init.py                 # Path setup
-  rpc_server/
+  cadpilot_rpc/
     rpc_server.py         # FreeCADRPC class — XML-RPC handler, server start/stop
     gui_dispatch.py       # dispatch_to_gui() — queues work onto the GUI thread
     commands.py           # FreeCAD Command classes for toolbar buttons
@@ -88,18 +88,18 @@ During development you can reload the addon **without restarting FreeCAD**:
 
 2. In FreeCAD's Python console (or via `execute_code`) run the one-call restart:
    ```python
-   import rpc_server.rpc_server as rs
+   import cadpilot_rpc.rpc_server as rs
 
    print(rs.restart_rpc_server())
    ```
-   It stops the server, reloads every loaded `rpc_server.*` module in
+   It stops the server, reloads every loaded `cadpilot_rpc.*` module in
    `_RELOAD_ORDER` (dependencies before importers, main module last; a reload
    error is reported in the result and never aborts the restart), then starts
    the server from a deferred self-healing retry loop. The start is deferred
    because the old listening socket is released by a drain thread
    (`server_close` after `shutdown`), and waiting for it inline would block the
    GUI thread; attempts run 1 s apart for up to a minute, after which the
-   watchdog (`rpc_server/watchdog.py`) keeps retrying every 3 s.
+   watchdog (`cadpilot_rpc/watchdog.py`) keeps retrying every 3 s.
 
    The watchdog also covers accidents on its own: a start that failed at
    boot, a `serve_forever` thread that died, a port that was briefly stolen.
@@ -118,7 +118,7 @@ During development you can reload the addon **without restarting FreeCAD**:
    them on the GUI thread via `execute_code_async` (its worker needs no GUI
    dispatch):
    ```python
-   import rpc_server.gui_dispatch as gd
+   import cadpilot_rpc.gui_dispatch as gd
    from PySide import QtCore
    import FreeCADGui
 
@@ -195,6 +195,6 @@ During development you can reload the addon **without restarting FreeCAD**:
 1. Add the operation function in `src/cadpilot/operations/core.py`.
 2. Export it from `src/cadpilot/operations/__init__.py`.
 3. Add the `@mcp.tool()` handler in `src/cadpilot/server.py` that calls the operation.
-4. Add the corresponding RPC method in `addon/CADPilot/rpc_server/rpc_server.py` (on the `FreeCADRPC` class).
+4. Add the corresponding RPC method in `addon/CADPilot/cadpilot_rpc/rpc_server.py` (on the `FreeCADRPC` class).
 5. Add the client proxy method in `src/cadpilot/freecad_client.py`.
 6. If the tool touches the document/GUI, dispatch via `dispatch_to_gui()` in the addon.

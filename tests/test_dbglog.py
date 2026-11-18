@@ -9,7 +9,7 @@ if str(_ADDON) not in sys.path:
     sys.path.insert(0, str(_ADDON))
 
 import pytest  # noqa: E402
-from rpc_server import dbglog  # noqa: E402
+from cadpilot_rpc import dbglog  # noqa: E402
 
 
 @pytest.fixture

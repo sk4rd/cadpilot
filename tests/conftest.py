@@ -33,7 +33,7 @@ def _default_port(monkeypatch):
 def _isolate_addon_logs(tmp_path_factory):
     """Keep the addon log pipeline out of the developer's home directory.
 
-    Importing ``rpc_server.request_log`` (or any addon module calling
+    Importing ``cadpilot_rpc.request_log`` (or any addon module calling
     ``dbglog.get_logger``) runs ``setup_logging()``, which without this would
     create ``<home>/.cadpilot/CADPilot/logs`` on the test machine.
     """

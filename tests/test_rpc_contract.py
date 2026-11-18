@@ -45,7 +45,7 @@ from pathlib import Path
 
 _ROOT = Path(__file__).resolve().parents[1]
 _CLIENT = _ROOT / "src" / "cadpilot" / "freecad_client.py"
-_ADDON = _ROOT / "addon" / "CADPilot" / "rpc_server" / "rpc_server.py"
+_ADDON = _ROOT / "addon" / "CADPilot" / "cadpilot_rpc" / "rpc_server.py"
 _CONFTEST = _ROOT / "tests" / "conftest.py"
 _SRC = _ROOT / "src" / "cadpilot"
 

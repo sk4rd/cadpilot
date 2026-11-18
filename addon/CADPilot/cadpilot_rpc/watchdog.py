@@ -6,7 +6,7 @@ restart cannot leave the endpoint dead:
 
   * A QTimer parented to FreeCAD's main window runs ``tick()`` every 3 s. The
     timer survives module reloads (Qt owns it, the callback is a plain module
-    function) and the tick resolves ``rpc_server.rpc_server`` FRESH each
+    function) and the tick resolves ``cadpilot_rpc.rpc_server`` FRESH each
     time, so it always calls the currently-loaded code.
   * Intent is a main-window property (``CADPilot_RPC_Desired``), not a module
     global, for the same reason. Every start attempt sets it True; the
@@ -28,7 +28,7 @@ import time
 import FreeCADGui
 from PySide import QtCore
 
-from rpc_server import dbglog
+from cadpilot_rpc import dbglog
 
 PROPERTY = "CADPilot_RPC_Watchdog"
 DESIRED_PROPERTY = "CADPilot_RPC_Desired"
@@ -62,7 +62,7 @@ def desired() -> bool:
         return False
     value = mw.property(DESIRED_PROPERTY)
     if value is None:
-        from rpc_server.settings import load_settings
+        from cadpilot_rpc.settings import load_settings
 
         value = bool(load_settings().get("auto_start_rpc", False))
         mw.setProperty(DESIRED_PROPERTY, value)
@@ -101,7 +101,7 @@ def tick() -> dict:
     """One watchdog pass; returns what it saw (handy for debugging)."""
     global _fail_streak
 
-    rs = importlib.import_module("rpc_server.rpc_server")
+    rs = importlib.import_module("cadpilot_rpc.rpc_server")
     info: dict = {
         "desired": desired(),
         "suppressed": time.time() < suppress_until(),

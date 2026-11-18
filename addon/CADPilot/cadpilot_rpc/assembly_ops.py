@@ -15,7 +15,7 @@ import math
 import FreeCAD
 import Part
 
-from rpc_server.geometry_query import (
+from cadpilot_rpc.geometry_query import (
     _face_normal,
     _get_obj,
     _r,

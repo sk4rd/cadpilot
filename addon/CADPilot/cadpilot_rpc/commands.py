@@ -15,8 +15,8 @@ import FreeCADGui
 # in Qt4 and raises AttributeError on FreeCAD 1.1 (PySide6).
 from PySide import QtCore, QtGui, QtWidgets
 
-from rpc_server.ip_filter import validate_allowed_ips
-from rpc_server.settings import load_settings, save_settings
+from cadpilot_rpc.ip_filter import validate_allowed_ips
+from cadpilot_rpc.settings import load_settings, save_settings
 
 
 def _set_actions_checked(object_name: str, value: bool) -> None:
@@ -206,7 +206,7 @@ class ToggleStepPanelCommand:
         }
 
     def Activated(self, checked=0):
-        from rpc_server import step_panel
+        from cadpilot_rpc import step_panel
 
         step_panel.show_step_panel(bool(checked))
         # Several instances of this action can exist (workbench menu + the
@@ -268,7 +268,7 @@ def sync_all_toggle_states() -> None:
 
 def _panel_visible() -> bool:
     try:
-        from rpc_server import step_panel
+        from cadpilot_rpc import step_panel
 
         return step_panel.panel_visible()
     except Exception:

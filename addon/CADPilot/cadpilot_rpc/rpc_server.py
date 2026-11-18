@@ -15,57 +15,57 @@ import FreeCADGui
 import Part  # also pre-imported for execute_code snippets (exec_snippet copies globals)
 from PySide import QtCore
 
-from rpc_server import dbglog, gui_dispatch, step_engine, step_journal, watchdog
-from rpc_server.assembly_ops import (
+from cadpilot_rpc import dbglog, gui_dispatch, step_engine, step_journal, watchdog
+from cadpilot_rpc.assembly_ops import (
     assemble as _assemble,
 )
-from rpc_server.assembly_ops import (
+from cadpilot_rpc.assembly_ops import (
     get_anchors as _get_anchors,
 )
-from rpc_server.assembly_ops import (
+from cadpilot_rpc.assembly_ops import (
     set_anchors as _set_anchors,
 )
-from rpc_server.assembly_ops import (
+from cadpilot_rpc.assembly_ops import (
     verify_assembly as _verify_assembly,
 )
-from rpc_server.commands import register_commands, schedule_toggle_sync
-from rpc_server.feature_ops import (
+from cadpilot_rpc.commands import register_commands, schedule_toggle_sync
+from cadpilot_rpc.feature_ops import (
     FEATURE_TYPES,
     create_feature_gui,
     describe_feature_reply,
 )
-from rpc_server.geometry_query import (
+from cadpilot_rpc.geometry_query import (
     align_shapes as _align_shapes,
 )
-from rpc_server.geometry_query import (
+from cadpilot_rpc.geometry_query import (
     check_interference as _check_interference,
 )
-from rpc_server.geometry_query import (
+from cadpilot_rpc.geometry_query import (
     get_positioning_info as _get_positioning_info,
 )
-from rpc_server.geometry_query import (
+from cadpilot_rpc.geometry_query import (
     get_topology as _get_topology,
 )
-from rpc_server.geometry_query import (
+from cadpilot_rpc.geometry_query import (
     measure_geometry as _measure_geometry,
 )
-from rpc_server.gui_dispatch import (
+from cadpilot_rpc.gui_dispatch import (
     cleanup_waker,
     dispatch_to_gui,
     init_waker,
 )
-from rpc_server.joint_ops import assembly_op as _assembly_op
-from rpc_server.object_factory import (
+from cadpilot_rpc.joint_ops import assembly_op as _assembly_op
+from cadpilot_rpc.object_factory import (
     create_object_gui,
     delete_object_gui,
     edit_object_gui,
     repair_body_tips,
 )
-from rpc_server.property_mapper import Object
-from rpc_server.request_log import LoggedXMLRPCServer
-from rpc_server.serialize import serialize_object
-from rpc_server.settings import load_settings, resolve_port
-from rpc_server.view_manager import save_active_screenshot
+from cadpilot_rpc.property_mapper import Object
+from cadpilot_rpc.request_log import LoggedXMLRPCServer
+from cadpilot_rpc.serialize import serialize_object
+from cadpilot_rpc.settings import load_settings, resolve_port
+from cadpilot_rpc.view_manager import save_active_screenshot
 
 rpc_server_thread = None
 rpc_server_instance = None
@@ -2012,30 +2012,30 @@ def stop_rpc_server():
 # rebind `from X import name` in the modules that imported X, so reloading an
 # importer before its dependency silently keeps the OLD function alive (the
 # property_mapper trap). tests/test_addon_gui_wiring.py pins every top-level
-# `from rpc_server.X import ...` against this list.
+# `from cadpilot_rpc.X import ...` against this list.
 _RELOAD_ORDER = [
-    "rpc_server.dbglog",
-    "rpc_server.ip_filter",
-    "rpc_server.settings",
-    "rpc_server.property_mapper",
-    "rpc_server.serialize",
-    "rpc_server.sketch_spec",
-    "rpc_server.sketcher_ops",
-    "rpc_server.tip_policy",
-    "rpc_server.step_journal",
-    "rpc_server.geometry_query",
-    "rpc_server.gui_dispatch",
-    "rpc_server.trim_ops",
-    "rpc_server.commands",
-    "rpc_server.object_factory",
-    "rpc_server.feature_ops",
-    "rpc_server.assembly_ops",
-    "rpc_server.request_log",
-    "rpc_server.joint_ops",
-    "rpc_server.view_manager",
-    "rpc_server.step_engine",
-    "rpc_server.watchdog",
-    "rpc_server.step_panel",
+    "cadpilot_rpc.dbglog",
+    "cadpilot_rpc.ip_filter",
+    "cadpilot_rpc.settings",
+    "cadpilot_rpc.property_mapper",
+    "cadpilot_rpc.serialize",
+    "cadpilot_rpc.sketch_spec",
+    "cadpilot_rpc.sketcher_ops",
+    "cadpilot_rpc.tip_policy",
+    "cadpilot_rpc.step_journal",
+    "cadpilot_rpc.geometry_query",
+    "cadpilot_rpc.gui_dispatch",
+    "cadpilot_rpc.trim_ops",
+    "cadpilot_rpc.commands",
+    "cadpilot_rpc.object_factory",
+    "cadpilot_rpc.feature_ops",
+    "cadpilot_rpc.assembly_ops",
+    "cadpilot_rpc.request_log",
+    "cadpilot_rpc.joint_ops",
+    "cadpilot_rpc.view_manager",
+    "cadpilot_rpc.step_engine",
+    "cadpilot_rpc.watchdog",
+    "cadpilot_rpc.step_panel",
 ]
 _RESTART_MAX_ATTEMPTS = 60  # 1 s apart; then the watchdog takes over
 _RESTART_SUPPRESS_S = _RESTART_MAX_ATTEMPTS + 30
@@ -2075,12 +2075,12 @@ def restart_rpc_server(port: int | None = None) -> dict:
     names += sorted(
         n
         for n in sys.modules
-        if n.startswith("rpc_server.")
+        if n.startswith("cadpilot_rpc.")
         and n not in _RELOAD_ORDER
-        and n != "rpc_server.rpc_server"
+        and n != "cadpilot_rpc.rpc_server"
         and not n.endswith(".__init__")
     )
-    names.append("rpc_server.rpc_server")
+    names.append("cadpilot_rpc.rpc_server")
     for name in names:
         try:
             importlib.reload(sys.modules[name])
@@ -2104,7 +2104,7 @@ def restart_rpc_server(port: int | None = None) -> dict:
         nonlocal attempts
         attempts += 1
         try:
-            fresh = importlib.import_module("rpc_server.rpc_server")
+            fresh = importlib.import_module("cadpilot_rpc.rpc_server")
             msg = str(fresh.start_rpc_server(port))
         except Exception as e:
             msg = f"start raised: {e}"

@@ -22,7 +22,7 @@ from pathlib import Path
 
 _ADDON = Path(__file__).resolve().parents[1] / "addon" / "CADPilot"
 _INITGUI = ast.parse((_ADDON / "InitGui.py").read_text(encoding="utf-8"))
-_PANEL = ast.parse((_ADDON / "rpc_server" / "step_panel.py").read_text(encoding="utf-8"))
+_PANEL = ast.parse((_ADDON / "cadpilot_rpc" / "step_panel.py").read_text(encoding="utf-8"))
 
 
 def _dotted(node) -> str | None:
@@ -104,7 +104,7 @@ def test_step_column_is_user_resizable():
 
 def test_column_width_is_persisted():
     """A resized Step column must survive a panel rebuild (settings key)."""
-    source = (_ADDON / "rpc_server" / "step_panel.py").read_text(encoding="utf-8")
+    source = (_ADDON / "cadpilot_rpc" / "step_panel.py").read_text(encoding="utf-8")
     assert "step_panel_step_width" in source
 
 
@@ -166,7 +166,7 @@ def test_spotlight_is_human_only_not_a_log_entry():
 def test_detail_meta_elides_instead_of_wrapping():
     """The detail meta line is ONE elided line — a wrapped two-line meta read
     as clutter."""
-    source = (_ADDON / "rpc_server" / "step_panel.py").read_text(encoding="utf-8")
+    source = (_ADDON / "cadpilot_rpc" / "step_panel.py").read_text(encoding="utf-8")
     assert "detail_meta.setWordWrap(False)" in source
     assert "elidedText" in source
 
@@ -318,7 +318,7 @@ def _module_consts(tree):
 
 
 def test_watchdog_property_names_are_single_sourced():
-    watchdog = ast.parse((_ADDON / "rpc_server" / "watchdog.py").read_text(encoding="utf-8"))
+    watchdog = ast.parse((_ADDON / "cadpilot_rpc" / "watchdog.py").read_text(encoding="utf-8"))
     consts = _module_consts(watchdog)
     assert consts.get("PROPERTY") == "CADPilot_RPC_Watchdog"
     assert consts.get("DESIRED_PROPERTY") == "CADPilot_RPC_Desired"
@@ -330,13 +330,13 @@ def test_watchdog_property_names_are_single_sourced():
 
     # The toolbar toggles record user intent through the same helpers, so a
     # deliberate stop sticks while a programmatic one is treated as transient.
-    commands = ast.parse((_ADDON / "rpc_server" / "commands.py").read_text(encoding="utf-8"))
+    commands = ast.parse((_ADDON / "cadpilot_rpc" / "commands.py").read_text(encoding="utf-8"))
     command_calls = {_dotted(c.func) for c in _calls(commands)}
     assert "watchdog.set_desired" in command_calls
 
 
 def _top_level_rpc_deps(tree):
-    """Sibling rpc_server.* modules a file imports at TOP LEVEL.
+    """Sibling cadpilot_rpc.* modules a file imports at TOP LEVEL.
 
     Lazy imports inside functions are exempt: they resolve the module object
     at call time and always see the reloaded code.
@@ -344,30 +344,30 @@ def _top_level_rpc_deps(tree):
     deps = set()
     for node in tree.body:
         if isinstance(node, ast.ImportFrom) and node.module:
-            if node.module.startswith("rpc_server."):
+            if node.module.startswith("cadpilot_rpc."):
                 deps.add(node.module)
-            elif node.module == "rpc_server":
-                deps.update(f"rpc_server.{a.name}" for a in node.names)
+            elif node.module == "cadpilot_rpc":
+                deps.update(f"cadpilot_rpc.{a.name}" for a in node.names)
         elif isinstance(node, ast.Import):
-            deps.update(a.name for a in node.names if a.name.startswith("rpc_server."))
+            deps.update(a.name for a in node.names if a.name.startswith("cadpilot_rpc."))
     return deps
 
 
 def test_restart_reload_order_imports_every_dependency_first():
     # importlib.reload does not rebind `from X import name` in the modules
     # that imported X, so an importer must be reloaded AFTER its dependency.
-    rpc_source = (_ADDON / "rpc_server" / "rpc_server.py").read_text(encoding="utf-8")
+    rpc_source = (_ADDON / "cadpilot_rpc" / "rpc_server.py").read_text(encoding="utf-8")
     order = _module_consts(ast.parse(rpc_source)).get("_RELOAD_ORDER")
     assert order, "_RELOAD_ORDER not found in rpc_server.py"
     # The main module is reloaded last by restart_rpc_server itself.
-    assert "rpc_server.rpc_server" not in order
+    assert "cadpilot_rpc.rpc_server" not in order
 
     index = {name: i for i, name in enumerate(order)}
     assert len(index) == len(order), "duplicate entries in _RELOAD_ORDER"
 
-    for path in sorted((_ADDON / "rpc_server").glob("*.py")):
-        mod = f"rpc_server.{path.stem}"
-        if path.stem == "__init__" or mod == "rpc_server.rpc_server":
+    for path in sorted((_ADDON / "cadpilot_rpc").glob("*.py")):
+        mod = f"cadpilot_rpc.{path.stem}"
+        if path.stem == "__init__" or mod == "cadpilot_rpc.rpc_server":
             continue
         for dep in _top_level_rpc_deps(ast.parse(path.read_text(encoding="utf-8"))):
             assert dep in index, f"{mod} imports {dep}; add it to _RELOAD_ORDER"
@@ -381,7 +381,7 @@ def test_restart_reload_order_imports_every_dependency_first():
 
 def test_initgui_prefers_its_own_folder_over_sys_path():
     """find_addon_dir took the first sys.path entry holding
-    rpc_server/rpc_server.py, which is FreeCADMCP's when both add-ons are
+    cadpilot_rpc/rpc_server.py, which is FreeCADMCP's when both add-ons are
     installed (live: a decoy at Mod/CADPilot won, and the add-on failed to load).
     The code object's filename survives the bare exec() that loses __file__."""
     finder = next(

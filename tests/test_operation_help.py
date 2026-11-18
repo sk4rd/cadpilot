@@ -167,7 +167,7 @@ _INTERNAL_SPEC_KEYS = {"base", "type"}
 
 
 _FEATURE_OPS = (
-    Path(__file__).resolve().parents[1] / "addon" / "CADPilot" / "rpc_server" / "feature_ops.py"
+    Path(__file__).resolve().parents[1] / "addon" / "CADPilot" / "cadpilot_rpc" / "feature_ops.py"
 )
 
 

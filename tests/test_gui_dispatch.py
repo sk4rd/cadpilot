@@ -23,9 +23,13 @@ from pathlib import Path
 import pytest
 
 ADDON = (
-    Path(__file__).resolve().parent.parent / "addon" / "CADPilot" / "rpc_server" / "gui_dispatch.py"
+    Path(__file__).resolve().parent.parent
+    / "addon"
+    / "CADPilot"
+    / "cadpilot_rpc"
+    / "gui_dispatch.py"
 )
-# gui_dispatch does ``from rpc_server import dbglog``; without the addon dir on the
+# gui_dispatch does ``from cadpilot_rpc import dbglog``; without the addon dir on the
 # path this file only ever worked inside a full-suite run (some later test module
 # happened to insert it first), and failed with ModuleNotFoundError on its own.
 if str(ADDON.parent.parent) not in sys.path:

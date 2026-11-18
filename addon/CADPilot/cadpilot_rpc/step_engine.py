@@ -31,16 +31,16 @@ from typing import Any
 
 import FreeCAD
 
-from rpc_server import dbglog
-from rpc_server import step_journal as sj
-from rpc_server.feature_ops import FEATURE_TYPES, create_feature_gui
-from rpc_server.object_factory import (
+from cadpilot_rpc import dbglog
+from cadpilot_rpc import step_journal as sj
+from cadpilot_rpc.feature_ops import FEATURE_TYPES, create_feature_gui
+from cadpilot_rpc.object_factory import (
     create_object_gui,
     delete_object_gui,
     edit_object_gui,
     repair_body_tips,
 )
-from rpc_server.property_mapper import Object
+from cadpilot_rpc.property_mapper import Object
 
 logger = dbglog.get_logger("journal")
 
@@ -761,7 +761,7 @@ def _execute_one(doc, operation: str, params: dict[str, Any]) -> dict[str, Any]:
         except Exception as e:
             return {"success": False, "error": f"{type(e).__name__}: {e}"}
     if operation == "set_anchors":
-        from rpc_server.assembly_ops import set_anchors
+        from cadpilot_rpc.assembly_ops import set_anchors
 
         return _normalize(
             set_anchors(
@@ -773,7 +773,7 @@ def _execute_one(doc, operation: str, params: dict[str, Any]) -> dict[str, Any]:
             )
         )
     if operation == "align_shapes":
-        from rpc_server.geometry_query import align_shapes
+        from cadpilot_rpc.geometry_query import align_shapes
 
         return _normalize(
             align_shapes(
@@ -789,7 +789,7 @@ def _execute_one(doc, operation: str, params: dict[str, Any]) -> dict[str, Any]:
             )
         )
     if operation == "assemble":
-        from rpc_server.assembly_ops import assemble
+        from cadpilot_rpc.assembly_ops import assemble
 
         # Strict on re-run: the original call may have committed a PARTIAL
         # mate set (commit_if=passed>0), but replay must reproduce all of it —
@@ -810,7 +810,7 @@ def _execute_one(doc, operation: str, params: dict[str, Any]) -> dict[str, Any]:
         spec = params.get("spec") or {}
         if not spec.get("operation"):
             return {"success": False, "error": "assembly step has no recorded spec"}
-        from rpc_server.joint_ops import assembly_op
+        from cadpilot_rpc.joint_ops import assembly_op
 
         try:
             res = assembly_op(doc, spec)
@@ -830,7 +830,7 @@ def _execute_one(doc, operation: str, params: dict[str, Any]) -> dict[str, Any]:
         if not code:
             return {"success": False, "error": "execute_code step has no recorded code"}
         code = _replay_ready_code(doc, code)
-        from rpc_server import rpc_server as _rs
+        from cadpilot_rpc import rpc_server as _rs
 
         try:
             _rs.exec_snippet(code)

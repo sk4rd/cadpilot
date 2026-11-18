@@ -28,8 +28,8 @@ import FreeCAD
 import FreeCADGui
 from PySide import QtCore, QtGui, QtWidgets
 
-from rpc_server import step_engine
-from rpc_server import step_journal as sj
+from cadpilot_rpc import step_engine
+from cadpilot_rpc import step_journal as sj
 
 PANEL_NAME = "CADPilotStepPanel"
 PANEL_TITLE = "CADPilot Steps"
@@ -1060,7 +1060,7 @@ QLabel#PanelStatus {{ color: {c["dim"]}; padding: 5px 8px 4px 8px; }}
     def _load_splitter() -> list[int]:
         """The user's region sizes from the previous session, if any."""
         try:
-            from rpc_server.settings import load_settings
+            from cadpilot_rpc.settings import load_settings
 
             sizes = load_settings().get("step_panel_splitter")
             if (
@@ -1076,7 +1076,7 @@ QLabel#PanelStatus {{ color: {c["dim"]}; padding: 5px 8px 4px 8px; }}
     def _save_splitter(self) -> None:
         """Persist region sizes (debounced from splitterMoved)."""
         try:
-            from rpc_server.settings import load_settings, save_settings
+            from cadpilot_rpc.settings import load_settings, save_settings
 
             sizes = self._splitter.sizes()
             if len(sizes) == 3 and all(s > 0 for s in sizes):
@@ -1090,7 +1090,7 @@ QLabel#PanelStatus {{ color: {c["dim"]}; padding: 5px 8px 4px 8px; }}
     def _load_step_width() -> int:
         """The Step column's width from the previous session, else a default."""
         try:
-            from rpc_server.settings import load_settings
+            from cadpilot_rpc.settings import load_settings
 
             width = load_settings().get("step_panel_step_width")
             if isinstance(width, int) and 60 <= width <= 2000:
@@ -1105,7 +1105,7 @@ QLabel#PanelStatus {{ color: {c["dim"]}; padding: 5px 8px 4px 8px; }}
     def _save_step_width(self) -> None:
         """Persist the Step column's width (debounced from sectionResized)."""
         try:
-            from rpc_server.settings import load_settings, save_settings
+            from cadpilot_rpc.settings import load_settings, save_settings
 
             width = self.tree.header().sectionSize(1)
             if width > 0:
@@ -1247,7 +1247,7 @@ def show_step_panel(visible: bool) -> None:
 
 def _load_visible() -> bool:
     try:
-        from rpc_server.settings import load_settings
+        from cadpilot_rpc.settings import load_settings
 
         return bool(load_settings().get("step_panel_visible", False))
     except Exception:
@@ -1256,7 +1256,7 @@ def _load_visible() -> bool:
 
 def _save_visible(value: bool) -> None:
     try:
-        from rpc_server.settings import load_settings, save_settings
+        from cadpilot_rpc.settings import load_settings, save_settings
 
         settings = load_settings()
         settings["step_panel_visible"] = bool(value)

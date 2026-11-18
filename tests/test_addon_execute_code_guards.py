@@ -20,7 +20,7 @@ import ast
 from pathlib import Path
 
 _RPC_SERVER = (
-    Path(__file__).resolve().parents[1] / "addon" / "CADPilot" / "rpc_server" / "rpc_server.py"
+    Path(__file__).resolve().parents[1] / "addon" / "CADPilot" / "cadpilot_rpc" / "rpc_server.py"
 )
 _TREE = ast.parse(_RPC_SERVER.read_text(encoding="utf-8"))
 

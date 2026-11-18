@@ -25,7 +25,9 @@ dragging the mouse in FreeCAD):
 import ast
 from pathlib import Path
 
-_SRC = Path(__file__).resolve().parents[1] / "addon" / "CADPilot" / "rpc_server" / "gui_dispatch.py"
+_SRC = (
+    Path(__file__).resolve().parents[1] / "addon" / "CADPilot" / "cadpilot_rpc" / "gui_dispatch.py"
+)
 _TREE = ast.parse(_SRC.read_text(encoding="utf-8"))
 
 

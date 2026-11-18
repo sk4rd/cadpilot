@@ -15,7 +15,7 @@ if str(_ADDON) not in sys.path:
     sys.path.insert(0, str(_ADDON))
 
 import pytest  # noqa: E402
-from rpc_server import dbglog, request_log  # noqa: E402
+from cadpilot_rpc import dbglog, request_log  # noqa: E402
 
 
 class _StubServer(request_log.LoggedXMLRPCServer):

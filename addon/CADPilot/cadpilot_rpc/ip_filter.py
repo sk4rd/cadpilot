@@ -5,7 +5,7 @@ import re
 from socketserver import ThreadingMixIn
 from xmlrpc.server import SimpleXMLRPCServer
 
-from rpc_server import dbglog
+from cadpilot_rpc import dbglog
 
 
 class FilteredXMLRPCServer(ThreadingMixIn, SimpleXMLRPCServer):

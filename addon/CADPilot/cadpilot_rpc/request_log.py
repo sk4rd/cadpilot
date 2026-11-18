@@ -11,8 +11,8 @@ from __future__ import annotations
 import itertools
 import time
 
-from rpc_server import dbglog
-from rpc_server.ip_filter import FilteredXMLRPCServer
+from cadpilot_rpc import dbglog
+from cadpilot_rpc.ip_filter import FilteredXMLRPCServer
 
 logger = dbglog.get_logger("rpc")
 

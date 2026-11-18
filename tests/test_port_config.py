@@ -11,7 +11,7 @@ ADDON = (
     pathlib.Path(__file__).resolve().parents[1]
     / "addon"
     / "CADPilot"
-    / "rpc_server"
+    / "cadpilot_rpc"
     / "settings.py"
 )
 

@@ -9,7 +9,7 @@ _ADDON = Path(__file__).resolve().parents[1] / "addon" / "CADPilot"
 if str(_ADDON) not in sys.path:
     sys.path.insert(0, str(_ADDON))
 
-from rpc_server import step_journal as sj  # noqa: E402
+from cadpilot_rpc import step_journal as sj  # noqa: E402
 
 
 def test_a_named_constraint_binding_is_found_by_name():
@@ -27,7 +27,7 @@ def test_a_named_binding_survives_an_edit_of_another_constraint():
 
 
 def _engine_func(name):
-    tree = ast.parse((_ADDON / "rpc_server" / "step_engine.py").read_text(encoding="utf-8"))
+    tree = ast.parse((_ADDON / "cadpilot_rpc" / "step_engine.py").read_text(encoding="utf-8"))
     return next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == name)
 
 

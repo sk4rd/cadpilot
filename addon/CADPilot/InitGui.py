@@ -27,7 +27,7 @@
 #   * InitGui.py is re-executed when this workbench is activated, so every
 #     step is idempotent and one-shot hooks are flagged on the main window.
 #
-# Diagnostics go through rpc_server.dbglog (ring buffer + rotating file under
+# Diagnostics go through cadpilot_rpc.dbglog (ring buffer + rotating file under
 # FreeCAD's user data dir + Report View; read them with the get_addon_log tool).
 # Should that import fail, this file falls back to
 # <user data dir>/CADPilot/initgui_debug.log — bootstrap is the one thing that
@@ -55,14 +55,12 @@ def _bootstrap():
     import time
     import traceback
 
-    # ---- locate the addon dir (authoritative: where rpc_server lives) -----
+    # ---- locate the addon dir (authoritative: where cadpilot_rpc lives) -----
     def find_addon_dir():
         candidates = []
         # Own folder first: FreeCAD compiles this file with its path as the
         # code's filename (FreeCADGuiInit.RunInitGuiPy), which survives the
-        # bare exec() that loses __file__. The sys.path scan below took the
-        # first entry holding rpc_server/rpc_server.py, which is FreeCADMCP's
-        # when both add-ons are installed.
+        # bare exec() that loses __file__.
         with contextlib.suppress(Exception):
             here = sys._getframe().f_code.co_filename
             if os.path.basename(here) == "InitGui.py":
@@ -78,22 +76,22 @@ def _bootstrap():
             pass
         candidates += [p for p in sys.path if p]
         for cand in candidates:
-            if cand and os.path.exists(os.path.join(cand, "rpc_server", "rpc_server.py")):
+            if cand and os.path.exists(os.path.join(cand, "cadpilot_rpc", "rpc_server.py")):
                 return os.path.normpath(cand)
         return None
 
     addon_dir = find_addon_dir()
     if addon_dir:
-        # To the front even when FreeCAD already listed it: `import rpc_server`
-        # must find this add-on's package before another add-on's.
+        # To the front even when FreeCAD already listed it: `import cadpilot_rpc`
+        # must find this copy of the add-on before any other.
         with contextlib.suppress(ValueError):
             sys.path.remove(addon_dir)
         sys.path.insert(0, addon_dir)
     if not addon_dir:
         try:
-            import rpc_server  # already importable → derive it
+            import cadpilot_rpc  # already importable → derive it
 
-            addon_dir = os.path.dirname(os.path.dirname(os.path.abspath(rpc_server.__file__)))
+            addon_dir = os.path.dirname(os.path.dirname(os.path.abspath(cadpilot_rpc.__file__)))
         except Exception:
             addon_dir = os.path.dirname(os.path.abspath(sys.argv[0] or "."))
 
@@ -111,7 +109,7 @@ def _bootstrap():
     # framework cannot be imported we still write to a file under FreeCAD's
     # user data dir, because nothing else can report a broken bootstrap.
     try:
-        from rpc_server import dbglog
+        from cadpilot_rpc import dbglog
 
         dbglog.setup_logging()
         _log = dbglog.get_logger("initgui")
@@ -161,14 +159,14 @@ def _bootstrap():
     except Exception:
         dbg_err("recording the addon dir FAILED")
 
-    loaded = sys.modules.get("rpc_server")
+    loaded = sys.modules.get("cadpilot_rpc")
     origin = getattr(loaded, "__file__", None) if loaded is not None else None
     if origin and addon_dir:
         origin_dir = os.path.dirname(os.path.dirname(os.path.abspath(origin)))
         if os.path.realpath(origin_dir) != os.path.realpath(addon_dir):
             dbg(
-                f"another add-on's rpc_server package is already loaded from {origin_dir}; "
-                "CADPilot's modules cannot load beside it"
+                f"another copy of CADPilot is already loaded from {origin_dir}; "
+                "this copy's modules cannot load beside it"
             )
 
     try:
@@ -180,10 +178,10 @@ def _bootstrap():
         return
 
     try:
-        from rpc_server import commands as _commands
+        from cadpilot_rpc import commands as _commands
     except Exception:
         _commands = None
-        dbg_err("bootstrap: rpc_server.commands import FAILED")
+        dbg_err("bootstrap: cadpilot_rpc.commands import FAILED")
 
     # Commands must exist before the workbench menu is built, otherwise
     # FreeCAD warns "Unknown command ..." for every menu entry.
@@ -342,7 +340,7 @@ def _bootstrap():
 
     def setup_panel():
         try:
-            from rpc_server import step_panel
+            from cadpilot_rpc import step_panel
 
             step_panel.ensure_panel()
             dbg("step panel ready")
@@ -353,9 +351,9 @@ def _bootstrap():
         # The RPC watchdog must run no matter which workbench is active, so it
         # lives here (InitGui is the one addon file a hot reload never
         # touches). The timer is parented to the main window and survives
-        # module reloads; see rpc_server/watchdog.py.
+        # module reloads; see cadpilot_rpc/watchdog.py.
         try:
-            from rpc_server import watchdog
+            from cadpilot_rpc import watchdog
 
             dbg(f"rpc {watchdog.ensure_started()}")
         except Exception:
@@ -363,7 +361,7 @@ def _bootstrap():
 
     def autostart():
         try:
-            from rpc_server import rpc_server
+            from cadpilot_rpc import rpc_server
 
             settings = rpc_server.load_settings()
             dbg(f"autostart setting={settings.get('auto_start_rpc')}")

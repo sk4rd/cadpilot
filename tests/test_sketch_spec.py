@@ -10,7 +10,7 @@ _ADDON = Path(__file__).resolve().parents[1] / "addon" / "CADPilot"
 if str(_ADDON) not in sys.path:
     sys.path.insert(0, str(_ADDON))
 
-from rpc_server import sketch_spec as ss  # noqa: E402
+from cadpilot_rpc import sketch_spec as ss  # noqa: E402
 
 
 def _plan(*constraints):

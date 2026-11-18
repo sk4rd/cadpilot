@@ -152,7 +152,7 @@ def addon_roots() -> list[Path]:
 
 
 def addon_source_is_complete(path: Path) -> bool:
-    return (path / "rpc_server" / "rpc_server.py").is_file()
+    return (path / "cadpilot_rpc" / "rpc_server.py").is_file()
 
 
 def _resolve(path: Path) -> tuple[str, str]:
@@ -770,7 +770,7 @@ def format_report(report: dict) -> str:
     for entry in report.get("addon") or []:
         kind = entry.get("kind")
         loc = entry.get("target") if kind == "link" else entry.get("path")
-        state = "ok" if entry.get("complete") else "INCOMPLETE (rpc_server missing)"
+        state = "ok" if entry.get("complete") else "INCOMPLETE (cadpilot_rpc missing)"
         lines.append(f"Addon install : {entry.get('path')}")
         lines.append(f"    {kind} -> {loc} [{state}]")
 

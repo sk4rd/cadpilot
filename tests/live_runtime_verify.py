@@ -30,17 +30,8 @@ FAILURES = []
 DOC = "RuntimeLive"
 OTHER = "RuntimeOther"
 
-# Resolved by suffix inside FreeCAD, so the snippets survive the package rename.
-GD = (
-    "import sys\n"
-    "gd = next(m for n, m in sys.modules.items()"
-    " if n.endswith('.gui_dispatch') and hasattr(m, 'dispatch_to_gui'))\n"
-)
-RS = (
-    "import sys\n"
-    "rs = next(m for n, m in sys.modules.items()"
-    " if n.endswith('.rpc_server') and hasattr(m, 'FreeCADRPC'))\n"
-)
+GD = "import sys\ngd = sys.modules['cadpilot_rpc.gui_dispatch']\n"
+RS = "import sys\nrs = sys.modules['cadpilot_rpc.rpc_server']\n"
 
 
 def check(name, cond, detail=""):

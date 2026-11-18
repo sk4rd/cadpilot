@@ -20,7 +20,7 @@ import Sketcher
 # rpc_server.sketch_spec is not in rpc_server._RELOAD_ORDER, so it is reloaded
 # here, with this module; a plain import would keep its old code alive across
 # a hot restart.
-sketch_spec = importlib.reload(importlib.import_module("rpc_server.sketch_spec"))
+sketch_spec = importlib.reload(importlib.import_module("cadpilot_rpc.sketch_spec"))
 
 # Result of the most recent build_sketch_gui call; read once by
 # describe_feature() via pop_last_sketch_info().

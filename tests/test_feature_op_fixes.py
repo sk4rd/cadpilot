@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-_ADDON = Path(__file__).resolve().parents[1] / "addon" / "CADPilot" / "rpc_server"
+_ADDON = Path(__file__).resolve().parents[1] / "addon" / "CADPilot" / "cadpilot_rpc"
 _FEATURE = ast.parse((_ADDON / "feature_ops.py").read_text(encoding="utf-8"))
 
 
@@ -52,7 +52,7 @@ def gq():
         sys.modules["FreeCAD"] = stub
     if str(_ADDON.parent) not in sys.path:
         sys.path.insert(0, str(_ADDON.parent))
-    from rpc_server import geometry_query
+    from cadpilot_rpc import geometry_query
 
     return geometry_query
 
@@ -217,7 +217,7 @@ def test_no_effect_guard_compares_with_the_predecessor_and_names_the_cause():
 def _tip_policy():
     if str(_ADDON.parent) not in sys.path:
         sys.path.insert(0, str(_ADDON.parent))
-    from rpc_server import tip_policy
+    from cadpilot_rpc import tip_policy
 
     return tip_policy
 
@@ -283,7 +283,7 @@ def _property_mapper():
         sys.modules["FreeCAD"] = stub
     if str(_ADDON.parent) not in sys.path:
         sys.path.insert(0, str(_ADDON.parent))
-    from rpc_server import property_mapper
+    from cadpilot_rpc import property_mapper
 
     return property_mapper
 

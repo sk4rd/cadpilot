@@ -24,7 +24,7 @@ The addon cannot be imported without FreeCAD, so these parse the source.
 import ast
 from pathlib import Path
 
-_ADDON = Path(__file__).resolve().parents[1] / "addon" / "CADPilot" / "rpc_server"
+_ADDON = Path(__file__).resolve().parents[1] / "addon" / "CADPilot" / "cadpilot_rpc"
 _FEATURE = ast.parse((_ADDON / "feature_ops.py").read_text(encoding="utf-8"))
 _SKETCHER = ast.parse((_ADDON / "sketcher_ops.py").read_text(encoding="utf-8"))
 

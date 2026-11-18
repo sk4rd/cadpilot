@@ -25,7 +25,7 @@ from cadpilot.operations import cad_operation
 from cadpilot.operations import core as operations_core
 
 _ADDON = Path(__file__).resolve().parents[1] / "addon" / "CADPilot"
-_RPC = _ADDON / "rpc_server"
+_RPC = _ADDON / "cadpilot_rpc"
 _FEATURE_SRC = (_RPC / "feature_ops.py").read_text(encoding="utf-8")
 _FEATURE = ast.parse(_FEATURE_SRC)
 _SERVER_SRC = (Path(__file__).resolve().parents[1] / "src" / "cadpilot" / "server.py").read_text(
@@ -70,7 +70,7 @@ def pm():
         sys.modules["FreeCAD"] = stub
     if str(_ADDON) not in sys.path:
         sys.path.insert(0, str(_ADDON))
-    from rpc_server import property_mapper
+    from cadpilot_rpc import property_mapper
 
     return property_mapper
 

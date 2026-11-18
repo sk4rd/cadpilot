@@ -12,9 +12,9 @@ from typing import Any
 import FreeCAD
 import Part
 
-from rpc_server import sketcher_ops, tip_policy
-from rpc_server.geometry_query import body_owner, body_volumes, model_issues, recompute_report
-from rpc_server.property_mapper import float_list_expression, format_color, parse_color
+from cadpilot_rpc import sketcher_ops, tip_policy
+from cadpilot_rpc.geometry_query import body_owner, body_volumes, model_issues, recompute_report
+from cadpilot_rpc.property_mapper import float_list_expression, format_color, parse_color
 
 # Selector resolution of the most recent face-based build; read once by
 # describe_feature() (mirrors sketcher_ops' sketch-info mechanism).

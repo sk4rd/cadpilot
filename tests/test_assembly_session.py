@@ -352,7 +352,7 @@ from pathlib import Path  # noqa: E402
 
 _JOINT_OPS = ast.parse(
     (
-        Path(__file__).resolve().parents[1] / "addon" / "CADPilot" / "rpc_server" / "joint_ops.py"
+        Path(__file__).resolve().parents[1] / "addon" / "CADPilot" / "cadpilot_rpc" / "joint_ops.py"
     ).read_text(encoding="utf-8")
 )
 
@@ -374,7 +374,7 @@ def test_anchor_ref_unpacks_the_four_tuple_and_surfaces_errors():
             Path(__file__).resolve().parents[1]
             / "addon"
             / "CADPilot"
-            / "rpc_server"
+            / "cadpilot_rpc"
             / "joint_ops.py"
         ).read_text(encoding="utf-8"),
         _func(_JOINT_OPS, "_resolve_ref"),
@@ -394,7 +394,7 @@ def test_anchor_ref_maps_the_anchor_into_the_link_frame():
             Path(__file__).resolve().parents[1]
             / "addon"
             / "CADPilot"
-            / "rpc_server"
+            / "cadpilot_rpc"
             / "joint_ops.py"
         ).read_text(encoding="utf-8"),
         _func(_JOINT_OPS, "_resolve_ref"),
@@ -437,7 +437,7 @@ def test_mate_reports_landing_and_where_the_jcs_landed():
             Path(__file__).resolve().parents[1]
             / "addon"
             / "CADPilot"
-            / "rpc_server"
+            / "cadpilot_rpc"
             / "joint_ops.py"
         ).read_text(encoding="utf-8"),
         fn,
@@ -461,7 +461,7 @@ def test_landing_warnings_measure_distance_to_each_ref_kinds_intent():
             Path(__file__).resolve().parents[1]
             / "addon"
             / "CADPilot"
-            / "rpc_server"
+            / "cadpilot_rpc"
             / "joint_ops.py"
         ).read_text(encoding="utf-8"),
         fn,

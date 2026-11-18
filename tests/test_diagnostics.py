@@ -67,10 +67,10 @@ def test_user_data_dirs_probe_newest_version_first(tmp_path, monkeypatch):
 def test_addon_status_flags_an_incomplete_install(tmp_path, monkeypatch):
     userdir = _userdir(tmp_path, monkeypatch=monkeypatch)
     good = userdir / "Mod" / "CADPilot"
-    (good / "rpc_server").mkdir(parents=True)
-    (good / "rpc_server" / "rpc_server.py").write_text("# addon\n", encoding="utf-8")
+    (good / "cadpilot_rpc").mkdir(parents=True)
+    (good / "cadpilot_rpc" / "rpc_server.py").write_text("# addon\n", encoding="utf-8")
     (good / "InitGui.py").write_text("# gui\n", encoding="utf-8")
-    (userdir / "Mod" / "CADPilot_Old" / "rpc_server").mkdir(parents=True)  # not CADPilot
+    (userdir / "Mod" / "CADPilot_Old" / "cadpilot_rpc").mkdir(parents=True)  # not CADPilot
 
     entries = diag.addon_status()
     assert len(entries) == 1, "only Mod/CADPilot counts, not every sibling"
@@ -83,8 +83,8 @@ def test_addon_roots_include_where_initgui_says_it_lives(tmp_path, monkeypatch):
     add-on records its own location for diagnose."""
     userdir = _userdir(tmp_path, monkeypatch=monkeypatch)
     store = tmp_path / "store" / "CADPilot"
-    (store / "rpc_server").mkdir(parents=True)
-    (store / "rpc_server" / "rpc_server.py").write_text("# addon\n", encoding="utf-8")
+    (store / "cadpilot_rpc").mkdir(parents=True)
+    (store / "cadpilot_rpc" / "rpc_server.py").write_text("# addon\n", encoding="utf-8")
     (userdir / "CADPilot").mkdir()
     (userdir / "CADPilot" / "addon_dir.txt").write_text(f"{store}\n", encoding="utf-8")
 
@@ -97,8 +97,8 @@ def test_addon_roots_include_where_initgui_says_it_lives(tmp_path, monkeypatch):
 def test_addon_status_reports_a_linked_install(tmp_path, monkeypatch):
     userdir = _userdir(tmp_path, monkeypatch=monkeypatch)
     source = tmp_path / "src-addon"
-    (source / "rpc_server").mkdir(parents=True)
-    (source / "rpc_server" / "rpc_server.py").write_text("# addon\n", encoding="utf-8")
+    (source / "cadpilot_rpc").mkdir(parents=True)
+    (source / "cadpilot_rpc" / "rpc_server.py").write_text("# addon\n", encoding="utf-8")
     link = userdir / "Mod" / "CADPilot"
     try:
         link.symlink_to(source, target_is_directory=True)

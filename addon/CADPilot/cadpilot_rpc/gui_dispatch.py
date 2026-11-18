@@ -41,7 +41,7 @@ from typing import Any
 import FreeCADGui
 from PySide import QtCore, QtGui, QtWidgets
 
-from rpc_server import dbglog
+from cadpilot_rpc import dbglog
 
 logger = dbglog.get_logger("gui")
 

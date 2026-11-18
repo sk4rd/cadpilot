@@ -15,7 +15,7 @@ _ADDON = Path(__file__).resolve().parents[1] / "addon" / "CADPilot"
 if str(_ADDON) not in sys.path:
     sys.path.insert(0, str(_ADDON))
 
-from rpc_server import request_log  # noqa: E402
+from cadpilot_rpc import request_log  # noqa: E402
 
 
 def test_ping_answers_while_another_call_is_blocked():

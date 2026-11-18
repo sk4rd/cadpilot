@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-_RPC = Path(__file__).resolve().parents[1] / "addon" / "CADPilot" / "rpc_server" / "rpc_server.py"
+_RPC = Path(__file__).resolve().parents[1] / "addon" / "CADPilot" / "cadpilot_rpc" / "rpc_server.py"
 _TREE = ast.parse(_RPC.read_text(encoding="utf-8"))
 
 _GUARD_NAMES = {

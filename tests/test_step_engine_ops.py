@@ -10,7 +10,7 @@ import ast
 from pathlib import Path
 
 _ADDON = Path(__file__).resolve().parents[1] / "addon" / "CADPilot"
-_ENGINE = ast.parse((_ADDON / "rpc_server" / "step_engine.py").read_text(encoding="utf-8"))
+_ENGINE = ast.parse((_ADDON / "cadpilot_rpc" / "step_engine.py").read_text(encoding="utf-8"))
 
 JOURNAL_OPS = {
     "status",
@@ -212,7 +212,7 @@ def test_manual_edit_sync_ignores_engine_windows():
         )
 
 
-_RPC = ast.parse((_ADDON / "rpc_server" / "rpc_server.py").read_text(encoding="utf-8"))
+_RPC = ast.parse((_ADDON / "cadpilot_rpc" / "rpc_server.py").read_text(encoding="utf-8"))
 
 ASSEMBLY_JOURNAL_OPS = {"assemble", "align_shapes", "set_anchors", "assembly"}
 

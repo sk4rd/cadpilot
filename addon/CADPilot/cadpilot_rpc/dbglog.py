@@ -255,7 +255,7 @@ class ReportViewHandler(logging.Handler):
 def _settings_overrides() -> tuple[Any, Any, Any]:
     """Best-effort read of the persisted settings; never raises."""
     try:
-        from rpc_server.settings import load_settings
+        from cadpilot_rpc.settings import load_settings
 
         settings = load_settings()
         return settings.get("log_level"), settings.get("log_dir"), settings.get("log_ring_size")
