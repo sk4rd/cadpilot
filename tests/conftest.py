@@ -358,6 +358,9 @@ class FakeFreeCADConnection:
         out, self._taken_user_changes = self._taken_user_changes, {}
         return out
 
+    def take_late_completions(self):
+        return []
+
     def get_addon_log(self, level=None, grep=None, since_seq=0, limit=100):
         self._record("get_addon_log", level, grep, since_seq, limit)
         return self._result(

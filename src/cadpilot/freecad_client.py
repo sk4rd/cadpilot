@@ -129,6 +129,10 @@ class FreeCADConnection:
         # Late completions taken off a reply that a wrapper unwraps to a list
         # (get_objects, list_documents); the next dict reply carries them.
         self._late_completions: list[dict[str, Any]] = []
+        # Every late completion seen, until the tool layer reports it: the dict
+        # a reply carries it on is often reduced to a sentence before the model
+        # sees it.
+        self._late_unreported: list[dict[str, Any]] = []
         self._late_lock = threading.Lock()
         self.server = self._make_proxy(timeout)
         # What the user changed in FreeCAD, as the addon's replies carried it
@@ -156,8 +160,10 @@ class FreeCADConnection:
         if not isinstance(res, dict):
             return res
         with self._late_lock:
-            pending = self._late_completions + list(res.pop("late_completions", None) or [])
+            fresh = list(res.pop("late_completions", None) or [])
+            pending = self._late_completions + fresh
             self._late_completions = []
+            self._late_unreported.extend(fresh)
         if pending:
             res["late_completions"] = pending
         return res
@@ -288,6 +294,12 @@ class FreeCADConnection:
 
     def replies_carried_user_changes(self) -> bool:
         return bool(getattr(self._call, "carried", False))
+
+    def take_late_completions(self) -> list[dict[str, Any]]:
+        """The late completions not yet reported to the model, and forget them."""
+        with self._late_lock:
+            out, self._late_unreported = self._late_unreported, []
+        return out
 
     def take_user_changes(self) -> dict[str, list[dict[str, Any]]]:
         """The user's changes the replies have carried so far, and forget them."""

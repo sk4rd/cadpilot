@@ -154,6 +154,22 @@ def format_user_changes(changes: dict[str, list[dict[str, Any]]]) -> str:
     return "\n".join(lines)
 
 
+def late_completions_text(entries: list[dict[str, Any]]) -> str:
+    """One warning line per call that was reported as timed out but then finished."""
+    lines = []
+    for e in entries:
+        outcome = e.get("outcome", "completed")
+        if e.get("error"):
+            outcome += f" ({e['error']})"
+        req = f"req#{e['request']} " if e.get("request") is not None else ""
+        lines.append(
+            f"Late completion: {req}{e.get('method', '?')} {outcome} after "
+            f"{e.get('finished_after_s', '?')}s, though it was reported as timed out after "
+            f"{e.get('timed_out_after_s', '?')}s. {e.get('note', '')}".rstrip()
+        )
+    return "\n".join(lines)
+
+
 def user_changes_text(freecad: FreeCADConnection, doc_name: str | None = None) -> str:
     """Collect what the user changed for this tool call's reply, formatted.
 

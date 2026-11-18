@@ -69,6 +69,8 @@ _NON_WIRE_METHODS = {
     "begin_tool_call",
     "replies_carried_user_changes",
     "take_user_changes",
+    # Hands the late completions replies carried to the tool layer.
+    "take_late_completions",
 }
 
 

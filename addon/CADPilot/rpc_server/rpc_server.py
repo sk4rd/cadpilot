@@ -264,7 +264,7 @@ def _commit_in_transaction(doc, fn, task_id: str, code: str):
         raise
     if not wrapped:
         return out
-    doc.commitTransaction()
+    step_engine.commit_transaction(doc)
     if step_engine.undo_token(doc) != token_before:
         # Recorded only once the commit proved it changed something: a commit
         # that only copies shapes out must not drop a pending plan.
@@ -454,6 +454,9 @@ class FreeCADRPC:
             late = gui_dispatch.take_late_completions()
             if late:
                 result["late_completions"] = late
+            changes = step_engine.take_user_changes()
+            if changes:
+                result["user_changes"] = changes
         return result
 
     def ping(self):
@@ -571,6 +574,7 @@ class FreeCADRPC:
             except Exception:
                 if in_transaction:
                     doc.abortTransaction()
+                    _recompute_quietly(doc)
                 raise
             ok = res is True or (isinstance(res, dict) and res.get("success"))
             should_commit = ok if commit_if is None else bool(commit_if(res))
@@ -606,7 +610,7 @@ class FreeCADRPC:
                             objects_before=objects_before,
                             objects_after=objects,
                         )
-                    doc.commitTransaction()
+                    step_engine.commit_transaction(doc)
                     step_engine.downgrade_if_no_undo(doc, rec, token_before)
                     # Did an undo entry really land? A committed transaction that
                     # changed nothing (a no-op edit, a rejected same-value write)
@@ -624,6 +628,7 @@ class FreeCADRPC:
                     )
                 else:
                     doc.abortTransaction()
+                    _recompute_quietly(doc)
                     dbglog.get_logger("tx").info("aborted transaction %r", tx_name)
             # Whenever a transaction was committed the document changed, so the
             # caller needs the fingerprint even for partial batch failures —
@@ -642,7 +647,7 @@ class FreeCADRPC:
                     except Exception:
                         objects = []
             if tmp_path is None:
-                return res, None, in_transaction, objects, undoable
+                return res, None, in_transaction, objects, undoable, tx_name
             shot = save_active_screenshot(
                 tmp_path,
                 screenshot.get("view_name", "Isometric"),
@@ -650,7 +655,14 @@ class FreeCADRPC:
                 screenshot.get("height"),
                 screenshot.get("focus_object"),
             )
-            return res, tmp_path if shot is True else None, in_transaction, objects, undoable
+            return (
+                res,
+                tmp_path if shot is True else None,
+                in_transaction,
+                objects,
+                undoable,
+                tx_name,
+            )
 
         try:
             out = dispatch_to_gui(task)
@@ -660,6 +672,7 @@ class FreeCADRPC:
             in_transaction = out[2] if len(out) > 2 else False
             objects = out[3] if len(out) > 3 else None
             undoable = out[4] if len(out) > 4 else None
+            tx_name = out[5] if len(out) > 5 else None
             if isinstance(res, dict):
                 result = {**success_payload, **res}
             elif res is True:
@@ -668,6 +681,8 @@ class FreeCADRPC:
                 return _err(res)
             if transaction:
                 result["transaction"] = in_transaction
+                if in_transaction and tx_name:
+                    result["transaction_name"] = tx_name
                 if undoable is not None:
                     # Distinguishes "a transaction was open" (what callers used to
                     # read as a step that can be undone) from "an undo entry
@@ -1623,7 +1638,7 @@ class FreeCADRPC:
             tx_changed = False
             if wrapped:
                 with contextlib.suppress(Exception):
-                    doc.commitTransaction()  # empty -> no undo entry
+                    step_engine.commit_transaction(doc)  # empty -> no undo entry
                     tx_changed = step_engine.undo_token(doc) != token_before
             changed_docs = step_engine.changed_documents(docs_before)
             # The step belongs to the document whose transaction we own, and is
@@ -1637,7 +1652,7 @@ class FreeCADRPC:
             # a read-only one stays non-atomic, so rollback neither stops at it
             # nor re-runs it.
             try:
-                if doc is not None:
+                if doc is not None and tx_changed:
                     step_engine.append_execute_code(
                         doc,
                         code=code,
@@ -1897,6 +1912,12 @@ class FreeCADRPC:
         return save_active_screenshot(save_path, view_name, width, height, focus_object)
 
 
+def _recompute_quietly(doc) -> None:
+    """Recompute after an abort: abortTransaction restores the objects but leaves them Touched."""
+    with contextlib.suppress(Exception):
+        doc.recompute()
+
+
 def start_rpc_server(port=None):
     global rpc_server_thread, rpc_server_instance
 
@@ -1998,6 +2019,7 @@ _RELOAD_ORDER = [
     "rpc_server.settings",
     "rpc_server.property_mapper",
     "rpc_server.serialize",
+    "rpc_server.sketch_spec",
     "rpc_server.sketcher_ops",
     "rpc_server.tip_policy",
     "rpc_server.step_journal",

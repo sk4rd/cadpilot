@@ -65,3 +65,13 @@ def test_client_port_follows_the_environment(monkeypatch):
     monkeypatch.setenv("CADPILOT_PORT", "9879")
     assert FreeCADConnection()._uri.endswith(":9879")
     assert FreeCADConnection(port=9880)._uri.endswith(":9880")
+
+
+def test_late_completions_are_reported_once(monkeypatch):
+    c = FreeCADConnection(port=9)
+    monkeypatch.setattr(
+        c, "_invoke_retrying", lambda *a: {"success": True, "late_completions": [{"request": 4}]}
+    )
+    assert c._invoke("ping")["late_completions"] == [{"request": 4}]
+    assert c.take_late_completions() == [{"request": 4}]
+    assert c.take_late_completions() == []

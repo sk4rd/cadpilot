@@ -176,7 +176,11 @@ def test_async_status_updates_are_posted_not_awaited():
 
 def test_commit_runs_on_the_gui_thread_in_one_transaction():
     calls = _calls(_func("_commit_in_transaction"))
-    assert {"doc.openTransaction", "doc.commitTransaction", "doc.abortTransaction"} <= calls
+    assert {
+        "doc.openTransaction",
+        "step_engine.commit_transaction",
+        "doc.abortTransaction",
+    } <= calls
     commit = _func("commit")
     dispatch = next(
         c

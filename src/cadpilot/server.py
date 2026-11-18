@@ -39,6 +39,7 @@ from .operations import (
     get_topology_operation,
     get_view_operation,
     inspect_freecad_operation,
+    late_completions_text,
     list_documents_operation,
     measure_geometry_operation,
     operation_help_operation,
@@ -217,10 +218,14 @@ def _reports_user_changes(tool):
         conn = state.freecad_connection
         if conn is None:
             return response
-        note = user_changes_text(conn, kwargs.get("doc_name"))
-        if not note:
+        notes = [
+            late_completions_text(conn.take_late_completions()),
+            user_changes_text(conn, kwargs.get("doc_name")),
+        ]
+        notes = [n for n in notes if n]
+        if not notes:
             return response
-        return [TextContent(type="text", text=note), *response]
+        return [TextContent(type="text", text="\n\n".join(notes)), *response]
 
     return wrapper
 
