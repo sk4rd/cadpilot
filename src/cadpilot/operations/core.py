@@ -1532,6 +1532,11 @@ def step_control_operation(
     _set_last_doc(doc_name)
     if action not in _STEP_ACTIONS:
         return text_response(f"unknown action '{action}'. Supported: {', '.join(_STEP_ACTIONS)}")
+    if action == "status" and not (params or {}).get("full"):
+        # Full records carry every step's params (a 140-cell spreadsheet, every
+        # sketch's geometry): tens of KB to learn which step is next. The rows
+        # are what a caller reads; full=true still returns everything.
+        params = {"summary": True, **(params or {})}
     spec: dict[str, Any] = {
         "operation": action,
         "index": index,

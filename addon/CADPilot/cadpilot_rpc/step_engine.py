@@ -1018,11 +1018,36 @@ def note_panel_action(doc, spec: dict[str, Any], result: dict[str, Any] | None) 
     )
 
 
+_COMPACT_ALL_UP_TO = 12
+_COMPACT_DONE_TAIL = 3
+
+
 def _compact_journal(doc) -> dict[str, Any]:
-    """The steps list without params — small enough to attach to every reply."""
+    """The steps without params — small enough to attach to every reply.
+
+    A long journal is cut to the rows a caller acts on: every step that is not
+    plainly done (planned, failed, stale, edited by hand) and the last few done
+    ones. Listing all of them made each reply of an 84-step build ~10 KB of rows
+    the caller already had; ``status`` still lists every step.
+    """
     records = read_journal(doc)
     stale = {s["index"]: s["reason"] for s in stale_steps(doc, records)}
-    return {
+
+    def flagged(r) -> bool:
+        return (
+            r.state != sj.STATE_DONE
+            or bool(r.error)
+            or r.index in stale
+            or bool((r.params or {}).get("user_edited"))
+        )
+
+    shown = records
+    if len(records) > _COMPACT_ALL_UP_TO:
+        tail = {
+            r.index for r in [r for r in records if r.state == sj.STATE_DONE][-_COMPACT_DONE_TAIL:]
+        }
+        shown = [r for r in records if flagged(r) or r.index in tail]
+    out = {
         "count": len(records),
         "done": sj.done_count(records),
         "planned": sj.pending_count(records),
@@ -1039,9 +1064,14 @@ def _compact_journal(doc) -> dict[str, Any]:
                 **({"user_edited": True} if (r.params or {}).get("user_edited") else {}),
                 **({"stale": stale[r.index]} if r.index in stale else {}),
             }
-            for r in records
+            for r in shown
         ],
     }
+    if len(shown) < len(records):
+        out["steps_omitted"] = (
+            f"{len(records) - len(shown)} plainly done step(s) left out; status lists every step"
+        )
+    return out
 
 
 def _apply_op(doc, spec: dict[str, Any]) -> dict[str, Any]:

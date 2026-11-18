@@ -777,17 +777,16 @@ Housekeeping:
   reset         forget the whole journal (pass confirm=true). It only empties
                 the log: it never touches the document, the undo stack or any
                 object's visibility
-  status        full records incl. params + meta (plan description).
-                params.summary=true returns one compact row per step
-                (index/state/operation/label/result, no params) instead —
-                use it to see where the session stands without paying for
-                every recorded snippet; params.limit/offset page the full
-                records
+  status        one compact row per step (index/state/operation/label/
+                result, no params) + meta (plan description).
+                params.full=true returns the full records incl. params, which
+                params.limit/offset page
 
 Every mutating action's reply carries a compact `journal` snapshot (counts,
 drift flag, per-step index/state/label/error/accepted, and `stale` for a done
-step the user undid or deleted) — one call tells you
-the new state; use status only when you need the full params.
+step the user undid or deleted) — one call tells you the new state. Past 12
+steps it lists only the steps that are not plainly done plus the last three
+done ones (`steps_omitted` says how many it left out); status lists them all.
 
 `rollback_to`/`reexecute`/`replay` refuse to cross a non-atomic step unless
 force=true. An execute_code run that changed the document is wrapped in a

@@ -115,7 +115,7 @@ check(
 notes = c.take_plan_notes()
 check("the reply says the plan moved", any("now steps 4-5" in n for n in notes), str(notes))
 status = reply_json(ops.step_control_operation(c, DOC, "status"))
-states = [(r["operation"], r["state"]) for r in status.get("records", [])]
+states = [(r["operation"], r["state"]) for r in status.get("steps", [])]
 check(
     "the plan survives, after the change",
     states
@@ -137,7 +137,7 @@ reply = text(
 )
 status = reply_json(ops.step_control_operation(c, DOC, "status"))
 check("a read-only snippet says so", "read-only" in reply, reply[-200:])
-check("and adds no step", len(status.get("records", [])) == 5, str(len(status.get("records", []))))
+check("and adds no step", len(status.get("steps", [])) == 5, str(len(status.get("steps", []))))
 
 # --- the plan still runs ----------------------------------------------------------
 res = reply_json(ops.step_control_operation(c, DOC, "run_next"))

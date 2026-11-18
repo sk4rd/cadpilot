@@ -93,8 +93,15 @@ def test_step_control_forwards_reset_confirm(fake_freecad):
 
 
 def test_step_control_defaults_params_to_empty_dict(fake_freecad):
-    step_control_operation(fake_freecad, "Doc", "status")
+    step_control_operation(fake_freecad, "Doc", "run_next")
     assert fake_freecad.calls[-1][1][1]["params"] == {}
+
+
+def test_status_is_compact_unless_full_is_asked_for(fake_freecad):
+    step_control_operation(fake_freecad, "Doc", "status")
+    assert fake_freecad.calls[-1][1][1]["params"] == {"summary": True}
+    step_control_operation(fake_freecad, "Doc", "status", params={"full": True})
+    assert fake_freecad.calls[-1][1][1]["params"] == {"full": True}
 
 
 def test_step_control_forwards_review_actions(fake_freecad):
