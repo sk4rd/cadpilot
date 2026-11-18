@@ -220,6 +220,7 @@ def _reports_user_changes(tool):
             return response
         notes = [
             late_completions_text(conn.take_late_completions()),
+            "\n".join(f"Plan: {n}" for n in conn.take_plan_notes()),
             user_changes_text(conn, kwargs.get("doc_name")),
         ]
         notes = [n for n in notes if n]

@@ -181,26 +181,21 @@ def test_axis_joints_name_the_axis_they_use_instead_of_landing_tangent():
     )
 
 
-def test_read_only_execute_code_appends_and_plan_removal_is_by_state():
-    """Read-only inspections are APPENDED at the very end, never inserted
-    before a pending plan: insertion shifted every planned step's index, so an
-    MCP client that read "pocket = step 11" and then called reexecute(11) hit
-    the inspection instead (live: JTest). Appending is safe because the plan
-    cursor walks by STATE and run_to's upto bound is cursor-based — the old
-    done_count >= upto comparison is what broke under trailing done records
-    and motivated the insertion in the first place. Plan removal must key on
-    STATE (drop_planned), not on slicing from planned_tail_start: with done
-    records behind the plan the tail is no longer a trailing run, and the
-    slice would remove nothing, letting a stale plan survive a commit."""
+def test_commits_keep_the_plan_and_inspections_append():
+    """A step that ran outside the plan goes BEFORE the planned steps, where the
+    undo stack has it, and the plan survives: dropping it threw away a 9-step
+    plan without a word (live: a snippet that only called sketch.solve()).
+    Read-only inspections are still APPENDED behind the plan, since inserting
+    them shifted every planned step's index (live: JTest); the plan cursor walks
+    by STATE and run_to's upto bound is cursor-based."""
     body = _func(ENGINE, "append_execute_code")
     assert "append" in _calls(body)
-    assert "insert" not in _calls(body)
-    assert "drop_planned" in _calls(body), (
-        "plan invalidation must remove planned records by STATE, not position"
-    )
+    assert "insert_before_plan" in _calls(body)
+    assert "drop_planned" not in _calls(body)
     assert "planned_tail_start" not in _attrs(body)
     commit = _func(ENGINE, "record_commit")
-    assert "drop_planned" in _calls(commit)
+    assert "insert_before_plan" in _calls(commit)
+    assert "drop_planned" not in _calls(commit)
     assert "planned_tail_start" not in _attrs(commit)
     run = _func(ENGINE, "_run_steps")
     src = ast.unparse(run)

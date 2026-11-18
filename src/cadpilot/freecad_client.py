@@ -138,6 +138,8 @@ class FreeCADConnection:
         # What the user changed in FreeCAD, as the addon's replies carried it
         # ({document: [event, ...]}), until the tool layer hands it to the model.
         self._user_changes: dict[str, list[dict[str, Any]]] = {}
+        # Planned steps a change was recorded ahead of, renumbered (addon text).
+        self._plan_notes: list[str] = []
         self._changes_lock = threading.Lock()
         self._call = threading.local()
 
@@ -280,6 +282,9 @@ class FreeCADConnection:
             return res
 
     def _capture_user_changes(self, result: Any) -> None:
+        if isinstance(result, dict) and result.get("plan_notes"):
+            with self._changes_lock:
+                self._plan_notes.extend(str(n) for n in result.pop("plan_notes"))
         if not isinstance(result, dict) or "user_changes" not in result:
             return
         changes = result.pop("user_changes") or {}
@@ -294,6 +299,12 @@ class FreeCADConnection:
 
     def replies_carried_user_changes(self) -> bool:
         return bool(getattr(self._call, "carried", False))
+
+    def take_plan_notes(self) -> list[str]:
+        """The plan renumberings replies have carried so far, and forget them."""
+        with self._changes_lock:
+            out, self._plan_notes = self._plan_notes, []
+        return out
 
     def take_late_completions(self) -> list[dict[str, Any]]:
         """The late completions not yet reported to the model, and forget them."""

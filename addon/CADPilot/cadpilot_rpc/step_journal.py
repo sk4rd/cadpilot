@@ -853,6 +853,35 @@ def drop_planned(records: list[StepRecord]) -> int:
     return dropped
 
 
+def insert_before_plan(records: list[StepRecord], rec: StepRecord) -> int:
+    """Put a step that just ran ahead of the planned ones; returns how many follow it.
+
+    The journal then lists steps in the order they happened, as FreeCAD's undo
+    stack does: rollback trusts the stack only when the two agree. Dropping the
+    plan instead threw away every planned step without telling anyone (live: a
+    snippet that only called sketch.solve() wiped a 9-step plan).
+    """
+    first = next((i for i, r in enumerate(records) if r.state == STATE_PLANNED), None)
+    if first is None:
+        records.append(rec)
+        return 0
+    records.insert(first, rec)
+    return sum(1 for r in records[first + 1 :] if r.state == STATE_PLANNED)
+
+
+def plan_shift_note(records: list[StepRecord], rec: StepRecord, moved: int) -> str:
+    """What the caller must know after insert_before_plan moved planned steps on."""
+    if not moved:
+        return ""
+    planned = [i + 1 for i, r in enumerate(records) if r.state == STATE_PLANNED]
+    where = next(i + 1 for i, r in enumerate(records) if r is rec)
+    span = f"{planned[0]}-{planned[-1]}" if len(planned) > 1 else str(planned[0])
+    return (
+        f"step {where} ({rec.label or rec.operation}) was recorded before the {moved} planned "
+        f"step(s), which kept their order and are now steps {span}: use the new numbers."
+    )
+
+
 def set_plan(
     records: list[StepRecord], steps: list[dict[str, Any]], executable_ops: set[str]
 ) -> list[StepRecord]:

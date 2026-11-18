@@ -531,13 +531,10 @@ def test_plan_rollback_reports_accepted():
     assert sj.plan_rollback(recs, 0)["accepted"] == [2]
 
 
-def test_only_a_mutating_execute_code_drops_the_plan():
-    """A read-only execute_code must not destroy a pending plan.
-
-    Recording an execute_code commit used to drop the planned tail
-    unconditionally, and then whenever the object set differed from the
-    journal's last snapshot, which an object the user added by hand also
-    made true. The snippet's own ``changed`` flag decides.
+def test_only_a_mutating_execute_code_goes_before_the_plan():
+    """A pending plan survives any execute_code; the snippet's own ``changed``
+    flag decides whether it is recorded ahead of the plan (a change, where the
+    undo stack has it) or appended behind it (a read-only inspection).
     """
     tree = ast.parse((_ADDON / "cadpilot_rpc" / "step_engine.py").read_text(encoding="utf-8"))
     func = next(
@@ -548,9 +545,34 @@ def test_only_a_mutating_execute_code_drops_the_plan():
     guards = [
         n
         for n in ast.walk(func)
-        if isinstance(n, ast.If) and any("drop_planned" in ast.unparse(s) for s in n.body)
+        if isinstance(n, ast.If) and any("insert_before_plan" in ast.unparse(s) for s in n.body)
     ]
     assert guards and all(ast.unparse(g.test) == "changed" for g in guards)
+    assert "drop_planned" not in ast.unparse(func)
+
+
+def test_insert_before_plan_keeps_order_and_reports_the_shift():
+    recs = [
+        _rec("variables", 1),
+        _rec("sketch", 2),
+        _rec("pad", 3, state=sj.STATE_PLANNED),
+        _rec("pocket", 4, state=sj.STATE_PLANNED),
+    ]
+    rec = _rec("execute_code", 0)
+    rec.label = "execute_code: set Body.Label"
+    assert sj.insert_before_plan(recs, rec) == 2
+    assert [r.operation for r in recs] == ["variables", "sketch", "execute_code", "pad", "pocket"]
+    note = sj.plan_shift_note(recs, rec, 2)
+    assert "step 3 (execute_code: set Body.Label)" in note and "now steps 4-5" in note
+
+
+def test_insert_before_plan_appends_when_nothing_is_planned():
+    recs = [_rec("variables", 1)]
+    rec = _rec("pad", 0)
+    assert sj.insert_before_plan(recs, rec) == 0
+    assert recs[-1] is rec
+    assert sj.plan_shift_note(recs, rec, 0) == ""
+
 
 
 # --- manual-edit sync (pure half) -------------------------------------------

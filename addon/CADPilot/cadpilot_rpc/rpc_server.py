@@ -457,6 +457,9 @@ class FreeCADRPC:
             changes = step_engine.take_user_changes()
             if changes:
                 result["user_changes"] = changes
+            plan_notes = step_engine.take_plan_notes()
+            if plan_notes:
+                result["plan_notes"] = plan_notes
         return result
 
     def ping(self):

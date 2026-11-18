@@ -508,13 +508,6 @@ def record_commit(
     """
     try:
         records = read_journal(doc)
-        # A new commit invalidates the not-yet-executed plan: it was authored
-        # against a document state that no longer exists. The plan is not
-        # necessarily a trailing run (inspections append behind it, a snapshot
-        # marker may sit there too), so the removal keys on STATE, not
-        # position — slicing from planned_tail_start would remove nothing and
-        # a stale plan would survive the commit.
-        sj.drop_planned(records)
         params = dict(params or {})
         if operation == "sketch" or operation in sj.SKETCH_EDIT_OPS:
             _note_sketch_signature(doc, params, objects_before or [], objects_after or [])
@@ -531,8 +524,9 @@ def record_commit(
             objects_after=list(objects_after or []),
             timestamp=sj.stamp(),
         )
-        records.append(rec)
+        moved = sj.insert_before_plan(records, rec)
         write_journal(doc, records)
+        _note_plan_shift(records, rec, moved)
         return rec
     except Exception as e:
         FreeCAD.Console.PrintWarning(f"CADPilot: step journal write failed: {e}\n")
@@ -583,6 +577,25 @@ def changed_documents(before: dict[str, tuple]) -> list[str]:
     return sorted(name for name, token in after.items() if token != before.get(name))
 
 
+_PLAN_NOTES: list[str] = []
+_PLAN_NOTES_LOCK = threading.Lock()
+
+
+def _note_plan_shift(records, rec, moved: int) -> None:
+    note = sj.plan_shift_note(records, rec, moved)
+    if note:
+        with _PLAN_NOTES_LOCK:
+            _PLAN_NOTES.append(note)
+
+
+def take_plan_notes() -> list[str]:
+    """Plan renumberings since the last reply, for the RPC layer to attach."""
+    with _PLAN_NOTES_LOCK:
+        out = list(_PLAN_NOTES)
+        _PLAN_NOTES.clear()
+    return out
+
+
 def append_execute_code(
     doc,
     *,
@@ -606,41 +619,37 @@ def append_execute_code(
     try:
         records = read_journal(doc)
         after = _object_names(doc)
-        # A read-only execute_code — inspecting the model, the common case —
-        # must NOT destroy a pending plan. The snippet's own undo entry is the
-        # test: comparing object sets against the journal's last snapshot also
-        # counted every object the USER had added since, and dropped the plan.
-        if changed:
-            sj.drop_planned(records)
-        # The inspection is APPENDED at the very end, even behind a pending
-        # plan. Inserting it before the tail shifted every planned step's
-        # index, so an MCP client that read "pocket = step 11" and then called
-        # reexecute(11) hit the inspection instead (live: JTest). A done
-        # record behind the plan is harmless — the plan cursor walks by STATE
-        # and run_to's upto check is cursor-based — while stable indices are
-        # what index-addressed verbs (run_to/reexecute/rollback_to) run on.
-        records.append(
-            sj.StepRecord(
-                index=len(records) + 1,
-                state=sj.STATE_DONE,
-                operation="execute_code",
-                # One label, wherever it is read (panel row, status, the reply's
-                # journal snapshot): the snippet's leading comment when it wrote
-                # one, then what it DID. See sj.execute_code_label.
-                label=sj.execute_code_label(code, changed, list(objects_before or []), after),
-                # The code is ALWAYS kept, read-only or not: the panel shows it
-                # as the step's detail, and without it a row is an opaque "{}".
-                params={"code": code},
-                transaction=(transaction or "CADPilot: execute_code") if changed else "",
-                atomic=changed,
-                mutated=changed,
-                executable=changed,
-                objects_before=list(objects_before or []),
-                objects_after=after,
-                timestamp=sj.stamp(),
-            )
+        # A read-only inspection is APPENDED behind a pending plan: inserting it
+        # shifted every planned step's index, so an MCP client that read
+        # "pocket = step 11" and then called reexecute(11) hit the inspection
+        # instead (live: JTest). A change goes before the plan instead, where
+        # the undo stack has it, and the reply reports the new numbers.
+        rec = sj.StepRecord(
+            index=len(records) + 1,
+            state=sj.STATE_DONE,
+            operation="execute_code",
+            # One label, wherever it is read (panel row, status, the reply's
+            # journal snapshot): the snippet's leading comment when it wrote
+            # one, then what it DID. See sj.execute_code_label.
+            label=sj.execute_code_label(code, changed, list(objects_before or []), after),
+            # The code is ALWAYS kept, read-only or not: the panel shows it
+            # as the step's detail, and without it a row is an opaque "{}".
+            params={"code": code},
+            transaction=(transaction or "CADPilot: execute_code") if changed else "",
+            atomic=changed,
+            mutated=changed,
+            executable=changed,
+            objects_before=list(objects_before or []),
+            objects_after=after,
+            timestamp=sj.stamp(),
         )
+        if changed:
+            moved = sj.insert_before_plan(records, rec)
+        else:
+            records.append(rec)
+            moved = 0
         write_journal(doc, records)  # reindexes: list position == step number
+        _note_plan_shift(records, rec, moved)
     except Exception as e:
         FreeCAD.Console.PrintWarning(f"CADPilot: step journal write failed: {e}\n")
 

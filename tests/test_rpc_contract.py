@@ -71,6 +71,7 @@ _NON_WIRE_METHODS = {
     "take_user_changes",
     # Hands the late completions replies carried to the tool layer.
     "take_late_completions",
+    "take_plan_notes",
 }
 
 
