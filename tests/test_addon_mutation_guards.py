@@ -421,3 +421,22 @@ def test_edit_object_reaches_dynamic_spreadsheet_cells_and_explains_placement():
     # One setter, two callers: the variables op must not keep a second copy.
     assert "set_spreadsheet_cells" in _names(_func(FEATURE, "_build_variables"))
     assert "bool is not a valid value" not in ast.unparse(_func(FEATURE, "_build_variables"))
+
+
+def test_edit_object_refuses_raw_writes_to_a_sketchs_lists():
+    """{"Geometry": []} through edit_object wiped the geometry, left 14
+    constraints on geometry that was gone, and reported success (live)."""
+    factory = _tree("object_factory.py")
+    lists = next(
+        ast.literal_eval(n.value)
+        for n in factory.body
+        if isinstance(n, ast.Assign) and getattr(n.targets[0], "id", "") == "_SKETCH_LISTS"
+    )
+    assert {"Geometry", "Constraints"} <= set(lists)
+    guard = _func(factory, "_raw_sketch_write")
+    assert "Sketcher::SketchObject" in _strings_in(guard)
+    assert "sketch_edit" in ast.unparse(guard), "the refusal points to the op that can do it"
+    edit = ast.unparse(_func(factory, "edit_object_gui"))
+    assert edit.index("_raw_sketch_write") < edit.index("set_object_property"), (
+        "the guard runs before anything is written"
+    )

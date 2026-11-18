@@ -805,6 +805,20 @@ def m2_sketch_edit_warns_about_broken_dependents():
     )
 
 
+def m2_edit_object_refuses_raw_sketch_lists():
+    doc = "SkRaw"
+    _plate(doc)
+    before = inspect(doc, "Base")
+    res = cad("edit_object", doc, "Base", Geometry=[])
+    check(
+        "M2 edit_object refuses {'Geometry': []} on a sketch and points to sketch_edit",
+        not ok(res) and "sketch_edit" in err(res) and inspect(doc, "Base") == before,
+        err(res),
+    )
+    res = cad("edit_object", doc, "Base", Constraints=[])
+    check("M2 edit_object refuses {'Constraints': []} too", not ok(res), err(res))
+
+
 CHECKS = [
     m1_diagnostics_name_the_spec_entry,
     m7_lists_expand_into_one_constraint_per_item,
@@ -824,6 +838,7 @@ CHECKS = [
     m2_sketch_edit_works_on_a_hand_edited_sketch,
     m2_sketch_edit_refuses_a_sketch_open_in_the_editor,
     m2_sketch_edit_warns_about_broken_dependents,
+    m2_edit_object_refuses_raw_sketch_lists,
 ]
 
 if __name__ == "__main__":

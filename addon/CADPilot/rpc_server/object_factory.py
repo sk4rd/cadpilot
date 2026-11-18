@@ -43,6 +43,26 @@ def create_object_gui(doc_name: str, obj: Object, recompute: bool = True):
         return str(e)
 
 
+# A sketch's lists are indexed by each other: writing one directly leaves the
+# rest pointing at entries that are gone. Live: {"Geometry": []} wiped the
+# geometry, kept 14 dangling constraints and reported success.
+_SKETCH_LISTS = ("Geometry", "Constraints", "ExternalGeometry", "ExternalGeo")
+
+
+def _raw_sketch_write(obj_ins, properties) -> str | None:
+    if getattr(obj_ins, "TypeId", "") != "Sketcher::SketchObject":
+        return None
+    raw = sorted(k for k in properties if str(k).split(".")[0] in _SKETCH_LISTS)
+    if not raw:
+        return None
+    return (
+        f"edit_object does not write {', '.join(raw)} on sketch '{obj_ins.Name}': a sketch's "
+        "geometry and constraint lists index each other, so a raw write leaves constraints "
+        f"on geometry that is gone. Use cad(operation='sketch_edit', obj_name='{obj_ins.Name}') "
+        "to set a dimension by name or to add and delete geometry and constraints."
+    )
+
+
 def edit_object_gui(doc_name: str, obj: Object):
     """Assign ``obj.properties`` to an existing object. True on success."""
     try:
@@ -55,6 +75,10 @@ def edit_object_gui(doc_name: str, obj: Object):
     if not obj_ins:
         FreeCAD.Console.PrintError(f"Object '{obj.name}' not found in document '{doc_name}'.\n")
         return f"Object '{obj.name}' not found in document '{doc_name}'.\n"
+
+    refusal = _raw_sketch_write(obj_ins, obj.properties)
+    if refusal:
+        return refusal
 
     try:
         has_expressions = any(

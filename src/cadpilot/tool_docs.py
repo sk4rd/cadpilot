@@ -64,8 +64,9 @@ Edit the cell afterwards and the model updates on recompute.""",
     "edit_object": """\
 edit_object — modify object properties.
 Required: obj_name, obj_properties. Same expression-binding rule as
-create_object ("=..." values bind expressions). A value the object cannot
-recompute with is refused and put back; a literal written to an
+create_object ("=..." values bind expressions). A sketch's Geometry and
+Constraints are refused: change a sketch with sketch_edit. A value the object
+cannot recompute with is refused and put back; a literal written to an
 expression-bound property warns (the expression wins). What the recompute
 broke elsewhere is reported like `variables` does.""",
     "delete_object": """\
