@@ -117,7 +117,10 @@ def panel(doc, action, select=None, answer="No", shot=None):
             if tree.topLevelItem(i).text(0) == str({select!r}):
                 tree.setCurrentItem(tree.topLevelItem(i))
         seen = []
+        pressed = []
         def answer():
+            if pressed:
+                return
             w = QtWidgets.QApplication.activeModalWidget()
             if w is None:
                 QtCore.QTimer.singleShot(50, answer)
@@ -132,6 +135,7 @@ def panel(doc, action, select=None, answer="No", shot=None):
             w.reject()
         QtCore.QTimer.singleShot(100, answer)
         getattr(pn, {action!r}).trigger()
+        pressed.append(True)
         if {shot_path!r}:
             pn.grab().save({shot_path!r}.replace(".png", "-panel.png"))
         FreeCAD._cadpilot_live_panel = json.dumps(
@@ -360,6 +364,8 @@ check(
     str(live),
 )
 changes(D)
+user(D, "s = d.getObject('S'); s.touch(); d.recompute()")
+check("G a recompute of the kept sketch is no user change", changes(D) == "", CHANGE_TEXTS[-1:])
 
 # --- H: a feature the user deleted is stale, and drop accepts it ---------------
 PLATE = {

@@ -23,6 +23,7 @@ in :func:`_status` surfaces the case where someone undid work by hand.
 from __future__ import annotations
 
 import contextlib
+import json
 import math
 import threading
 import time
@@ -499,7 +500,7 @@ def record_commit(
         # a stale plan would survive the commit.
         sj.drop_planned(records)
         params = dict(params or {})
-        if operation == "sketch":
+        if operation == "sketch" or operation in sj.SKETCH_EDIT_OPS:
             _note_sketch_signature(doc, params, objects_before or [], objects_after or [])
         rec = sj.StepRecord(
             index=len(records) + 1,
@@ -735,8 +736,11 @@ def _execute_one(doc, operation: str, params: dict[str, Any]) -> dict[str, Any]:
         spec = {"type": operation, "base": params.get("obj_name"), **props}
         try:
             feat = create_feature_gui(doc, spec)
-            if operation == "sketch" and params.get("live_sketch"):
-                _restore_live_sketch(doc, feat, params["live_sketch"])
+            if params.get("live_sketch"):
+                target = doc.getObject(str(params.get("obj_name") or ""))
+                if getattr(feat, "TypeId", "") == "Sketcher::SketchObject":
+                    target = feat
+                _restore_live_sketch(doc, target, params["live_sketch"])
             return {"success": True, "object_name": feat.Name}
         except Exception as e:
             return {"success": False, "error": f"{type(e).__name__}: {e}"}
@@ -887,7 +891,7 @@ def _run_record_locked(doc, records: list[sj.StepRecord], rec: sj.StepRecord) ->
     rec.objects_after = _object_names(doc)
     rec.error = ""
     rec.result = str(res.get("object_name") or "")[:200]
-    if rec.operation == "sketch":
+    if rec.operation == "sketch" or rec.operation in sj.SKETCH_EDIT_OPS:
         _note_sketch_signature(doc, rec.params, rec.objects_before, rec.objects_after)
     write_journal(doc, records)
     logger.info(
@@ -2126,18 +2130,31 @@ def _note_sketch_signature(doc, params: dict[str, Any], before, after) -> None:
 
 
 def _sketch_blob(obj) -> dict[str, Any]:
-    """The sketch's own serialization, for a sketch the spec cannot express."""
-    import base64
+    """The sketch's own serialization, for a sketch the spec cannot express.
 
-    blob = {
-        prop: base64.b64encode(bytes(obj.dumpPropertyContent(prop))).decode("ascii")
-        for prop in ("Geometry", "Constraints", "ExternalGeometry")
-    }
+    ``digest`` covers the content only: the dumps are zip files stamped with
+    the time they were written, so two dumps of one sketch never compare equal.
+    """
+    import base64
+    import hashlib
+    import io
+    import zipfile
+
+    blob: dict[str, Any] = {}
+    digest = hashlib.sha1()
+    for prop in ("Geometry", "Constraints", "ExternalGeometry"):
+        data = bytes(obj.dumpPropertyContent(prop))
+        blob[prop] = base64.b64encode(data).decode("ascii")
+        with zipfile.ZipFile(io.BytesIO(data)) as archive:
+            for name in sorted(archive.namelist()):
+                digest.update(archive.read(name))
     blob["expressions"] = [
         [str(path), str(expr)]
         for path, expr in getattr(obj, "ExpressionEngine", None) or []
         if "Constraints" in str(path)
     ]
+    digest.update(json.dumps(blob["expressions"]).encode("utf-8"))
+    blob["digest"] = digest.hexdigest()[:16]
     return blob
 
 
@@ -2476,6 +2493,20 @@ class _JournalSyncObserver:
         live = _live_sketch(obj)
         signature = sj.sketch_signature(*live)
         stored = rec.params.get("sketch_signature")
+        if rec.operation != "sketch":
+            # A sketch_edit-style step has no full spec to rewrite: whatever the
+            # user changed after it, structure or values, rides on it as the
+            # sketch's own data, restored after it re-runs.
+            blob = _sketch_blob(obj)
+            old = rec.params.get("live_sketch") or {}
+            if stored == signature and (not old or old.get("digest") == blob["digest"]):
+                return True
+            rec.params["live_sketch"] = blob
+            rec.params["sketch_signature"] = signature
+            rec.params["user_edited"] = True
+            detail = "edited by hand after this step; kept as FreeCAD's own sketch data"
+            self._commit_sync(doc, records, rec, [], sketch=(obj.Name, detail))
+            return True
         spec = rec.params.setdefault("obj_properties", {})
         if stored is None:
             # A journal from before signatures: adopt the live structure as the
@@ -2489,7 +2520,7 @@ class _JournalSyncObserver:
             if not rec.params.get("live_sketch"):
                 return False
             blob = _sketch_blob(obj)
-            if blob == rec.params["live_sketch"]:
+            if blob["digest"] == rec.params["live_sketch"].get("digest"):
                 return True
             rec.params["live_sketch"] = blob
             self._commit_sync(doc, records, rec, [], sketch=(obj.Name, "dimensions changed"))

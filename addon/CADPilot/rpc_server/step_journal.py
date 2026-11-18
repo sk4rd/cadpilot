@@ -1413,6 +1413,9 @@ def patch_value_matches(rule: SyncRule, key: str, current: Any, value: Any) -> b
     return _same_value(current, value)
 
 
+# Ops that change an existing sketch's geometry or constraints in place.
+SKETCH_EDIT_OPS = frozenset({"sketch_edit"})
+
 # Ops whose obj_name names the object they CREATE (not a base), so the object
 # is tracked by name even when the before/after diff is empty (an idempotent
 # variables re-run creates nothing, and without this its sheet never syncs).
@@ -1642,6 +1645,14 @@ def tracked_objects(records: list[StepRecord]) -> dict[str, dict[str, Any]]:
         entry = tracked.setdefault(name, {"props": {}, "sheet": None, "sketch": None, "move": None})
         entry["move"] = (idx, sub)
         entry["props"].pop("Placement", None)
+    # A later step that reshapes the sketch owns its structure from then on:
+    # its replay runs on top of the sketch step's, so a hand edit made after it
+    # belongs there, not in the sketch step's spec.
+    for rec in records:
+        if rec.state == STATE_DONE and rec.operation in SKETCH_EDIT_OPS:
+            entry = tracked.get(str((rec.params or {}).get("obj_name") or ""))
+            if entry is not None and entry["sketch"] is not None:
+                entry["sketch"] = (rec.index, None)
     return tracked
 
 

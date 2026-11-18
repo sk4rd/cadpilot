@@ -476,3 +476,12 @@ def test_the_dry_run_reads_as_what_will_happen():
     assert text.startswith("Then rebuild from step 3: remove 2 object(s) and re-run step(s) 3..4.")
     assert "UserChamfer" in text
     assert sj.restore_summary(sj.plan_restore(_chain(), 4, 0, ALL), []) == "Nothing to undo."
+
+
+def test_a_later_sketch_edit_step_owns_the_sketch_structure():
+    sketch = _done(2, "sketch", ["Vars"], ["Body", "Profile", "Vars"])
+    sketch.params = {"obj_name": "Profile", "obj_properties": {"geometry": [], "constraints": []}}
+    edit = _done(3, "sketch_edit", ["Body", "Profile", "Vars"], ["Body", "Profile", "Vars"])
+    edit.params = {"obj_name": "Profile", "obj_properties": {"delete_constraints": [0]}}
+    assert sj.tracked_objects([sketch])["Profile"]["sketch"] == (2, None)
+    assert sj.tracked_objects([sketch, edit])["Profile"]["sketch"] == (3, None)
