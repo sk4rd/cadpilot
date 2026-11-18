@@ -201,16 +201,25 @@ def _geometry_kinds(sketch) -> dict:
     )
 
 
-def refuse_unit_name(name: str, where: str) -> None:
+def refuse_unit_name(sketch, name: str, where: str) -> None:
     """Refuse a constraint name FreeCAD's expressions read as a unit (W, h, mm, deg).
 
     The constraint itself is fine, but its expression path '.Constraints.W'
     fails to parse, so it can be neither bound nor referenced — and replacing
     the sketch later died on it (live 1.1.4).
+
+    The probe is the expression parser itself, which raises a ParserError for
+    exactly these names. Parsing ``Quantity("1 <name>")`` instead threw a C++
+    exception past Python for some ordinary names ("SpigotR": "Unit mismatch in
+    plus operation"), which ended the GUI task without a reply and left every
+    later CADPilot call queued behind it.
     """
     try:
-        FreeCAD.Units.Quantity(f"1 {name}")
-    except Exception:
+        sketch.evalExpression(f"Constraints.{name}")
+    except Exception as e:
+        if "parse" not in str(e).lower():
+            return
+    else:
         return
     raise ValueError(
         f"{where}: name {name!r} is a unit symbol in FreeCAD's expressions, so "
@@ -249,7 +258,7 @@ def _add_constraints(sketch, constraints: list, implied: list = ()) -> tuple[lis
     planned = sketch_spec.plan_constraints(constraints, _geometry_kinds(sketch), taken)
     for plan in [*planned, *implied]:
         if plan["name"]:
-            refuse_unit_name(plan["name"], f"constraints[{plan['entry']}] ({plan['type']})")
+            refuse_unit_name(sketch, plan["name"], f"constraints[{plan['entry']}] ({plan['type']})")
         args = plan["args"]
         value = plan["datum"]
         if plan["expr"] is not None:
@@ -909,7 +918,7 @@ def edit_sketch_gui(doc, spec):
             final_names[index] = sketch_spec.check_name(new)
         except ValueError as e:
             raise ValueError(f"{where}: {e}") from e
-        refuse_unit_name(final_names[index], where)
+        refuse_unit_name(sketch, final_names[index], where)
     seen = {}
     for index, new in final_names.items():
         if new in seen:
