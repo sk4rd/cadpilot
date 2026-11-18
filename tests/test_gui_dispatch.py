@@ -330,6 +330,62 @@ def test_heartbeat_survives_a_task_that_outlasts_its_tick(dispatch):
     assert not heartbeat.active, "stopping the server stops the heartbeat"
 
 
+def _give_the_stub_an_application(mod):
+    """The guard probe reads widget state only when an application exists."""
+    app = mod.QtWidgets.QApplication
+    app.instance = lambda: app
+    app.setOverrideCursor = lambda _cursor: None
+    app.restoreOverrideCursor = lambda: None
+    mod.QtCore.Qt.WaitCursor = 0
+
+
+def test_a_modal_opened_inside_a_running_task_can_be_dismissed(dispatch):
+    """Live audit: dismiss could not close a QMessageBox.exec() that a running
+    execute_code had opened. Its exec() loop delivers the ticks, and both the
+    forced queue and the guard probe sat behind the re-entrancy guard."""
+    mod, state = dispatch
+    _give_the_stub_an_application(mod)
+    events = []
+
+    def close_modal(label):
+        def run():
+            events.append(label)
+            state.modal = None
+
+        return run
+
+    def task_with_modal():
+        state.modal = object()  # QMessageBox.exec() starts its own event loop
+        mod._force_queue.put(close_modal("dismissed"))
+        mod._force_queue.put(lambda: events.append("second forced task"))
+        mod.process_gui_tasks()  # a tick delivered by that loop
+        events.append("task resumed")
+
+    mod._rpc_request_queue.put(task_with_modal)
+    mod.process_gui_tasks()
+    assert events == [
+        "dismissed",
+        "second forced task",
+        "task resumed",
+    ], events
+
+
+def test_the_guard_probe_runs_inside_a_running_task(dispatch):
+    mod, state = dispatch
+    _give_the_stub_an_application(mod)
+    seen = []
+
+    def task_with_modal():
+        state.modal = object()
+        mod.process_gui_tasks()
+        seen.append(mod.backpressure()["defer_reason"])
+        state.modal = None
+
+    mod._rpc_request_queue.put(task_with_modal)
+    mod.process_gui_tasks()
+    assert seen == ["modal"], "get_gui_state must name the modal the task opened"
+
+
 def test_modal_dialog_defers(dispatch):
     mod, state = dispatch
     state.modal = object()

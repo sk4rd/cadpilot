@@ -403,34 +403,42 @@ def _flush_gui_events(delay_ms: int = 20) -> None:
 def process_gui_tasks() -> None:
     """Drain queued GUI-thread callables (wake signal and heartbeat tick).
 
-    Skips the current tick when any mouse button is held (e.g., 3D navigation
+    Skips the normal queue when any mouse button is held (e.g., 3D navigation
     drag) or when already executing a task (re-entrancy guard). The guard
     prevents ``doc.recompute()`` or ``processEvents()`` inside a task from
     triggering a nested ``process_gui_tasks`` call that corrupts FreeCAD state.
+    Forced tasks and the guard-state probe run before both guards.
     """
     global _processing, _processing_since
+    # Refresh the guard state on EVERY tick, empty queue and nested ticks
+    # included: it is the RPC thread's only safe view of whether a dialog/popup
+    # is in the way, and a modal opened by the running task is only visible
+    # from a tick its exec() loop delivers.
+    _probe_guard_state()
+    # Forced tasks run BEFORE (and regardless of) the interaction guards AND the
+    # re-entrancy guard: dismissing the dialog that is holding the queue back
+    # must work while it holds it, or no client without a GUI can ever recover.
+    # A modal opened inside a running task is that task's own nested exec()
+    # loop, which is what delivers this tick, and reject() is what lets the
+    # task continue.
+    while True:
+        try:
+            forced = _force_queue.get_nowait()
+        except queue.Empty:
+            break
+        try:
+            forced()
+        except Exception as e:
+            logger.error(
+                "unhandled exception in forced GUI task: %s: %s",
+                type(e).__name__,
+                e,
+                exc_info=True,
+            )
     if _processing:
         return  # re-entrant call from processEvents inside a task; skip
 
     try:
-        # Refresh the guard state on EVERY tick, empty queue included: it is the
-        # RPC thread's only safe view of whether a dialog/popup is in the way.
-        _probe_guard_state()
-        if not _force_queue.empty():
-            # Forced tasks run BEFORE (and regardless of) the interaction guards:
-            # dismissing the dialog that is holding the queue back must work
-            # while it holds it, or no client without a GUI can ever recover.
-            forced = _force_queue.get()
-            try:
-                forced()
-            except Exception as e:
-                logger.error(
-                    "unhandled exception in forced GUI task: %s: %s",
-                    type(e).__name__,
-                    e,
-                    exc_info=True,
-                )
-            return
         if _rpc_request_queue.empty():
             _clear_defer()
             return  # nothing queued; skip cursor/status-bar churn on idle heartbeat ticks
