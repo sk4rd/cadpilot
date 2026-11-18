@@ -551,18 +551,58 @@ def _parent_body(obj):
     return None
 
 
-def _body_axis_datum(body, axis: str):
-    """The body origin's axis datum (App::Line) for 'X'/'Y'/'Z', or None."""
-    origin = getattr(body, "Origin", None)
-    role = f"{axis.upper()}_Axis"
-    return next(
-        (f for f in getattr(origin, "OriginFeatures", []) if getattr(f, "Role", "") == role),
-        None,
+_SKETCH_AXES = {"H": "H_Axis", "V": "V_Axis", "N": "N_Axis"}
+
+
+def _profile_of(feature):
+    """The sketch a sketch-based feature is built from, or None."""
+    profile = getattr(feature, "Profile", None)
+    if isinstance(profile, (list, tuple)):
+        profile = profile[0] if profile else None
+    return profile if getattr(profile, "TypeId", "") == "Sketcher::SketchObject" else None
+
+
+def _sketch_axis_vector(sketch, sub: str):
+    local = {"H_Axis": (1, 0, 0), "V_Axis": (0, 1, 0), "N_Axis": (0, 0, 1)}[sub]
+    return sketch.Placement.Rotation.multVec(FreeCAD.Vector(*local))
+
+
+def _pattern_axis(body, original, axis):
+    """(link, subelement, direction, point on the axis, label) for a pattern axis.
+
+    'X'/'Y'/'Z' are the body's origin axes; 'H'/'V'/'N' are the axes of the
+    original's profile sketch (its in-plane horizontal and vertical, and its
+    normal), which follow the sketch wherever it is attached.
+    """
+    key = str(axis).strip().upper()
+    if key in _AXIS:
+        line = _origin_feature(body, f"{key}_Axis")
+        if line is None:
+            raise ValueError(f"body '{body.Name}' origin has no {key} axis.")
+        return line, "", FreeCAD.Vector(*_AXIS[key]), FreeCAD.Vector(), f"{body.Name} {key} axis"
+    if key in _SKETCH_AXES:
+        sketch = _profile_of(original)
+        if sketch is None:
+            raise ValueError(
+                f"axis {axis!r} is an axis of the profile sketch, but '{original.Name}' has no "
+                "sketch profile; use 'X'/'Y'/'Z'."
+            )
+        sub = _SKETCH_AXES[key]
+        return (
+            sketch,
+            sub,
+            _sketch_axis_vector(sketch, sub),
+            FreeCAD.Vector(sketch.Placement.Base),
+            f"{sketch.Name} {sub}",
+        )
+    raise ValueError(
+        f"axis must be 'X'/'Y'/'Z' (body axes) or 'H'/'V'/'N' (the profile sketch's axes) for "
+        f"a PartDesign pattern, got {axis!r}"
     )
 
 
-def _centered_axis_line(body, axis: str, center):
-    """A datum line through ``center`` along the body's X/Y/Z axis.
+def _centered_axis_line(body, direction, center):
+    """A datum line through ``center`` along ``direction``.
 
     A PartDesign::PolarPattern rotates about the AXIS LINE it references, and
     the body's origin datum line runs through the body origin — so a bolt
@@ -574,10 +614,42 @@ def _centered_axis_line(body, axis: str, center):
     vec = _vec3(center, "center")
     line = body.newObject("PartDesign::Line", "CadPilotPolarAxis")
     line.MapMode = "Deactivated"
-    axis_rot = {"Z": FreeCAD.Rotation(), "Y": FreeCAD.Rotation(FreeCAD.Vector(1, 0, 0), -90.0)}
-    rot = axis_rot.get(axis) or FreeCAD.Rotation(FreeCAD.Vector(0, 1, 0), 90.0)
-    line.Placement = FreeCAD.Placement(vec, rot)
+    line.Placement = FreeCAD.Placement(vec, FreeCAD.Rotation(FreeCAD.Vector(0, 0, 1), direction))
     return line
+
+
+def _pattern_no_effect_reason(ptype, original, direction, point, label, spec) -> str:
+    """Why a pattern's copies changed nothing, from the geometry."""
+    unit = FreeCAD.Vector(direction)
+    unit.normalize()
+    sketch = _profile_of(original)
+    if ptype == "linear":
+        if sketch is not None:
+            normal = _sketch_axis_vector(sketch, "N_Axis")
+            if abs(abs(unit.dot(normal)) - 1.0) < 1e-6:
+                return (
+                    f"the direction ({label}) is the normal of '{sketch.Name}', the axis "
+                    f"'{original.Name}' was extruded along, so every copy lands inside the first "
+                    "one. Use an in-plane direction: leave axis out (the profile's H axis), "
+                    "axis='V', or a body axis in the sketch plane"
+                )
+        spacing = spec.get("spacing")
+        if isinstance(spacing, (int, float)) and abs(spacing) < 1e-9:
+            return "spacing is 0, so every copy coincides with the original"
+    else:
+        with contextlib.suppress(Exception):
+            offset = original.AddSubShape.CenterOfMass - point
+            radial = offset - unit * offset.dot(unit)
+            if radial.Length < 1e-6:
+                return (
+                    f"the rotation axis ({label}) runs through '{original.Name}' itself, so it "
+                    "turns about its own centre; pass center = the middle of the circle the "
+                    "copies should sit on"
+                )
+    return (
+        "every copy lands where it adds or removes no material (outside the part, or on "
+        "material an earlier copy already removed); check axis, spacing/angle and center"
+    )
 
 
 def _set_linear_spacing(feat, spec, count: int) -> bool:
@@ -615,32 +687,33 @@ def _build_pd_pattern(doc, body, base, spec, ptype: str, count: int):
     PartDesign::(Polar|Linear)Pattern with ``Originals=[feature]`` repeats the
     feature's own contribution, which is what "pattern this hole" means.
     """
-    axis = str(spec.get("axis", "Z")).upper()
-    if axis not in _REV_AXIS:
-        raise ValueError(f"axis must be 'X'/'Y'/'Z' for a PartDesign pattern, got {axis!r}")
-    datum = _body_axis_datum(body, axis)
+    global _LAST_FEATURE_INFO
     reversed_ = bool(spec.get("reversed", False))
     if ptype == "polar":
+        # The body's Z axis by default: a bolt circle around the part's origin.
+        link, sub, direction, point, label = _pattern_axis(body, base, spec.get("axis", "Z"))
         feat = body.newObject("PartDesign::PolarPattern", spec.get("name") or "PolarPattern")
         _set_or_bind(feat, "Angle", spec.get("angle", 360.0))
         # ``center`` was silently ignored here (only the Draft path read it), so
         # a caller's bolt circle about a face centre rotated about the body
         # origin instead and lost the occurrences that fell outside the plate —
         # reported as plain success.
-        center_line = (
-            _centered_axis_line(body, axis, spec["center"]) if spec.get("center") else None
-        )
-        if center_line is not None:
-            feat.Axis = (center_line, [""])
-        elif datum is not None:
-            feat.Axis = (datum, [""])
+        if spec.get("center"):
+            link, sub = _centered_axis_line(body, direction, spec["center"]), ""
+            point = _vec3(spec["center"], "center")
+            label = f"axis through {[round(v, 4) for v in point]}"
+        feat.Axis = (link, [sub])
     elif ptype == "linear":
         _require(spec, "spacing")
+        # The profile's in-plane H axis by default: the old default, the body's
+        # Z axis, is the extrusion axis of every hole drilled from an XY sketch,
+        # so the copies landed inside each other and the pattern was refused.
+        default = "H" if _profile_of(base) is not None else "X"
+        link, sub, direction, point, label = _pattern_axis(body, base, spec.get("axis", default))
         feat = body.newObject("PartDesign::LinearPattern", spec.get("name") or "LinearPattern")
         if _set_linear_spacing(feat, spec, count):
             reversed_ = not reversed_
-        if datum is not None:
-            feat.Direction = (datum, [""])
+        feat.Direction = (link, [sub])
     else:
         raise ValueError(f"pattern_type must be linear/polar, got {ptype!r}")
     # AFTER the transform props: assigning Originals re-derives the shape.
@@ -648,22 +721,14 @@ def _build_pd_pattern(doc, body, base, spec, ptype: str, count: int):
     feat.Occurrences = count
     feat.Reversed = reversed_
     doc.recompute()
-    # FreeCAD 1.1 cannot be driven reliably into doing this through the Python
-    # API: with Originals/Axis/Angle/Occurrences set, the occurrences can come
-    # out coincident, so the pattern computes and repeats NOTHING. Returning a
-    # part with one hole where six were asked for is the worst outcome, so
-    # refuse loudly instead (verified live — see the docs for the workaround).
-    try:
-        unchanged = abs(float(feat.Shape.Volume) - float(base.Shape.Volume)) < 1e-6
-    except Exception:
-        unchanged = False
-    if unchanged:
+    volumes = _transform_volumes(feat)
+    if volumes is not None and abs(volumes[1] - volumes[0]) < 1e-6:
+        reason = _pattern_no_effect_reason(ptype, base, direction, point, label, spec)
         raise RuntimeError(
-            f"pattern of PartDesign feature '{base.Name}' had no effect (volume unchanged at "
-            f"{round(float(base.Shape.Volume), 1)} mm^3). A PartDesign pattern cannot be driven "
-            "reliably through this API; pattern the PROFILE instead (one pocket per instance) or "
-            "pattern a Part-level solid with boolean ops. Not creating a misleading result."
+            f"pattern of '{base.Name}' had no effect (volume unchanged at "
+            f"{round(volumes[0], 1)} mm^3): {reason}. Nothing was created."
         )
+    _LAST_FEATURE_INFO = {"axis": label}
     return feat
 
 
@@ -2203,7 +2268,9 @@ def describe_feature(feat, spec) -> dict:
         return {}
     warnings: list[str] = []
     resolved = (
-        pop_last_feature_info() if op in ("thickness", "draft", "datum_plane", "mirror") else None
+        pop_last_feature_info()
+        if op in ("thickness", "draft", "datum_plane", "mirror", "pattern")
+        else None
     )
     if op in _CUT_TYPES:
         message = _cut_without_material(feat) or _cut_removed_nothing(feat)

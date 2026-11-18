@@ -142,15 +142,20 @@ originals, name.
 pattern — repeat a feature or solid (obj_name = base object).
 Required in obj_properties: count (>= 2, or an expression, e.g. "=Vars.n_holes";
 an expression stays BOUND, so changing the spreadsheet updates the hole count).
-Optional: pattern_type (linear/polar, default linear), spacing, axis (X/Y/Z or
-  a direction vector), angle, center, reversed, name.
+Optional: pattern_type (linear/polar, default linear), spacing, axis, angle,
+  center, reversed, name.
 
 Two VERY different behaviours, picked by the base object:
 - Base is a PartDesign feature (a pad/pocket/… inside a Body): a
-  PartDesign::PolarPattern / LinearPattern is created in that Body, repeating
-  the FEATURE (e.g. a bolt hole) — one solid with N holes.
+  PartDesign::PolarPattern / LinearPattern is created in that Body and becomes
+  its Tip, repeating the FEATURE (e.g. a bolt hole) — one solid with N holes.
 - Base is a Part-level solid (a boolean result, a primitive): a Draft array
   replicates the whole object.
+Linear (PartDesign): spacing is the PITCH between neighbours (FreeCAD's Spacing
+mode), so changing count keeps the pitch; a negative spacing goes the other way.
+axis: "X"/"Y"/"Z" (the body's axes) or "H"/"V"/"N" (the profile sketch's
+in-plane horizontal/vertical and its normal). Default: "H", the profile's
+in-plane horizontal, for linear; "Z" for polar.
 A polar pattern turns about the AXIS LINE it references, and without `center`
 that is the body's own X/Y/Z origin axis: a bolt circle drawn around a face
 centre then rotates about the body origin, so occurrences that fall outside the
@@ -159,11 +164,10 @@ gave 1 clean hole and 1 half-hole where 6 were asked for, reported as success).
 Pass center: [x, y, z] whenever the rotation centre is not the body origin —
 the op builds a datum line there and uses that as the axis. A linear pattern
 has no centre: spacing + axis alone decide where the copies land.
-PartDesign patterns are refused (clear error, nothing created) when the
-transform has no effect — FreeCAD 1.1 cannot drive a PartDesign pattern
-reliably through this API, and silently returning one hole instead of six is
-worse than failing. Workaround: pattern the profile (one pocket per instance,
-e.g. from execute_code) or pattern a Part-level solid with boolean ops.""",
+A PartDesign pattern whose copies change nothing is refused (nothing is
+created), and the error names the cause: a direction along the feature's own
+extrusion axis, a polar centre on the feature itself, a zero spacing, or copies
+that land outside the material. The reply's `resolved.axis` names the axis used.""",
     "move": """\
 move — relative Placement change (obj_name = object to move).
 Optional in obj_properties (vectors accept [x,y,z] or {"x":..,"y":..,"z":..}):

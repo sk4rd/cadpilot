@@ -185,3 +185,25 @@ def test_linear_pattern_keeps_its_pitch_when_the_count_changes():
     assert "'Spacing'" in spacing and "'Offset'" in spacing
     assert "_set_or_bind(feat, 'Offset'" in spacing, "the pitch must be bindable"
     assert "count - 1" not in _src("_build_pd_pattern")
+
+
+def test_linear_pattern_defaults_to_the_profiles_in_plane_axis():
+    """The old default, the body's Z axis, is the extrusion axis of every hole
+    drilled from an XY sketch: the copies coincided and the op was refused."""
+    pd = _src("_build_pd_pattern")
+    assert "'H' if _profile_of(base) is not None else 'X'" in pd
+    assert "'H_Axis'" in ast.unparse(_FEATURE)
+
+
+def test_no_effect_guard_compares_with_the_predecessor_and_names_the_cause():
+    """base.Shape is the volume where the original sits in the chain, not the
+    pattern's predecessor; and the error used to blame FreeCAD."""
+    pd = _src("_build_pd_pattern")
+    assert "_transform_volumes(feat)" in pd and "base.Shape" not in pd
+    assert "_pattern_no_effect_reason" in pd
+    reason = _src("_pattern_no_effect_reason")
+    for cause in ("normal of", "runs through", "spacing is 0", "outside the part"):
+        assert cause in reason
+    assert "BaseFeature" in _src("_transform_volumes")
+    docs = (Path(__file__).resolve().parents[1] / "src" / "cadpilot" / "tool_docs.py").read_text()
+    assert "cannot drive a PartDesign pattern" not in docs
