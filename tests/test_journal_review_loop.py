@@ -126,6 +126,13 @@ def test_the_user_changes_block_is_compact_and_names_each_change():
     assert format_user_changes({}) == ""
 
 
+def _blocks(result):
+    """The content blocks of a call_tool result: a list or tuple on MCP 1.x, a CallToolResult on 2.x."""
+    if hasattr(result, "content"):
+        return result.content
+    return result[0] if isinstance(result, tuple) else result
+
+
 def test_every_freecad_tool_reply_leads_with_the_user_changes(fake_freecad, monkeypatch):
     from cadpilot import server
 
@@ -133,14 +140,14 @@ def test_every_freecad_tool_reply_leads_with_the_user_changes(fake_freecad, monk
     fake_freecad.documents = ["Plate"]
     fake_freecad.pending_user_changes = {"Plate": [_edit(8, 12)]}
     content = asyncio.run(server.mcp.call_tool("list_documents", {}))
-    blocks = content[0] if isinstance(content, tuple) else content
+    blocks = _blocks(content)
     texts = [b.text for b in blocks]
     assert len(texts) == 1 + 1
     assert texts[0].startswith("## User changes since your last call")
     assert "Pad.Length 8 -> 12" in texts[0]
     # Delivered once: the next call is quiet.
     content = asyncio.run(server.mcp.call_tool("list_documents", {}))
-    blocks = content[0] if isinstance(content, tuple) else content
+    blocks = _blocks(content)
     assert not blocks[0].text.startswith("## User changes")
 
 

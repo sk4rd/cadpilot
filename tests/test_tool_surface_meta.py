@@ -8,10 +8,18 @@ the semi-static references are reachable as resources.
 import ast
 import asyncio
 import dataclasses
+import re
 from pathlib import Path
 
 from cadpilot import server
 from cadpilot.server_state import ServerState
+
+
+def _field(obj, camel):
+    """A field under its MCP 1.x name (readOnlyHint) or its 2.x one (read_only_hint)."""
+    snake = re.sub(r"(?<!^)(?=[A-Z])", "_", camel).lower()
+    return getattr(obj, camel) if hasattr(obj, camel) else getattr(obj, snake)
+
 
 # Tools that only read FreeCAD / local state and must advertise readOnlyHint.
 _READ_ONLY = {
@@ -67,40 +75,42 @@ def test_every_tool_declares_all_four_annotations():
         assert annotations is not None, name
         assert annotations.title, name
         for field in ("readOnlyHint", "destructiveHint", "idempotentHint", "openWorldHint"):
-            assert getattr(annotations, field) is not None, f"{name}.{field}"
+            assert _field(annotations, field) is not None, f"{name}.{field}"
 
 
 def test_annotation_kinds_match_the_tool():
     tools = _tools()
     for name in _READ_ONLY:
-        assert tools[name].annotations.readOnlyHint is True, name
-        assert tools[name].annotations.destructiveHint is False, name
+        assert _field(tools[name].annotations, "readOnlyHint") is True, name
+        assert _field(tools[name].annotations, "destructiveHint") is False, name
     for name in _MUTATING:
-        assert tools[name].annotations.readOnlyHint is False, name
+        assert _field(tools[name].annotations, "readOnlyHint") is False, name
 
 
 def test_listing_tools_declare_pagination_params():
     tools = _tools()
     for name in ("get_objects", "list_documents", "session", "get_topology", "get_addon_log"):
-        props = tools[name].inputSchema["properties"]
+        props = _field(tools[name], "inputSchema")["properties"]
         assert "limit" in props, name
     for name in ("get_objects", "list_documents", "get_topology", "session"):
-        assert "offset" in tools[name].inputSchema["properties"], name
+        assert "offset" in _field(tools[name], "inputSchema")["properties"], name
 
 
 def test_numeric_params_carry_schema_constraints():
     tools = _tools()
-    limit = tools["get_topology"].inputSchema["properties"]["limit"]
+    limit = _field(tools["get_topology"], "inputSchema")["properties"]["limit"]
     assert limit["minimum"] == 1 and limit["maximum"] == 200
-    gap = tools["assembly_session"].inputSchema["properties"]["gap_samples"]
+    gap = _field(tools["assembly_session"], "inputSchema")["properties"]["gap_samples"]
     assert gap["minimum"] == 2 and gap["maximum"] == 64
-    to_step = tools["session"].inputSchema["properties"]["to_step"]
+    to_step = _field(tools["session"], "inputSchema")["properties"]["to_step"]
     assert to_step["anyOf"][0]["minimum"] == 0
 
 
 def test_reference_docs_and_patterns_are_resources():
     resources = {str(r.uri) for r in asyncio.run(server.mcp.list_resources())}
-    templates = {r.uriTemplate for r in asyncio.run(server.mcp.list_resource_templates())}
+    templates = {
+        _field(r, "uriTemplate") for r in asyncio.run(server.mcp.list_resource_templates())
+    }
     assert "cadpilot://operations" in resources
     assert "cadpilot://patterns" in resources
     assert "cadpilot://docs/{operation}" in templates
