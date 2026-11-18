@@ -184,24 +184,25 @@ def test_linear_pattern_keeps_its_pitch_when_the_count_changes():
     a count bound to a spreadsheet silently changed the pitch."""
     spacing = _src("_set_linear_spacing")
     assert "'Spacing'" in spacing and "'Offset'" in spacing
-    assert "_set_or_bind(feat, 'Offset'" in spacing, "the pitch must be bindable"
+    assert "_set_or_bind(feat, 'Length' if mode == 'extent' else 'Offset'" in spacing, (
+        "the pitch must be bindable"
+    )
     assert "count - 1" not in _src("_build_pd_pattern")
 
 
 def test_linear_pattern_defaults_to_the_profiles_in_plane_axis():
     """The old default, the body's Z axis, is the extrusion axis of every hole
     drilled from an XY sketch: the copies coincided and the op was refused."""
-    pd = _src("_build_pd_pattern")
-    assert "'H' if _profile_of(base) is not None else 'X'" in pd
+    assert "'H' if _profile_of(original) is not None else 'X'" in _src("_setup_linear")
     assert "'H_Axis'" in ast.unparse(_FEATURE)
 
 
 def test_no_effect_guard_compares_with_the_predecessor_and_names_the_cause():
     """base.Shape is the volume where the original sits in the chain, not the
     pattern's predecessor; and the error used to blame FreeCAD."""
-    pd = _src("_build_pd_pattern")
-    assert "_transform_volumes(feat)" in pd and "base.Shape" not in pd
-    assert "_pattern_no_effect_reason" in pd
+    guard = _src("_refuse_inert_pattern")
+    assert "_transform_volumes(feat)" in guard and "base.Shape" not in _src("_build_pd_pattern")
+    assert "_pattern_no_effect_reason" in guard
     reason = _src("_pattern_no_effect_reason")
     for cause in ("normal of", "runs through", "spacing is 0", "outside the part"):
         assert cause in reason
@@ -269,3 +270,55 @@ def test_numeric_parameters_can_be_bound_to_expressions():
     draft = _src("_build_pattern")
     assert ".IntervalX." in draft and "_bind_vector(feat, 'Center'" in draft
     assert "_set_or_bind(feat, 'Angle'" in draft
+
+
+# --- more pattern features ----------------------------------------------------------
+
+
+def _property_mapper():
+    if "FreeCAD" not in sys.modules:
+        stub = types.ModuleType("FreeCAD")
+        for name in ("Document", "DocumentObject", "Vector", "Placement", "Rotation"):
+            setattr(stub, name, type(name, (), {}))
+        sys.modules["FreeCAD"] = stub
+    if str(_ADDON.parent) not in sys.path:
+        sys.path.insert(0, str(_ADDON.parent))
+    from rpc_server import property_mapper
+
+    return property_mapper
+
+
+def test_uneven_spacings_bind_as_one_list_expression():
+    """FreeCAD 1.1.4 stores an expression on Spacings[i] and never applies it;
+    one list(...) expression on the whole property follows the spreadsheet."""
+    pm = _property_mapper()
+    assert pm.float_list_expression([9.0, -1.0, 14.0]) is None
+    assert (
+        pm.float_list_expression([-1.0, "=41 - 3*Vars.Pitch", 9])
+        == "list(-1.0; (41 - 3*Vars.Pitch); 9.0)"
+    )
+    spacing = _src("_set_linear_spacing")
+    assert "float_list_expression(values)" in spacing
+    assert "setExpression('Spacings', expression)" in spacing
+    assert "count - 1" in _src("_spacings_value"), "one gap per pair of neighbours"
+
+
+def test_multi_transform_steps_are_validated():
+    tp = _tip_policy()
+    assert tp.unknown_transform_step_keys("linear", {"pattern_type": "linear", "count": 2}) == ""
+    assert "valid keys" in tp.unknown_transform_step_keys("mirror", {"count": 2})
+    assert "must be 'linear', 'polar' or 'mirror'" in tp.unknown_transform_step_keys("grid", {})
+    multi = _src("_build_multi_transform")
+    assert "PartDesign::MultiTransform" in multi and "Transformations" in multi
+
+
+def test_a_pattern_of_a_pattern_points_to_multi_or_originals():
+    check = _src("_require_transformable")
+    assert "PartDesign::Transformed" in check and "pattern_type='multi'" in check
+    assert "_require_transformable" in _src("_transform_originals")
+    assert "_transform_originals" in _src("_build_pd_pattern")
+
+
+def test_axis_accepts_a_direction_vector():
+    assert "_centered_axis_line" in _src("_pattern_axis")
+    assert "_vec3(value, 'axis')" in _src("_axis_vec")

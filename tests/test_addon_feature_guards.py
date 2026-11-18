@@ -73,7 +73,8 @@ def test_partdesign_pattern_uses_a_partdesign_pattern_not_a_draft_array():
 def test_partdesign_pattern_refuses_to_return_a_no_op():
     """Silently returning one hole where six were asked for is worse than an
     error — the builder must compare volumes and raise."""
-    body = _func(_FEATURE, "_build_pd_pattern")
+    assert "_refuse_inert_pattern" in _names(_func(_FEATURE, "_build_pd_pattern"))
+    body = _func(_FEATURE, "_refuse_inert_pattern")
     raises = [n for n in ast.walk(body) if isinstance(n, ast.Raise)]
     assert raises, "a no-effect pattern must raise"
     assert any("had no effect" in s for s in _strings(body))
@@ -218,7 +219,7 @@ def test_polar_pattern_honours_center():
     clipped one 38691.44 mm^3. The centre is expressed with a datum line, the
     same reference the GUI uses; a free Placement is what positions it
     (MapMode "Translate" over the origin line does NOT move it)."""
-    builder = _func(_FEATURE, "_build_pd_pattern")
+    builder = _func(_FEATURE, "_setup_polar")
     assert "_centered_axis_line" in _names(builder), (
         "the PartDesign polar branch must use the centred axis line when center is given"
     )

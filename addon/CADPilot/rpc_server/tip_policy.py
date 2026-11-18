@@ -162,10 +162,15 @@ SPEC_KEYS: dict[str, frozenset[str]] = {
             "count",
             "pattern_type",
             "spacing",
+            "spacings",
+            "mode",
+            "length",
             "axis",
             "angle",
             "center",
             "reversed",
+            "originals",
+            "transforms",
             "name",
         ),
         "move": ("translate", "rotate", "placement"),
@@ -201,6 +206,16 @@ SPEC_KEYS: dict[str, frozenset[str]] = {
     }.items()
 }
 
+#: The keys of one ``transforms`` step of pattern_type="multi", per step type.
+TRANSFORM_STEP_KEYS: dict[str, frozenset[str]] = {
+    "linear": frozenset(
+        {"pattern_type", "count", "spacing", "spacings", "mode", "length", "axis", "reversed"}
+    ),
+    "polar": frozenset({"pattern_type", "count", "angle", "axis", "center", "reversed"}),
+    "mirror": frozenset({"pattern_type", "plane", "face"}),
+}
+TRANSFORM_STEP_KEYS["any"] = frozenset().union(*TRANSFORM_STEP_KEYS.values()) - {"pattern_type"}
+
 # The feature spec's own fields, filled in by the dispatcher, not the caller.
 _SPEC_FIELDS = frozenset({"type", "base", "description"})
 
@@ -225,4 +240,18 @@ def unknown_spec_keys(op: str, spec: dict) -> str:
         f"{op} does not take {', '.join(hints)}; it would be ignored, so nothing was "
         f"built. Valid keys for {op}: {', '.join(sorted(allowed))} "
         f"(see operation_help('{op}'))."
+    )
+
+
+def unknown_transform_step_keys(kind: str, step: dict) -> str:
+    """'' for a valid MultiTransform step, else the refusal text."""
+    allowed = TRANSFORM_STEP_KEYS.get(kind) if kind != "any" else None
+    if allowed is None:
+        return f"pattern_type must be 'linear', 'polar' or 'mirror', got {kind!r}."
+    unknown = sorted(k for k in step if k not in allowed)
+    if not unknown:
+        return ""
+    return (
+        f"a {kind} step does not take {', '.join(map(repr, unknown))}; valid keys: "
+        f"{', '.join(sorted(allowed))}."
     )

@@ -92,6 +92,22 @@ def format_color(val: Any) -> str:
     return "#" + "".join(f"{max(0, min(255, round(c * 255))):02x}" for c in (r, g, b))
 
 
+def float_list_expression(values: list) -> str | None:
+    """One ``list(...)`` expression for a float list whose items may be '=expr'.
+
+    None when no item is an expression (assign the floats directly). FreeCAD
+    1.1.4 stores ``setExpression("Spacings[2]", ...)`` and then never applies
+    it (live: the list kept its old values through recomputes and spreadsheet
+    changes), while one expression on the WHOLE property follows the sheet.
+    The list is unitless: an item like ``41mm - 3*Vars.Pitch`` is a unit
+    mismatch against a plain-number cell, ``41 - 3*Vars.Pitch`` works.
+    """
+    if not any(isinstance(v, str) and v.startswith("=") for v in values):
+        return None
+    items = [f"({v[1:]})" if isinstance(v, str) else repr(float(v)) for v in values]
+    return f"list({'; '.join(items)})"
+
+
 def parse_reference_entry(entry: Any) -> tuple[str, Any]:
     """Normalise a single ``References`` entry to ``(object_name, sub_element)``.
 

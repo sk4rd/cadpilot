@@ -14,7 +14,7 @@ import Part
 
 from rpc_server import sketcher_ops, tip_policy
 from rpc_server.geometry_query import body_owner, body_volumes, model_issues, recompute_report
-from rpc_server.property_mapper import format_color, parse_color
+from rpc_server.property_mapper import float_list_expression, format_color, parse_color
 
 # Selector resolution of the most recent face-based build; read once by
 # describe_feature() (mirrors sketcher_ops' sketch-info mechanism).
@@ -150,9 +150,15 @@ def pop_last_feature_info() -> dict | None:
 
 
 def _axis_vec(value, default="Z"):
+    if isinstance(value, (list, tuple, dict)):
+        vec = _vec3(value, "axis")
+        if vec.Length < 1e-12:
+            raise ValueError(f"axis vector must not be zero, got {value!r}")
+        vec.normalize()
+        return vec
     v = _AXIS.get(str(value or default).upper())
     if v is None:
-        raise ValueError(f"axis must be 'X'/'Y'/'Z', got {value!r}")
+        raise ValueError(f"axis must be 'X'/'Y'/'Z' or a direction [x, y, z], got {value!r}")
     return FreeCAD.Vector(*v)
 
 
@@ -574,13 +580,19 @@ def _sketch_axis_vector(sketch, sub: str):
     return sketch.Placement.Rotation.multVec(FreeCAD.Vector(*local))
 
 
-def _pattern_axis(body, original, axis):
+def _pattern_axis(body, original, axis, center=None):
     """(link, subelement, direction, point on the axis, label) for a pattern axis.
 
     'X'/'Y'/'Z' are the body's origin axes; 'H'/'V'/'N' are the axes of the
     original's profile sketch (its in-plane horizontal and vertical, and its
-    normal), which follow the sketch wherever it is attached.
+    normal), which follow the sketch wherever it is attached. A direction
+    [x, y, z] (body frame) becomes a datum line through ``center`` or the origin.
     """
+    if isinstance(axis, (list, tuple, dict)):
+        direction = _axis_vec(axis)
+        line = _centered_axis_line(body, direction, center if center else [0, 0, 0])
+        label = f"direction {[round(v, 4) for v in direction]}"
+        return line, "", direction, FreeCAD.Vector(line.Placement.Base), label
     key = str(axis).strip().upper()
     if key in _AXIS:
         line = _origin_feature(body, f"{key}_Axis")
@@ -661,34 +673,144 @@ def _pattern_no_effect_reason(ptype, original, direction, point, label, spec) ->
     )
 
 
+def _spacings_value(spacings, count: int):
+    """Validate a ``spacings`` list: count-1 gaps, each a pitch, '=expr' or None."""
+    if not isinstance(spacings, (list, tuple)) or len(spacings) != count - 1:
+        raise ValueError(
+            f"spacings must list the {count - 1} gaps between the {count} copies (one per gap: a "
+            f"number, an '=expression', or null for `spacing`), got {spacings!r}."
+        )
+    values = []
+    for gap in spacings:
+        if gap is None:
+            values.append(-1.0)  # FreeCAD's "use Offset" marker
+        elif _is_expression(gap):
+            values.append(gap)
+        else:
+            number = _number(gap, "a spacings item")
+            if number <= 0:
+                raise ValueError(f"spacings items must be > 0, got {gap!r}.")
+            values.append(number)
+    return values
+
+
 def _set_linear_spacing(feat, spec, count: int) -> bool:
-    """Set the pitch between copies; True when a negative pitch flipped the direction.
+    """Set how far apart the copies are; True when a negative value flipped the direction.
 
     Spacing mode keeps the pitch when the count changes. The old Extent-mode
     ``Length = spacing * (count - 1)`` froze the overall length instead, so a
     count bound to a spreadsheet silently changed the pitch (live: 4 holes at
     20 became 6 holes at 12) and a spacing expression could not be bound at all.
     """
-    spacing = spec["spacing"]
-    numeric = isinstance(spacing, (int, float)) and not isinstance(spacing, bool)
-    flip = numeric and spacing < 0
+    mode = str(spec.get("mode", "spacing")).lower()
+    if mode not in ("spacing", "extent"):
+        raise ValueError(
+            f"mode must be 'spacing' (pitch) or 'extent' (overall length), got {mode!r}"
+        )
+    if mode == "extent" and spec.get("spacings") is not None:
+        raise ValueError(
+            "spacings are the gaps between neighbours (spacing mode); mode='extent' spreads the "
+            "copies evenly over length. Drop one of them."
+        )
+    key = "length" if mode == "extent" else "spacing"
+    spacings = spec.get("spacings")
+    if spec.get(key) is None and spacings is None:
+        raise ValueError(
+            "a linear pattern needs "
+            + (
+                "length (the overall extent)"
+                if mode == "extent"
+                else "spacing (the pitch) or spacings"
+            )
+            + "."
+        )
+    if spacings is not None and _is_expression(spec.get("count")):
+        raise ValueError(
+            "spacings fixes the number of gaps, so count cannot be an expression with it: bind "
+            "the gaps instead (spacings items accept '=expressions')."
+        )
+    raw = spec.get(key)
+    numeric = isinstance(raw, (int, float)) and not isinstance(raw, bool)
+    flip = numeric and raw < 0
     if "Mode" not in feat.PropertiesList:
         # FreeCAD < 1.1 has Extent mode only: Length spans the count-1 gaps.
-        if not numeric or isinstance(spec.get("count"), str):
+        if mode == "extent" and (numeric or _is_expression(raw)):
+            _set_or_bind(feat, "Length", abs(float(raw)) if numeric else raw)
+            return flip
+        if not numeric or spacings is not None or _is_expression(spec.get("count")):
             raise ValueError(
-                "an expression-bound spacing or count needs FreeCAD 1.1's spacing mode; this "
-                "FreeCAD has extent mode only. Pass numbers."
+                "spacing mode (an expression-bound spacing or count, spacings) needs FreeCAD 1.1; "
+                "this FreeCAD has extent mode only. Pass numbers, or mode='extent' with length."
             )
-        feat.Length = abs(float(spacing)) * (count - 1)
+        feat.Length = abs(float(raw)) * (count - 1)
         return flip
-    feat.Mode = "Spacing"
-    # Offset is a PropertyLength (never negative): the sign goes to Reversed.
-    _set_or_bind(feat, "Offset", abs(float(spacing)) if numeric else spacing)
+    feat.Mode = "Extent" if mode == "extent" else "Spacing"
+    # Length/Offset are PropertyLengths (never negative): the sign goes to Reversed.
+    if raw is not None:
+        _set_or_bind(
+            feat, "Length" if mode == "extent" else "Offset", abs(float(raw)) if numeric else raw
+        )
+    if spacings is not None:
+        values = _spacings_value(spacings, count)
+        if raw is None:
+            feat.Offset = next((v for v in values if isinstance(v, float) and v > 0), 1.0)
+        expression = float_list_expression(values)
+        if expression is None:
+            feat.Spacings = values
+        else:
+            feat.setExpression("Spacings", expression)
     return flip
 
 
+def _setup_linear(feat, body, original, spec, count: int):
+    """Direction and spacing of a LinearPattern; returns (direction, point, label, link)."""
+    default = "H" if _profile_of(original) is not None else "X"
+    link, sub, direction, point, label = _pattern_axis(body, original, spec.get("axis", default))
+    feat.Direction = (link, [sub])
+    flip = _set_linear_spacing(feat, spec, count)
+    feat.Reversed = bool(spec.get("reversed", False)) != flip
+    return direction, point, label, link
+
+
+def _setup_polar(feat, body, original, spec):
+    """Axis and angle of a PolarPattern; returns (direction, point, label, link)."""
+    center = spec.get("center")
+    link, sub, direction, point, label = _pattern_axis(
+        body, original, spec.get("axis", "Z"), center
+    )
+    # ``center`` was silently ignored here (only the Draft path read it), so a
+    # caller's bolt circle about a face centre rotated about the body origin
+    # instead and lost the occurrences that fell outside the plate — reported
+    # as plain success.
+    if center and getattr(link, "TypeId", "") != "PartDesign::Line":
+        link, sub = _centered_axis_line(body, direction, center), ""
+        label = f"{label} through {center}"
+    feat.Axis = (link, [sub])
+    _set_or_bind(feat, "Angle", spec.get("angle", 360.0))
+    feat.Reversed = bool(spec.get("reversed", False))
+    return direction, point, label, link
+
+
+def _refuse_inert_pattern(feat, original, ptype, direction, point, label, spec) -> None:
+    """Refuse a pattern whose copies changed nothing, naming the cause."""
+    volumes = _transform_volumes(feat)
+    if volumes is None or abs(volumes[1] - volumes[0]) >= 1e-6:
+        return
+    if direction is None:
+        reason = "the combined copies land where they add or remove no material"
+    else:
+        link = feat.Direction[0] if ptype == "linear" else feat.Axis[0]
+        if getattr(link, "TypeId", "") == "PartDesign::Line":
+            point = FreeCAD.Vector(link.Placement.Base)  # a bound centre is known only now
+        reason = _pattern_no_effect_reason(ptype, original, direction, point, label, spec)
+    raise RuntimeError(
+        f"pattern of '{original.Name}' had no effect (volume unchanged at "
+        f"{round(volumes[0], 1)} mm^3): {reason}. Nothing was created."
+    )
+
+
 def _build_pd_pattern(doc, body, base, spec, ptype: str, count: int):
-    """Pattern a PartDesign FEATURE inside its Body.
+    """Pattern PartDesign FEATURES inside their Body.
 
     Draft's array replicates the base object's whole Shape — for a PartDesign
     feature that Shape is the entire body, so arraying a hole produced N
@@ -697,48 +819,79 @@ def _build_pd_pattern(doc, body, base, spec, ptype: str, count: int):
     feature's own contribution, which is what "pattern this hole" means.
     """
     global _LAST_FEATURE_INFO
-    reversed_ = bool(spec.get("reversed", False))
+    originals = _transform_originals(doc, body, base, spec, "pattern")
     if ptype == "polar":
-        # The body's Z axis by default: a bolt circle around the part's origin.
-        link, sub, direction, point, label = _pattern_axis(body, base, spec.get("axis", "Z"))
         feat = body.newObject("PartDesign::PolarPattern", spec.get("name") or "PolarPattern")
-        _set_or_bind(feat, "Angle", spec.get("angle", 360.0))
-        # ``center`` was silently ignored here (only the Draft path read it), so
-        # a caller's bolt circle about a face centre rotated about the body
-        # origin instead and lost the occurrences that fell outside the plate —
-        # reported as plain success.
-        if spec.get("center"):
-            link, sub = _centered_axis_line(body, direction, spec["center"]), ""
-            label = f"axis through {spec['center']}"
-        feat.Axis = (link, [sub])
+        direction, point, label, _link = _setup_polar(feat, body, base, spec)
     elif ptype == "linear":
-        _require(spec, "spacing")
         # The profile's in-plane H axis by default: the old default, the body's
         # Z axis, is the extrusion axis of every hole drilled from an XY sketch,
         # so the copies landed inside each other and the pattern was refused.
-        default = "H" if _profile_of(base) is not None else "X"
-        link, sub, direction, point, label = _pattern_axis(body, base, spec.get("axis", default))
         feat = body.newObject("PartDesign::LinearPattern", spec.get("name") or "LinearPattern")
-        if _set_linear_spacing(feat, spec, count):
-            reversed_ = not reversed_
-        feat.Direction = (link, [sub])
+        direction, point, label, _link = _setup_linear(feat, body, base, spec, count)
     else:
-        raise ValueError(f"pattern_type must be linear/polar, got {ptype!r}")
+        raise ValueError(f"pattern_type must be linear/polar/multi, got {ptype!r}")
     # AFTER the transform props: assigning Originals re-derives the shape.
-    feat.Originals = [base]
+    feat.Originals = originals
     feat.Occurrences = count
-    feat.Reversed = reversed_
     doc.recompute()
-    if getattr(link, "TypeId", "") == "PartDesign::Line":
-        point = FreeCAD.Vector(link.Placement.Base)  # a bound centre is known only now
-    volumes = _transform_volumes(feat)
-    if volumes is not None and abs(volumes[1] - volumes[0]) < 1e-6:
-        reason = _pattern_no_effect_reason(ptype, base, direction, point, label, spec)
-        raise RuntimeError(
-            f"pattern of '{base.Name}' had no effect (volume unchanged at "
-            f"{round(volumes[0], 1)} mm^3): {reason}. Nothing was created."
-        )
+    _refuse_inert_pattern(feat, base, ptype, direction, point, label, spec)
     _LAST_FEATURE_INFO = {"axis": label}
+    if len(originals) > 1:
+        _LAST_FEATURE_INFO["originals"] = [o.Name for o in originals]
+    return feat
+
+
+def _build_multi_transform(doc, body, base, spec):
+    """Chain several transforms in ONE PartDesign::MultiTransform.
+
+    FreeCAD transforms additive/subtractive features only, so a pattern of a
+    pattern recomputes Invalid; a grid (linear x linear), a mirrored bolt
+    circle and the like are a MultiTransform whose steps apply in order.
+    """
+    global _LAST_FEATURE_INFO
+    steps = spec.get("transforms")
+    if not isinstance(steps, list) or not steps:
+        raise ValueError(
+            "pattern_type='multi' needs transforms: a list of steps applied in order, each "
+            "{'pattern_type': 'linear'|'polar'|'mirror', ...that type's keys}."
+        )
+    originals = _transform_originals(doc, body, base, spec, "pattern")
+    feat = body.newObject("PartDesign::MultiTransform", spec.get("name") or "MultiTransform")
+    subs, labels = [], []
+    for i, step in enumerate(steps):
+        if not isinstance(step, dict):
+            raise ValueError(f"transforms[{i}] must be a dict, got {step!r}")
+        kind = str(step.get("pattern_type", "")).lower()
+        problem = tip_policy.unknown_transform_step_keys(kind, step)
+        if problem:
+            raise ValueError(f"transforms[{i}]: {problem}")
+        if kind == "mirror":
+            sub = body.newObject("PartDesign::Mirrored", f"{feat.Name}_Mirror")
+            ref, subnames, label = _mirror_plane_ref(doc, body, base, step)
+            sub.MirrorPlane = (ref, subnames)
+        else:
+            count = _pattern_count(doc, step.get("count"))
+            if count < 2:
+                raise ValueError(f"transforms[{i}]: count must be >= 2.")
+            if kind == "linear":
+                sub = body.newObject("PartDesign::LinearPattern", f"{feat.Name}_Linear")
+                _direction, _point, label, _link = _setup_linear(sub, body, base, step, count)
+            else:
+                sub = body.newObject("PartDesign::PolarPattern", f"{feat.Name}_Polar")
+                _direction, _point, label, _link = _setup_polar(sub, body, base, step)
+            sub.Occurrences = count
+            _bind_count_expression(sub, step.get("count"), kind)
+            label = f"{label} x{count}"
+        with contextlib.suppress(Exception):
+            sub.ViewObject.Visibility = False
+        subs.append(sub)
+        labels.append(f"{kind}: {label}")
+    feat.Transformations = subs
+    feat.Originals = originals
+    doc.recompute()
+    _refuse_inert_pattern(feat, base, "multi", None, None, "", spec)
+    _LAST_FEATURE_INFO = {"transforms": labels, "originals": [o.Name for o in originals]}
     return feat
 
 
@@ -832,19 +985,42 @@ def _bind_count_expression(feat, raw, ptype: str) -> None:
 
 
 def _build_pattern(doc, spec):
-    _require(spec, "base", "count")
+    _require(spec, "base")
     base = _get_obj(doc, spec["base"], "base")
+    ptype = str(spec.get("pattern_type", "linear"))
+    if ptype not in ("linear", "polar", "multi"):
+        raise ValueError(f"pattern_type must be linear/polar/multi, got {ptype!r}")
+    body = _parent_body(base)
+    if ptype == "multi":
+        misplaced = sorted(k for k in tip_policy.TRANSFORM_STEP_KEYS["any"] if k in spec)
+        if misplaced:
+            raise ValueError(
+                f"with pattern_type='multi', {', '.join(misplaced)} belong inside each "
+                "transforms step, not at the top level."
+            )
+        if body is None:
+            raise ValueError(
+                "pattern_type='multi' builds a PartDesign::MultiTransform, which repeats "
+                f"features inside a Body; '{base.Name}' is not in one."
+            )
+        return _build_multi_transform(doc, body, base, spec)
+    if spec.get("transforms") is not None:
+        raise ValueError("transforms is only read with pattern_type='multi'.")
+    _require(spec, "count")
     count = _pattern_count(doc, spec["count"])
     if count < 2:
         raise ValueError("pattern count must be >= 2.")
-    ptype = str(spec.get("pattern_type", "linear"))
-    if ptype not in ("linear", "polar"):
-        raise ValueError(f"pattern_type must be linear/polar, got {ptype!r}")
-    body = _parent_body(base)
     if body is not None:
         feat = _build_pd_pattern(doc, body, base, spec, ptype, count)
         _bind_count_expression(feat, spec.get("count"), ptype)
         return feat
+    pd_only = sorted(k for k in ("originals", "spacings", "mode", "length") if k in spec)
+    if pd_only:
+        raise ValueError(
+            f"{', '.join(pd_only)} need a PartDesign feature as the base; '{base.Name}' is a "
+            "Part-level object, which is repeated with a Draft array (spacing, axis, angle, "
+            "center only)."
+        )
 
     import Draft
 
