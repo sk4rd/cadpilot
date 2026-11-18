@@ -709,6 +709,10 @@ def _centered_axis_line(body, direction, center):
     (MapMode "Translate" over the origin line does NOT move it — live-verified).
     """
     line = body.newObject("PartDesign::Line", "CadPilotPolarAxis")
+    # A helper, not part of the design. Reopening the file prints FreeCAD's own
+    # "Failed to load BRep file ...Shape.brp" for it, as for every datum line;
+    # the recompute rebuilds it.
+    line.Visibility = False
     line.MapMode = "Deactivated"
     line.Placement = FreeCAD.Placement(
         FreeCAD.Vector(), FreeCAD.Rotation(FreeCAD.Vector(0, 0, 1), direction)
