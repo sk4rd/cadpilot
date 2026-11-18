@@ -33,7 +33,7 @@
   </qa_pair>
   <qa_pair>
     <question>Call operation_help with no argument to get the topic index. How many help topics are listed?</question>
-    <answer>35</answer>
+    <answer>36</answer>
   </qa_pair>
   <qa_pair>
     <question>An agent needs a picture of the model but the documentation insists only one tool can capture one. Which tool is the sole screenshot entry point?</question>

@@ -282,10 +282,12 @@ def cad(
 def execute_code_async(ctx: Context, code: str) -> list[TextContent]:
     """Run Python on a background thread and return a task_id; poll the result with get_task_result.
 
-    The code must not touch the GUI: no FreeCADGui, views or selection, document objects, recompute or save; use execute_code for those. Output goes through task_print(...); print() is not captured.
+    Touch documents only inside commit(lambda doc: ...) (GUI thread, one undo step); direct access deadlocks FreeCAD. Output via task_print(...).
 
     Args:
         code: Background-safe Python code.
+
+    Reference: operation_help("execute_code_async").
     """
     return execute_code_async_operation(get_freecad_connection(), code)
 

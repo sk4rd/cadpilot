@@ -587,7 +587,27 @@ def process_gui_tasks() -> None:
         _processing = False
 
 
-def dispatch_to_gui(task: Callable[[], Any], timeout: float = 60, force: bool = False) -> Any:
+def post_to_gui(task: Callable[[], Any]) -> None:
+    """Queue ``task`` for the GUI thread without waiting for it or its result."""
+
+    def _run() -> None:
+        try:
+            task()
+        except Exception as e:
+            logger.warning("posted GUI task raised %s: %s", type(e).__name__, e)
+
+    _rpc_request_queue.put(_run)
+    waker = _waker
+    if waker is not None:
+        waker.wake()
+
+
+def dispatch_to_gui(
+    task: Callable[[], Any],
+    timeout: float = 60,
+    force: bool = False,
+    report_held_back: bool = True,
+) -> Any:
     """Run ``task`` on the GUI thread and return its result.
 
     Uses a per-call response queue so a timeout in one call never corrupts
@@ -598,6 +618,10 @@ def dispatch_to_gui(task: Callable[[], Any], timeout: float = 60, force: bool = 
     BEFORE the interaction guards: only an operation that must work while the
     queue is deliberately held back (dismissing the modal dialog that holds it)
     belongs there.
+
+    ``report_held_back=False`` waits out the whole timeout while the user holds
+    the queue back instead of reporting it after ``_USER_HOLD_GRACE``: right for
+    a background worker, which has nobody to tell.
 
     On timeout the queued task is cancelled: if it has not started yet it
     will never run, so a caller retrying after a timeout cannot trigger a
@@ -668,7 +692,7 @@ def dispatch_to_gui(task: Callable[[], Any], timeout: float = 60, force: bool = 
             # that lands during a brief hold and then runs longer than the grace
             # slice is misreported as "user holding a mouse button" while the
             # work completes in FreeCAD — and a retry would duplicate it.
-            if not force and _defer_reason is not None and not _processing:
+            if not force and report_held_back and _defer_reason is not None and not _processing:
                 # The guards are holding the queue back on purpose and will keep
                 # doing so while the interaction lasts, so waiting out the rest
                 # of the timeout cannot succeed — report the actionable reason

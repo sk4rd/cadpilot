@@ -191,7 +191,7 @@ Screenshots come from a single tool: `get_view`. Everything else is text-only, w
 
 ## 10. Long-running computations
 
-`execute_code_async` runs code in a background thread and returns a task id. Its status, printed output, and any traceback are kept in a bounded in-memory registry (at most fifty tasks) and polled through `get_task_result`. Background code reports through `task_print` or `FreeCAD.Console` rather than `print`, because redirecting the process-wide `sys.stdout` from a thread would race with every other user of it. Background code must not touch the document or the GUI; that is the domain of the synchronous `execute_code`.
+`execute_code_async` runs code in a background thread and returns a task id. Its status, printed output, and any traceback are kept in a bounded in-memory registry (at most fifty tasks) and polled through `get_task_result`. Background code reports through `task_print` or `FreeCAD.Console` rather than `print`, because redirecting the process-wide `sys.stdout` from a thread would race with every other user of it. Background code must not touch a document or the GUI itself: doing that from another thread deadlocks FreeCAD. Its document work goes through `commit(fn)`, which runs `fn(doc)` on the main thread inside one undoable transaction and hands its result back, so the pattern is to copy shapes in, compute outside, and write the result back. The worker's `FreeCAD` hands out no document and its `FreeCADGui` refuses every call, and a document observer stops a worker at its next line if a write slips through anyway.
 
 ## 11. Trust and boundaries
 

@@ -12,7 +12,7 @@ from typing import Any
 
 import FreeCAD
 import FreeCADGui
-import Part  # noqa: F401 - pre-imported for execute_code snippets (exec_snippet copies globals)
+import Part  # also pre-imported for execute_code snippets (exec_snippet copies globals)
 from PySide import QtCore
 
 from rpc_server import dbglog, gui_dispatch, step_engine, step_journal, watchdog
@@ -132,6 +132,276 @@ def exec_snippet(code: str, out=None) -> None:
     else:
         with contextlib.redirect_stdout(out):
             exec(code, ns)
+
+
+# --- execute_code_async: document access only through commit() ----------------
+#
+# A document touched from the worker thread deadlocks FreeCAD: in the audit an
+# async addObject plus a property write or recompute froze the GUI thread, the
+# RPC server and the worker within about a second, every time. FreeCAD cannot
+# veto a change from a document observer (it swallows the observer's
+# exceptions), so the worker is kept away from documents in three layers: its
+# FreeCAD/App hand out no document off the GUI thread and its FreeCADGui
+# refuses everything there, commit() runs document work on the GUI thread, and
+# an observer stops a worker at its next line after a write slipped through
+# (an `import FreeCAD` of its own, Part.show).
+
+_MAIN_THREAD_ID = threading.main_thread().ident
+_COMMIT_TIMEOUT = 120
+_COMMITTED = object()
+_COMMIT_FAILED = object()
+
+# Worker thread ident -> task id, and the workers stopped for an off-thread write;
+# both guarded by _async_tasks_lock.
+_async_threads: dict[int, str] = {}
+_poisoned_threads: set[int] = set()
+
+_ASYNC_DOC_HINT = (
+    "Read or change documents inside commit(lambda doc: ...), which runs on the GUI "
+    "thread as one undoable step; keep heavy OCCT work outside it, on copied shapes."
+)
+
+
+class OffThreadDocumentAccess(RuntimeError):
+    """Raised in an execute_code_async worker that touched a document itself."""
+
+
+class _WorkerFreeCAD:
+    """The FreeCAD/App an execute_code_async worker sees.
+
+    Everything is the real module except the calls that hand out a document,
+    which fail off the GUI thread. Code inside commit() runs on the GUI thread
+    and gets the real behaviour from the same name.
+    """
+
+    _DOCUMENT_ACCESS = frozenset(
+        {
+            "ActiveDocument",
+            "activeDocument",
+            "getDocument",
+            "listDocuments",
+            "newDocument",
+            "openDocument",
+            "open",
+            "closeDocument",
+            "setActiveDocument",
+            "loadFile",
+            "insert",
+        }
+    )
+
+    def __init__(self, name: str):
+        self._name = name
+
+    def __getattr__(self, attr: str):
+        if attr in self._DOCUMENT_ACCESS and threading.get_ident() != _MAIN_THREAD_ID:
+            raise OffThreadDocumentAccess(
+                f"{self._name}.{attr} is not available in execute_code_async: a document "
+                f"touched off the GUI thread deadlocks FreeCAD. {_ASYNC_DOC_HINT}"
+            )
+        return getattr(FreeCAD, attr)
+
+    def __dir__(self):
+        return dir(FreeCAD)
+
+
+class _WorkerFreeCADGui:
+    """The FreeCADGui an execute_code_async worker sees: GUI-thread use only."""
+
+    def __getattr__(self, attr: str):
+        if threading.get_ident() != _MAIN_THREAD_ID:
+            raise OffThreadDocumentAccess(
+                f"FreeCADGui.{attr} is not available in execute_code_async: GUI calls must "
+                "run on the GUI thread. Use them inside commit(lambda doc: ...), or use "
+                "execute_code."
+            )
+        return getattr(FreeCADGui, attr)
+
+
+def _live_handle(value) -> str | None:
+    """Name of a document or document object in a commit() result, if any.
+
+    A live handle in the worker invites the next write off the GUI thread.
+    """
+    if isinstance(value, dict):
+        candidates = [value, *value.values()]
+    elif isinstance(value, (list, tuple, set)):
+        candidates = [value, *value]
+    else:
+        candidates = [value]
+    for item in candidates:
+        if isinstance(item, (FreeCAD.DocumentObject, FreeCAD.Document)):
+            kind = "document object" if isinstance(item, FreeCAD.DocumentObject) else "document"
+            with contextlib.suppress(Exception):
+                return f"{kind} {item.Name!r}"
+            return kind
+    return None
+
+
+def _commit_in_transaction(doc, fn, task_id: str, code: str):
+    """Run ``fn(doc)`` inside one transaction on the GUI thread; journal a change."""
+    wrapped = not doc.HasPendingTransaction
+    tx_name = step_engine.transaction_name(doc, f"execute_code_async {task_id}") if wrapped else ""
+    token_before = step_engine.undo_token(doc) if wrapped else None
+    before = step_engine.object_names(doc)
+    if wrapped:
+        doc.openTransaction(tx_name)
+    try:
+        with step_engine.engine_quiet():
+            out = fn(doc)
+        held = _live_handle(out)
+        if held is not None:
+            undone = " Its changes were rolled back." if wrapped else ""
+            raise TypeError(
+                f"commit() returned {held}: a live document handle must not reach the worker "
+                f"thread, where using it deadlocks FreeCAD. Return names or Shape.copy() "
+                f"instead.{undone}"
+            )
+    except BaseException:
+        if wrapped:
+            with contextlib.suppress(Exception):
+                doc.abortTransaction()
+        raise
+    if not wrapped:
+        return out
+    doc.commitTransaction()
+    if step_engine.undo_token(doc) != token_before:
+        # Recorded only once the commit proved it changed something: a commit
+        # that only copies shapes out must not drop a pending plan.
+        after = step_engine.object_names(doc)
+        desc = step_journal.snippet_description(code)
+        effect = step_journal.effect_label(True, before, after)
+        with step_engine.engine_quiet():
+            step_engine.record_commit(
+                doc,
+                operation="execute_code_async",
+                label=f"{desc.splitlines()[0]} · {effect}" if desc else f"async: {effect}",
+                params={"task_id": task_id, "code": code},
+                transaction=tx_name,
+                atomic=True,
+                executable=False,
+                objects_before=before,
+                objects_after=after,
+            )
+    return out
+
+
+def _make_commit(task_id: str, code: str):
+    def commit(fn, doc_name: str | None = None):
+        """Run ``fn(doc)`` on the GUI thread in one undoable transaction; return its result.
+
+        ``doc`` is ``doc_name``'s document, else the active one. An exception in
+        ``fn`` rolls the transaction back and is raised here.
+        """
+        if threading.get_ident() == _MAIN_THREAD_ID:
+            raise RuntimeError("commit() is for execute_code_async; on the GUI thread call fn(doc)")
+
+        def task():
+            try:
+                doc = FreeCAD.getDocument(doc_name) if doc_name else FreeCAD.ActiveDocument
+                if doc is None:
+                    raise RuntimeError("commit(): no active document; pass doc_name")
+                with step_engine.active_document(doc):
+                    return _COMMITTED, _commit_in_transaction(doc, fn, task_id, code)
+            except Exception as e:
+                return _COMMIT_FAILED, e
+
+        res = dispatch_to_gui(task, timeout=_COMMIT_TIMEOUT, report_held_back=False)
+        if isinstance(res, tuple) and len(res) == 2 and res[0] is _COMMITTED:
+            return res[1]
+        if isinstance(res, tuple) and len(res) == 2 and res[0] is _COMMIT_FAILED:
+            raise res[1]
+        detail = res.get("error") if isinstance(res, dict) else res
+        raise RuntimeError(f"commit() failed: {detail}")
+
+    return commit
+
+
+def _poison_tracer(filename: str, ident: int):
+    """Per-thread trace: raise at the task's next line once it wrote off-thread.
+
+    Only frames compiled from the task's own code get line events, so library
+    code and observer slots (where FreeCAD would swallow the exception) are
+    never the place it is raised.
+    """
+
+    def on_line(frame, event, arg):
+        if event == "line" and ident in _poisoned_threads:
+            with _async_tasks_lock:
+                entry = _async_tasks.get(_async_threads.get(ident, ""), {})
+            raise OffThreadDocumentAccess(entry.get("error") or "document written off-thread")
+        return on_line
+
+    def on_call(frame, event, arg):
+        return on_line if frame.f_code.co_filename == filename else None
+
+    return on_call
+
+
+def _flag_off_thread_write(what: str, obj) -> None:
+    ident = threading.get_ident()
+    with contextlib.suppress(Exception):
+        what = f"{what} {obj.Name!r}"
+    with _async_tasks_lock:
+        task_id = _async_threads.get(ident)
+        entry = _async_tasks.get(task_id) if task_id else None
+        first = ident not in _poisoned_threads
+        _poisoned_threads.add(ident)
+        if entry is not None and first:
+            entry["status"] = "error"
+            entry["off_thread_write"] = what
+            entry["error"] = (
+                f"execute_code_async task {task_id} wrote to a document from its worker "
+                f"thread ({what}). That deadlocks FreeCAD, so the task was stopped at its "
+                f"next line. {_ASYNC_DOC_HINT}"
+            )
+    if first:
+        dbglog.get_logger("async").error(
+            "document written off the GUI thread by %s (%s); %s",
+            f"task {task_id}" if task_id else f"thread {threading.current_thread().name}",
+            what,
+            "stopping it at its next line" if task_id else "FreeCAD may deadlock",
+        )
+
+
+class _OffThreadWriteObserver:
+    """Flags document changes made off the GUI thread (they cannot be vetoed)."""
+
+    def _check(self, what: str, obj) -> None:
+        if threading.get_ident() != _MAIN_THREAD_ID:
+            _flag_off_thread_write(what, obj)
+
+    def slotCreatedDocument(self, doc):
+        self._check("created document", doc)
+
+    def slotDeletedDocument(self, doc):
+        self._check("closed document", doc)
+
+    def slotBeforeRecomputeDocument(self, doc):
+        self._check("recomputed", doc)
+
+    def slotCreatedObject(self, obj):
+        self._check("created", obj)
+
+    def slotDeletedObject(self, obj):
+        self._check("deleted", obj)
+
+    def slotBeforeChangeObject(self, obj, prop):
+        self._check(f"changed {prop} of", obj)
+
+
+_OFF_THREAD_OBSERVER_ATTR = "_cadpilot_off_thread_writes"
+
+
+def _install_off_thread_observer() -> None:
+    """(Re)install the singleton observer; safe across hot reloads."""
+    old = getattr(FreeCAD, _OFF_THREAD_OBSERVER_ATTR, None)
+    if old is not None:
+        with contextlib.suppress(Exception):
+            FreeCAD.removeDocumentObserver(old)
+    observer = _OffThreadWriteObserver()
+    FreeCAD.addDocumentObserver(observer)
+    setattr(FreeCAD, _OFF_THREAD_OBSERVER_ATTR, observer)
 
 
 class FreeCADRPC:
@@ -1114,17 +1384,24 @@ class FreeCADRPC:
         exceed the CADPilot timeout. Returns a task_id; poll get_task_result(task_id)
         for status ("running"/"done"/"error"), output captured via task_print(),
         and the traceback on failure.
+
+        The code sees ``FreeCAD``/``App`` (no document access off the GUI
+        thread), ``Part``, ``task_print`` and ``commit(fn, doc_name=None)``,
+        which runs ``fn(doc)`` on the GUI thread in one undoable transaction.
         """
         task_id = uuid.uuid4().hex[:8]
         with _async_tasks_lock:
             if len(_async_tasks) >= _ASYNC_TASKS_MAX:
-                # Evict only FINISHED tasks (FIFO). Dropping a "running" entry
+                # Evict only FINISHED tasks (FIFO). Dropping a running entry
                 # would orphan it: the worker could never publish its result
-                # and get_task_result would report "unknown task_id".
+                # and get_task_result would report "unknown task_id". A task
+                # flagged for an off-thread write reads "error" while its
+                # worker still runs.
+                running = set(_async_threads.values())
                 for old_id, old_entry in list(_async_tasks.items()):
                     if len(_async_tasks) < _ASYNC_TASKS_MAX:
                         break
-                    if old_entry["status"] != "running":
+                    if old_entry["status"] != "running" and old_id not in running:
                         del _async_tasks[old_id]
                 if len(_async_tasks) >= _ASYNC_TASKS_MAX:
                     return {
@@ -1148,11 +1425,15 @@ class FreeCADRPC:
                         )
                         entry["output"] = marker + entry["output"][-_ASYNC_OUTPUT_MAX:]
 
+        # Posted, not dispatched: waiting for the status bar made this call block
+        # for up to the dispatch timeout whenever the GUI thread was busy.
         def _set_status(msg):
-            dispatch_to_gui(lambda: FreeCADGui.getMainWindow().statusBar().showMessage(msg))
+            gui_dispatch.post_to_gui(
+                lambda: FreeCADGui.getMainWindow().statusBar().showMessage(msg)
+            )
 
         def _clear_status():
-            dispatch_to_gui(lambda: FreeCADGui.getMainWindow().statusBar().clearMessage())
+            gui_dispatch.post_to_gui(lambda: FreeCADGui.getMainWindow().statusBar().clearMessage())
 
         def worker() -> None:
             # NOTE: we do NOT redirect sys.stdout here. contextlib.redirect_stdout
@@ -1160,20 +1441,43 @@ class FreeCADRPC:
             # GUI thread and other concurrent work. Background code reports via
             # task_print() (captured for get_task_result) or FreeCAD.Console
             # (which is thread-safe).
-            exec_globals = {**globals(), "task_print": task_print}
+            ident = threading.get_ident()
+            filename = f"<execute_code_async {task_id}>"
+            namespace = {
+                "__name__": "__cadpilot_async__",
+                "FreeCAD": _WorkerFreeCAD("FreeCAD"),
+                "App": _WorkerFreeCAD("App"),
+                "FreeCADGui": _WorkerFreeCADGui(),
+                "Part": Part,
+                "task_print": task_print,
+                "commit": _make_commit(task_id, code),
+            }
+            with _async_tasks_lock:
+                _async_threads[ident] = task_id
             status, error = "done", None
+            sys.settrace(_poison_tracer(filename, ident))
             try:
-                exec(code, exec_globals)
-                FreeCAD.Console.PrintMessage(f"Async task {task_id} completed.\n")
+                exec(compile(code, filename, "exec"), namespace)
             except Exception as e:
                 status = "error"
                 error = f"{e}\n{traceback.format_exc()}"
-                FreeCAD.Console.PrintError(f"Async task {task_id} error: {error}\n")
+            finally:
+                sys.settrace(None)
             with _async_tasks_lock:
+                _async_threads.pop(ident, None)
+                _poisoned_threads.discard(ident)
                 entry = _async_tasks.get(task_id)
                 if entry is not None:
+                    if entry.get("off_thread_write"):
+                        status = "error"
+                        if error is None or entry["error"].split("\n", 1)[0] not in error:
+                            error = entry["error"] + (f"\n\n{error}" if error else "")
                     entry["status"] = status
                     entry["error"] = error
+            if status == "done":
+                FreeCAD.Console.PrintMessage(f"Async task {task_id} completed.\n")
+            else:
+                FreeCAD.Console.PrintError(f"Async task {task_id} error: {error}\n")
             _clear_status()
 
         _set_status(f"CADPilot: running background task {task_id}…")
@@ -1787,3 +2091,4 @@ def restart_rpc_server(port: int | None = None) -> dict:
 
 register_commands()
 schedule_toggle_sync()
+_install_off_thread_observer()

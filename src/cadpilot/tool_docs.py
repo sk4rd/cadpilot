@@ -778,6 +778,38 @@ skipped by replay. Re-execution is available for modeling steps (create_object /
 edit_object / delete_object / batch / execute_code / PartDesign & Part
 features) and for the assembly toolchain (assembly / assemble / align_shapes /
 set_anchors), which journals its full payload and re-runs for real.""",
+    "execute_code_async": """\
+execute_code_async — Python on a background thread, polled with get_task_result.
+
+For long OCCT work (fuse/cut/loft over many shapes) that would outlast
+execute_code's 90s GUI-thread timeout. The code sees FreeCAD/App, Part,
+task_print(...) (captured for get_task_result; print() is not) and commit().
+
+The worker must never touch a document or FreeCADGui itself: that deadlocks
+FreeCAD (the GUI, the RPC server and the worker all freeze). App.ActiveDocument,
+App.getDocument(...) and every FreeCADGui call fail in the worker, and a write
+that slips through anyway stops the task at its next line.
+
+commit(fn, doc_name=None) runs fn(doc) on the GUI thread inside one undoable
+transaction (one journal step) and returns fn's result; doc is doc_name's
+document, else the active one. An exception in fn rolls the transaction back
+and is raised in the worker. Return names or Shape.copy() values, never a
+document object: commit() refuses one and rolls back.
+
+Copy in, compute outside, write back:
+
+  a, b = commit(lambda d: (d.Body.Shape.copy(), d.Tool.Shape.copy()), "Part1")
+  result = a.cut(b).removeSplitter()  # heavy, off the GUI thread
+
+  def write_back(d):
+      d.addObject("Part::Feature", "Cut").Shape = result
+      d.recompute()
+
+  commit(write_back, "Part1")
+  task_print("volume", result.Volume)
+
+Each commit() waits its turn on the GUI thread (up to 120s, also while the user
+holds the queue back), so put many small writes into one commit().""",
     "get_addon_log": """\
 get_addon_log — read the FreeCAD addon's in-memory debug log.
 
@@ -796,7 +828,9 @@ log file path).
 
 What is worth grepping for when debugging:
   "GUI dispatch timed out"   — the GUI thread never picked the task up
-  "wake/heartbeat chain"     — timeout with an idle GUI thread: the waker died
+  "heartbeat timer"          — timeout with an idle GUI thread: the waker is gone
+  "late completion"          — a call reported as timed out finished afterwards
+  "off the GUI thread"       — an execute_code_async worker wrote to a document
   "mouse guard:"             — a drag (or a phantom hold) deferred the queue
   "reported after"           — a call gave up early on user back-pressure
   "aborted transaction"      — a modeling op failed and was rolled back
@@ -977,6 +1011,7 @@ HELP_TOPICS: dict[str, str] = {
             "step_plan",
             "step_control",
             "get_addon_log",
+            "execute_code_async",
             "multi_agent",
             "session",
             "screenshots",
@@ -988,6 +1023,7 @@ HELP_TOPICS: dict[str, str] = {
     "step_plan": "step_plan tool (submit a plan without executing it)",
     "step_control": "step_control tool (run / roll back / re-run steps)",
     "get_addon_log": "get_addon_log tool (read the addon's debug log)",
+    "execute_code_async": "execute_code_async tool (background code; commit() for documents)",
     "multi_agent": "running several agents against one FreeCAD without cross-talk",
     "session": "session tool (step recording + rollback state machine)",
     "screenshots": "get_view is the only capture tool (file path delivery)",

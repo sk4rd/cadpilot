@@ -188,7 +188,7 @@ docstring 在每场对话中都消耗 token，因此每个 `@mcp.tool()` 的 doc
 
 ## 10. 长时间计算
 
-`execute_code_async` 在后台线程中运行代码并返回任务 id。状态、打印输出与异常栈保存在一个有上限的内存注册表中（最多 50 个任务），通过 `get_task_result` 轮询。后台代码通过 `task_print` 或 `FreeCAD.Console` 汇报，而非 `print`，因为从线程重定向进程级 `sys.stdout` 会与其余使用方发生竞态。后台代码不得触碰文档与 GUI，那是同步 `execute_code` 的职责。
+`execute_code_async` 在后台线程中运行代码并返回任务 id。状态、打印输出与异常栈保存在一个有上限的内存注册表中（最多 50 个任务），通过 `get_task_result` 轮询。后台代码通过 `task_print` 或 `FreeCAD.Console` 汇报，而非 `print`，因为从线程重定向进程级 `sys.stdout` 会与其余使用方发生竞态。后台代码不得自行触碰文档与 GUI：从其他线程这样做会让 FreeCAD 死锁。文档操作经由 `commit(fn)` 完成，它在主线程上把 `fn(doc)` 放进一个可撤销的事务中执行并返回结果，因此惯用做法是先把形状复制进来，在外面计算，再把结果写回。工作线程看到的 `FreeCAD` 不交出任何文档，`FreeCADGui` 拒绝一切调用；若仍有写入漏过，文档观察者会让该工作线程在下一行停下。
 
 ## 11. 信任与边界
 
