@@ -2134,6 +2134,70 @@ def _flip_up_to_direction(doc, feat, spec, fc_mode) -> None:
     )
 
 
+def _square_face(centre, normal, half: float):
+    """A square planar face of side 2*half, centred on ``centre``, normal to ``normal``."""
+    u = normal.cross(FreeCAD.Vector(1, 0, 0))
+    if u.Length < 1e-6:
+        u = normal.cross(FreeCAD.Vector(0, 1, 0))
+    u.normalize()
+    v = normal.cross(u)
+    v.normalize()
+    corners = [centre + (u * a + v * b) * half for a, b in ((1, 1), (-1, 1), (-1, -1), (1, -1))]
+    return Part.Face(Part.makePolygon([*corners, corners[0]]))
+
+
+def _refuse_runaway_up_to(doc, feat, fc_mode) -> None:
+    """Refuse an up-to feature that ran past the part instead of stopping at a face.
+
+    When no face covers the whole profile (a stub whose top rises above the
+    cylinder it should end on), FreeCAD's up-to modes do not fail: they extrude
+    a long way and report success (live on 1.1.4: up_to_first, up_to_face and
+    UpToShape all ran a 36 mm stub out to x = 227..254). The end of an up-to
+    feature must lie within the part it is limited by.
+    """
+    if fc_mode not in ("UpToFirst", "UpToLast", "UpToFace"):
+        return
+    base = getattr(feat, "BaseFeature", None)
+    if base is None:
+        return
+    doc.recompute()
+    try:
+        added, part = feat.AddSubShape, base.Shape
+        plane = feat.Profile[0].getGlobalPlacement()
+        direction = plane.Rotation.multVec(FreeCAD.Vector(0, 0, 1))
+        # FreeCAD turns an up-to feature toward its face whatever Reversed says,
+        # so the side of the sketch plane the solid lies on is the direction
+        if (added.BoundBox.Center - plane.Base).dot(direction) < 0:
+            direction = -direction
+    except Exception:
+        return
+    if added.isNull() or part.isNull():
+        return
+
+    far = 1e5
+    wall = _square_face(direction * far, direction, 2 * far)
+
+    def reach(shape) -> float:
+        # exact for curved faces too, where the farthest point is no vertex
+        return far - shape.distToShape(wall)[0]
+
+    limit = reach(part)
+    with contextlib.suppress(Exception):
+        link, subs = feat.UpToFace
+        for sub in subs or [""]:
+            limit = max(limit, reach(link.Shape.getElement(sub) if sub else link.Shape))
+    # a positive offset ends past the face on purpose
+    with contextlib.suppress(Exception):
+        limit += max(0.0, float(getattr(feat.Offset, "Value", feat.Offset)))
+    past = reach(added) - limit
+    if past > 1e-3:
+        raise RuntimeError(
+            f"{fc_mode} found no face of the part that covers the whole profile, so FreeCAD "
+            f"extruded {past:.1f} mm past the part instead of stopping. Pad a length, or limit "
+            "it to a face that covers the whole profile."
+        )
+
+
 def _build_padlike(doc, spec, fc_type, default_name):
     op = fc_type.split("::")[-1].lower()
     sketch = _profile_sketch(doc, spec, fc_type)
@@ -2167,6 +2231,7 @@ def _build_padlike(doc, spec, fc_type, default_name):
             feat.Midplane = midplane
     _add_note(mode_note)
     _flip_up_to_direction(doc, feat, spec, fc_mode)
+    _refuse_runaway_up_to(doc, feat, fc_mode)
     _auto_detect_cut_direction(doc, feat, spec, fc_type, base_vol)
     return feat
 

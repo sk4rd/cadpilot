@@ -8,6 +8,8 @@ One section per problem:
   [refine]  refining a fuse flush with rounded corners gave an invalid shape: the pad
             after it reported "added no material" while it threw the body away, and a
             pocket on it could not tell which way cut material, so it cut air
+  [upto]    an up-to pad whose profile no face covers ran far past the part as success
+  [axis]    the polar pattern's helper axis showed in every view
   [batch]   a batch step run by step_control came back as a bare success
   [journal] a fix recorded after a failed step landed behind it; failed steps could
             not be dropped
@@ -281,6 +283,70 @@ check(
     "[refine] a pocket from the bottom plane still finds the material",
     before - after > 10,
     f"{before} -> {after}: {out[:500]}",
+)
+
+# [upto] -------------------------------------------------------------------------
+d = newdoc("QUpTo")
+disc = {
+    "geometry": [{"type": "circle", "center": [0, 0], "radius": 32.9}],
+    "constraints": [
+        {"type": "coincident", "items": [[0, "center"], [-1, "start"]]},
+        {"type": "radius", "items": [0], "value": 32.9, "name": "R"},
+    ],
+}
+cad(d, "sketch", "V", plane="XY", **disc)
+cad(d, "pad", "V", length=18, name="Volute")
+stub = {
+    "geometry": [{"type": "circle", "center": [22.4, 13], "radius": 8.5}],
+    "constraints": [
+        {"type": "radius", "items": [0], "value": 8.5, "name": "R"},
+        {
+            "type": "distance_x",
+            "items": [[-1, "start"], [0, "center"]],
+            "value": 22.4,
+            "name": "CX",
+        },
+        {"type": "distance_y", "items": [[-1, "start"], [0, "center"]], "value": 13, "name": "CY"},
+    ],
+}
+cad(d, "sketch", "St", plane="YZ", offset=-36.3, **stub)
+out = cad(d, "pad", "St", pad_type="up_to_first", name="Stub")
+check("[upto] an up_to_first that runs past the part is refused", "past the part" in out, out[:300])
+stub["geometry"][0].update(center=[22.4, 9], radius=4)
+stub["constraints"][0]["value"] = 4
+stub["constraints"][2]["value"] = 9
+cad(d, "sketch", "St2", plane="YZ", offset=-36.3, **stub)
+out = cad(d, "pad", "St2", pad_type="up_to_first", name="Stub2")
+check(
+    "[upto] one that stops at the cylinder still builds", "created successfully" in out, out[:300]
+)
+
+# [axis] -------------------------------------------------------------------------
+cad(
+    d,
+    "sketch",
+    "H",
+    plane="XY",
+    offset=18,
+    **{
+        "geometry": [{"type": "circle", "center": [20, 0], "radius": 2}],
+        "constraints": [
+            {"type": "radius", "items": [0], "value": 2, "name": "R"},
+            {
+                "type": "distance_x",
+                "items": [[-1, "start"], [0, "center"]],
+                "value": 20,
+                "name": "CX",
+            },
+            {"type": "point_on_object", "items": [[0, "center"], -1]},
+        ],
+    },
+)
+cad(d, "pocket", "H", length=5, name="Hole")
+cad(d, "pattern", "Hole", pattern_type="polar", count=3, center=[2, 0, 0], name="Holes")
+check(
+    "[axis] the polar pattern's helper axis is hidden",
+    fc(d, "d.getObject('CadPilotPolarAxis').Visibility") == "False",
 )
 
 # [batch] ------------------------------------------------------------------------

@@ -488,7 +488,9 @@ Example (widen a named dimension, add a centred hole, drop a chamfer line):
 pad — extrude a closed sketch profile (obj_name = profile sketch).
 Optional in obj_properties: length (default 10), pad_type, length2, up_to_face,
 offset, reversed, midplane, refine, body, name.
-refine: true/false sets the feature's Refine (merging coplanar faces); left out, FreeCAD's preference decides, and a result that only refining made invalid is rebuilt unrefined and the reply says so.
+refine: true/false sets the feature's Refine (merging coplanar faces); left
+out, FreeCAD's preference decides, and a result that only refining made
+invalid is rebuilt unrefined and the reply says so.
 pad_type (FreeCAD's own names work too):
   length       — `length` mm (the default)
   up_to_first  — up to the first face of the part along the extrusion
@@ -499,7 +501,9 @@ pad_type (FreeCAD's own names work too):
 offset shifts where an up_to_* mode ends (+ goes past the face). An up_to_*
 feature that finds no face in its default direction is built reversed, and the
 reply says so; an explicit reversed is never overridden. `length` is ignored in
-the up_to_* modes.
+the up_to_* modes. An up_to_* feature that ends past the part is refused: when no
+face covers the whole profile (a stub whose top rises above the cylinder it
+should end on), FreeCAD extrudes a long way and calls it success.
 Numeric params accept "=expressions". The profile must have a closed wire that
 does not cross itself (a crossing outline is refused).
 A NEGATIVE length is legal and extrudes the other way (the result warns).
