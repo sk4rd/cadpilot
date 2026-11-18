@@ -19,6 +19,7 @@ standard icons (floppy, trash, media arrows) clash with FreeCAD's chrome.
 
 from __future__ import annotations
 
+import contextlib
 import html
 import json
 import time
@@ -191,7 +192,11 @@ class StepPanel(QtWidgets.QDockWidget):
         self._details_for: int = 0
         self._in_apply: bool = False
         self._stale_logged: set[int] = set()
-        self._entries: list[dict] = []
+        # One log per document: the panel follows the document the user is
+        # looking at, and a log that ran on across documents put one model's
+        # failures under another's steps.
+        self._logs: dict[str, list[dict]] = {}
+        self._doc_name: str | None = None
         self._spotlight: dict | None = None
         self._meta_raw: str = ""
         self._derive_colors()
@@ -523,6 +528,53 @@ QLabel#PanelStatus {{ color: {c["dim"]}; padding: 5px 8px 4px 8px; }}
 
     # --- refresh ---------------------------------------------------------
 
+    @property
+    def _entries(self) -> list[dict]:
+        return self._logs.setdefault(self._doc_name or "", [])
+
+    def _shown_document(self):
+        """The document the user is looking at: the GUI's, not App's.
+
+        App.ActiveDocument is whatever the last RPC call bound (execute_code
+        switches it and leaves it there), so following it moved the panel to
+        another model behind the user's back.
+        """
+        with contextlib.suppress(Exception):
+            gui_doc = FreeCADGui.ActiveDocument
+            if gui_doc is not None:
+                return gui_doc.Document
+        return FreeCAD.ActiveDocument
+
+    def _doc(self):
+        """The document this panel shows, which every action applies to."""
+        if self._doc_name and self._doc_name in FreeCAD.listDocuments():
+            return FreeCAD.getDocument(self._doc_name)
+        return None
+
+    def _bind(self, doc) -> None:
+        name = doc.Name if doc is not None else None
+        if name == self._doc_name:
+            return
+        # A closed document takes its log with it; one reopened under the same
+        # name starts a fresh one.
+        open_docs = set(FreeCAD.listDocuments())
+        for gone in [n for n in self._logs if n and n not in open_docs]:
+            del self._logs[gone]
+        self._doc_name = name
+        self._digest = None
+        self._note = None
+        self._records = []
+        self._stale = {}
+        self._stale_logged = set()
+        # A row number means nothing in another document's journal.
+        self.tree.blockSignals(True)
+        self.tree.clearSelection()
+        self.tree.blockSignals(False)
+        self._details_for = 0
+        self.editor.document().setModified(False)
+        self._spotlight = None
+        self._render_log()
+
     def refresh(self) -> None:
         """Redraw when the journal changed; report drift on its own channel.
 
@@ -531,7 +583,8 @@ QLabel#PanelStatus {{ color: {c["dim"]}; padding: 5px 8px 4px 8px; }}
         manual Ctrl+Z changes the undo stack WITHOUT touching the journal —
         so it is checked on every tick and logged once per episode.
         """
-        doc = FreeCAD.ActiveDocument
+        self._bind(self._shown_document())
+        doc = self._doc()
         if doc is None:
             if self._note != NO_DOCUMENT:
                 self._digest = None
@@ -756,7 +809,7 @@ QLabel#PanelStatus {{ color: {c["dim"]}; padding: 5px 8px 4px 8px; }}
 
     def _update_actions(self) -> None:
         rec = self._selected_record()
-        has_doc = FreeCAD.ActiveDocument is not None
+        has_doc = self._doc() is not None
         # The cursor is next_runnable (planned OR failed): a failed step's
         # transaction aborted, so its effect is not in the model and Next must
         # be able to retry it. Gating on planned-only disabled both buttons the
@@ -784,7 +837,7 @@ QLabel#PanelStatus {{ color: {c["dim"]}; padding: 5px 8px 4px 8px; }}
     # --- actions ---------------------------------------------------------
 
     def _apply(self, spec: dict, warn: bool = True):
-        doc = FreeCAD.ActiveDocument
+        doc = self._doc()
         if doc is None:
             self._warn(NO_DOCUMENT)
             return None
@@ -822,7 +875,9 @@ QLabel#PanelStatus {{ color: {c["dim"]}; padding: 5px 8px 4px 8px; }}
         if res is None or res.get("success"):
             return
         error = str(res.get("error") or "The operation failed.")
-        if "force=true" in error and self._confirm(f"{error}\n\nForce it?"):
+        doc = self._doc()
+        where = f"{_doc_title(doc)}: " if doc is not None else ""
+        if "force=true" in error and self._confirm(f"{where}{error}\n\nForce it?"):
             self._apply({**spec, "force": True})
         else:
             self._warn(f"{_op_label(spec)}: {error}")
@@ -838,7 +893,7 @@ QLabel#PanelStatus {{ color: {c["dim"]}; padding: 5px 8px 4px 8px; }}
 
     def _rollback(self, _checked=False):
         index = self._selected_index()
-        doc = FreeCAD.ActiveDocument
+        doc = self._doc()
         if not index or doc is None:
             return
         plan = step_engine.rollback_plan(doc, step_engine.read_journal(doc), index - 1)
@@ -870,7 +925,7 @@ QLabel#PanelStatus {{ color: {c["dim"]}; padding: 5px 8px 4px 8px; }}
 
     def _reject(self, _checked=False):
         rec = self._selected_record()
-        doc = FreeCAD.ActiveDocument
+        doc = self._doc()
         if rec is None or doc is None:
             return
         plan = step_engine.reject_plan(doc, step_engine.read_journal(doc), rec.index)
@@ -902,7 +957,7 @@ QLabel#PanelStatus {{ color: {c["dim"]}; padding: 5px 8px 4px 8px; }}
         self._apply({"operation": "drop", "index": rec.index})
 
     def _replay(self, _checked=False):
-        doc = FreeCAD.ActiveDocument
+        doc = self._doc()
         if doc is None:
             return
         plan = step_engine.rollback_plan(doc, step_engine.read_journal(doc), 0)
@@ -918,10 +973,13 @@ QLabel#PanelStatus {{ color: {c["dim"]}; padding: 5px 8px 4px 8px; }}
         self._apply_maybe_force({"operation": "replay", "index": 0})
 
     def _snapshot(self, _checked=False):
+        doc = self._doc()
+        if doc is None:
+            return
         text, ok = QtWidgets.QInputDialog.getText(
             self,
             "Snapshot",
-            "Note for the baseline (what was done outside the journal):",
+            f"Note for the baseline of {_doc_title(doc)} (what was done outside the journal):",
         )
         if not ok:
             return

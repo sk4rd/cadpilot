@@ -107,7 +107,7 @@ def panel(doc, action, select=None, answer="No", shot=None):
         import json, FreeCADGui
         from PySide import QtCore, QtWidgets
         from rpc_server import step_panel
-        FreeCAD.setActiveDocument({doc!r})
+        FreeCADGui.setActiveDocument({doc!r})
         pn = step_panel.ensure_panel()
         pn.setVisible(True)
         pn._digest = None
@@ -530,6 +530,28 @@ check(
     out["dialogs"] and "transaction(s)" in out["dialogs"][0] and "UserChamfer" in out["dialogs"][0],
     str(out),
 )
+panel(D, "act_accept", select=3)
+user(
+    D,
+    """
+    import FreeCADGui
+    from rpc_server import step_panel
+    FreeCADGui.setActiveDocument('LJ_Gone')
+    pn = step_panel.ensure_panel()
+    pn.refresh()
+    FreeCAD._cadpilot_live_bound = (pn._doc_name, pn._selected_index(), len(pn._entries))
+    FreeCADGui.setActiveDocument('LJ_Own')
+    pn.refresh()
+    FreeCAD._cadpilot_live_back = (pn._doc_name, [e["text"] for e in pn._entries][-1:])
+    """,
+)
+bound = py("import FreeCAD\nprint(FreeCAD._cadpilot_live_bound, FreeCAD._cadpilot_live_back)", D)
+check(
+    "J the panel follows the shown document, with no row carried over and its own log",
+    bound.startswith("('LJ_Gone', 0,") and "('LJ_Own', ['accept step 3']" in bound,
+    bound,
+)
+control(D, "accept", index=3, params={"on": False})
 after = py(
     "import FreeCAD\nprint(sorted(o.Name for o in FreeCAD.getDocument('LJ_Own').Objects))", D
 )
