@@ -172,3 +172,89 @@ def test_tangent_and_perpendicular_forms():
     assert _args({"type": "tangent", "items": [0, 1, [3, "start"]]}) == [
         ("TangentViaPoint", 0, 1, 3, 1)
     ]
+
+
+# Two lines, a circle and an arc, one external circle and one external line.
+KINDS = ss.geometry_kinds(
+    ["LineSegment", "LineSegment", "Circle", "ArcOfCircle"], ["Circle", "LineSegment"]
+)
+
+
+def _kplan(*constraints):
+    return [p["args"] for p in ss.plan_constraints(list(constraints), KINDS)]
+
+
+def test_geometry_kinds_number_internal_axes_and_external():
+    assert KINDS == {
+        0: "line",
+        1: "line",
+        2: "circle",
+        3: "arc",
+        -1: "x_axis",
+        -2: "y_axis",
+        -3: "circle",
+        -4: "line",
+    }
+
+
+def test_an_external_circle_exposes_its_center():
+    """Coincident(p, -3, center) on an external circle solves (live 1.1.4); the
+    old blanket rule refused 'center' on every external id."""
+    assert _kplan({"type": "coincident", "items": [[2, "center"], [-3, "center"]]}) == [
+        ("Coincident", 2, 3, -3, 3)
+    ]
+    with pytest.raises(ValueError, match="a full circle has only its 'center'"):
+        _kplan({"type": "coincident", "items": [[0, "start"], [-3, "start"]]})
+    assert _kplan({"type": "coincident", "items": [[0, "start"], [-4, "end"]]}) == [
+        ("Coincident", 0, 1, -4, 2)
+    ]
+
+
+def test_a_line_midpoint_coincidence_becomes_symmetric():
+    """[line, 'mid'] passed addConstraint and failed at solve (Malformed)."""
+    assert _kplan({"type": "coincident", "items": [[0, "mid"], [-1, "start"]]}) == [
+        ("Symmetric", 0, 1, 0, 2, -1, 1)
+    ]
+    assert _kplan({"type": "coincident", "items": [[2, "center"], [1, "mid"]]}) == [
+        ("Symmetric", 1, 1, 1, 2, 2, 3)
+    ]
+    with pytest.raises(ValueError, match=r"constraints\[0\] \(distance_x\).*no midpoint vertex"):
+        _kplan({"type": "distance_x", "items": [[0, "mid"]], "value": 5})
+    with pytest.raises(ValueError, match="two line midpoints"):
+        _kplan({"type": "coincident", "items": [[0, "mid"], [1, "mid"]]})
+
+
+def test_axis_points_other_than_the_origin_are_refused():
+    """[-1, 'end'] used to map silently to the origin; FreeCAD's own (-1, 2) is
+    a unit point at (1, 0), and [-2, 'start'] duplicates the origin."""
+    assert _kplan({"type": "coincident", "items": [[0, "start"], [-1, "center"]]}) == [
+        ("Coincident", 0, 1, -1, 1)
+    ]
+    with pytest.raises(ValueError, match=r"the X axis \(-1\) has one point, the origin"):
+        _kplan({"type": "coincident", "items": [[0, "start"], [-1, "end"]]})
+    with pytest.raises(ValueError, match=r"the Y axis \(-2\) has no point"):
+        ss.plan_constraints([{"type": "coincident", "items": [[0, "start"], [-2, "start"]]}])
+
+
+def test_freecad_point_numbers_are_accepted_as_keywords():
+    """The live corpus writes [-1, 1] for the origin (FreeCAD's PointPos)."""
+    assert _kplan({"type": "coincident", "items": [[0, 1], [-1, 1]]}) == [
+        ("Coincident", 0, 1, -1, 1)
+    ]
+    assert _kplan({"type": "coincident", "items": [[2, 3], [3, 2]]}) == [("Coincident", 2, 3, 3, 2)]
+    with pytest.raises(ValueError, match=r"the X axis \(-1\) has one point"):
+        _kplan({"type": "coincident", "items": [[0, 1], [-1, 2]]})
+
+
+def test_a_missing_geo_id_names_the_constraint_and_the_valid_range():
+    with pytest.raises(ValueError) as e:
+        _kplan(
+            {"type": "horizontal", "items": [0]},
+            {"type": "distance", "items": [7], "value": 3},
+        )
+    assert str(e.value) == (
+        "constraints[1] (distance): GeoId 7 does not exist; this sketch has geometry 0..3, "
+        "the axes -1 (X) and -2 (Y), external -3..-4"
+    )
+    with pytest.raises(ValueError, match=r"GeoId -5 does not exist"):
+        _kplan({"type": "point_on_object", "items": [[0, "start"], -5]})

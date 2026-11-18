@@ -196,39 +196,21 @@ def _add_external(sketch, doc, body, external):
             sketch.addExternal(binder.Name, "Edge1" if elem.startswith("Edge") else "Vertex1")
 
 
-def _check_external_point_refs(spec):
-    """Reject 'mid'/'center' point refs on external GeoIds up front.
-
-    External edges expose only start/end as constrainable points; a 'mid'
-    reference passes addConstraint but fails at solve time with a cryptic
-    MalformedConstraints diagnostic — validate early with an actionable error.
-    """
-    n_ext = len(spec.get("external") or [])
-    if not n_ext:
-        return
-    ext_ids = {-(3 + i) for i in range(n_ext)}
-    for ci, c in enumerate(spec.get("constraints") or []):
-        for item in c.get("items") or []:
-            if (
-                isinstance(item, (list, tuple))
-                and len(item) == 2
-                and isinstance(item[0], int)
-                and item[0] in ext_ids
-                and str(item[1]).lower() in ("mid", "center")
-            ):
-                raise ValueError(
-                    f"constraints[{ci}]: external geometry (GeoId {item[0]}) exposes "
-                    "only 'start'/'end' points — 'mid'/'center' is not constrainable."
-                )
-
-
 # --- constraints ----------------------------------------------------------------
+
+
+def _geometry_kinds(sketch) -> dict:
+    """GeoId -> kind for the sketch as it is now (ExternalGeo[0:2] are the axes)."""
+    return sketch_spec.geometry_kinds(
+        [type(g).__name__ for g in sketch.Geometry],
+        [type(g).__name__ for g in list(sketch.ExternalGeo)[2:]],
+    )
 
 
 def _add_constraints(sketch, constraints: list) -> list[dict]:
     """Add the spec's constraints; returns their origins, indexed like Constraints."""
     origins = [None] * len(sketch.Constraints)
-    for plan in sketch_spec.plan_constraints(constraints):
+    for plan in sketch_spec.plan_constraints(constraints, _geometry_kinds(sketch)):
         args = plan["args"]
         if plan["datum"] is None:
             con = Sketcher.Constraint(*args)
@@ -584,7 +566,6 @@ def build_sketch_gui(doc, spec):
     _attach_sketch(sketch, doc, spec)
     _add_geometry(sketch, geometry, spec.get("construction"))
     _add_external(sketch, doc, body, spec.get("external"))
-    _check_external_point_refs(spec)
     origins = _add_constraints(sketch, spec.get("constraints"))
     doc.recompute()
     dof, diag = _solve(sketch, origins)

@@ -314,12 +314,19 @@ Optional: plane, offset, body, construction, external, constraints.
 - construction: list of GeoIds treated as construction geometry.
 - external: list of [obj_name, "EdgeN"|"VertexN"] — external geometry
   (cross-part parametric references). The i-th entry takes GeoId -(3+i) and
-  constraints may reference its start/end points, e.g. [-3, "start"]
-  (mid/center are NOT exposed on external geometry — rejected up front).
+  constraints reference it like any geometry, e.g. [-3, "start"] on an
+  external line or [-3, "center"] on an external circle.
   Targets outside the sketch's PartDesign Body are bridged automatically via
   a SubShapeBinder (PartDesign scope rule).
 - constraints: list of {"type": ..., "items": [...], "value": ...}.
-  Point references are [geo_id, "start"|"end"|"center"|"mid"].
+  Point references are [geo_id, "start"|"end"|"center"|"mid"], checked
+  against the geometry: a line has start/end, a circle only center, an arc
+  start/end/center ("mid" = center on round geometry), a point any keyword.
+  [line, "mid"] works in a coincident (it becomes a symmetric constraint of
+  the line's ends about the other point) and is refused elsewhere. The sketch
+  origin is [-1, "start"] or [-1, "center"]; other points on the axes (-1
+  "end", anything on -2) are refused. An unknown GeoId is refused with the
+  constraint's index and the valid range.
   Supported types: coincident, horizontal, vertical, tangent, perpendicular,
   parallel, equal, symmetric, point_on_object, block, distance, distance_x,
   distance_y, radius, diameter, angle.

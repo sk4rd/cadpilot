@@ -200,10 +200,69 @@ def m1_new_constraint_types_solve():
         check(f"m1 {label} solves", ok(res) and not res.get("diagnostics"), err(res) or str(res))
 
 
+def m2_m3_m8_points_follow_the_geometry():
+    doc = "SkPts"
+    newdoc(doc)
+    c.create_object(
+        doc, {"Name": "Cyl", "Type": "Part::Cylinder", "Properties": {"Radius": 4, "Height": 5}}
+    )
+    res = cad(
+        "sketch",
+        doc,
+        "OnCyl",
+        geometry=[{"type": "circle", "center": [1, 1], "radius": 2}],
+        external=[["Cyl", "Edge2"]],
+        constraints=[{"type": "coincident", "items": [[0, "center"], [-3, "center"]]}],
+    )
+    s = inspect(doc, "OnCyl") if ok(res) else {}
+    check(
+        "m2 a circle centred on an external circle's center solves",
+        ok(res) and s["geo"][0]["Center"] == [0.0, 0.0],
+        err(res) or str(s.get("geo")),
+    )
+    res = cad(
+        "sketch",
+        doc,
+        "Mid",
+        geometry=[LINE([1, 1], [5, 1])],
+        constraints=[{"type": "coincident", "items": [[0, "mid"], [-1, "start"]]}],
+    )
+    g = inspect(doc, "Mid")["geo"][0] if ok(res) else {}
+    check(
+        "m3 a line's mid coincident with the origin centres the line",
+        ok(res)
+        and abs(g["StartPoint"][0] + g["EndPoint"][0]) < 1e-6
+        and abs(g["StartPoint"][1] + g["EndPoint"][1]) < 1e-6,
+        err(res) or str(g),
+    )
+    res = cad(
+        "sketch",
+        doc,
+        None,
+        geometry=[LINE([1, 1], [5, 1])],
+        constraints=[{"type": "distance_x", "items": [[0, "mid"]], "value": 3}],
+    )
+    check(
+        "m3 a line 'mid' outside a coincident is refused",
+        "no midpoint vertex" in err(res),
+        err(res),
+    )
+    for item, hint in (([-1, "end"], "the X axis (-1)"), ([-2, "start"], "the Y axis (-2)")):
+        res = cad(
+            "sketch",
+            doc,
+            None,
+            geometry=[LINE([1, 1], [5, 1])],
+            constraints=[{"type": "coincident", "items": [[0, "start"], item]}],
+        )
+        check(f"m8 {item} is refused", hint in err(res), err(res))
+
+
 CHECKS = [
     m1_diagnostics_name_the_spec_entry,
     m7_lists_expand_into_one_constraint_per_item,
     m1_new_constraint_types_solve,
+    m2_m3_m8_points_follow_the_geometry,
 ]
 
 if __name__ == "__main__":

@@ -13,6 +13,72 @@ from typing import Any
 
 # spec point keyword -> Sketcher PointPos
 POINT_POS = {"start": 1, "end": 2, "center": 3, "mid": 3}
+_POS_NAMES = {1: "start", 2: "end", 3: "center"}
+
+# Part geometry class -> the kind that decides which points exist on it
+_KIND_OF_CLASS = {
+    "LineSegment": "line",
+    "Circle": "circle",
+    "Ellipse": "circle",
+    "ArcOfCircle": "arc",
+    "ArcOfEllipse": "arc",
+    "ArcOfHyperbola": "arc",
+    "ArcOfParabola": "arc",
+    "Point": "point",
+    "BSplineCurve": "bspline",
+}
+
+# The points each kind exposes. A circle has no start/end and a line no
+# centre: both pass addConstraint and fail at solve with MalformedConstraints.
+_KIND_POINTS = {
+    "line": {"start": 1, "end": 2},
+    "arc": {"start": 1, "end": 2, "center": 3, "mid": 3},
+    "circle": {"center": 3, "mid": 3},
+    "point": {"start": 1, "end": 1, "center": 1, "mid": 1},
+    "bspline": {"start": 1, "end": 2},
+    # The X axis's start is the sketch origin. Its "end" is a unit point at
+    # (1, 0) and the Y axis's start duplicates the origin: neither is meant.
+    "x_axis": {"start": 1, "center": 1},
+    "y_axis": {},
+}
+
+_POINT_HINTS = {
+    "line": "a line has no midpoint vertex: a coincident with [g, 'mid'] places the "
+    "point there for you (as a symmetric constraint), anywhere else use "
+    "symmetric [[g, 'start'], [g, 'end'], [point]]",
+    "circle": "a full circle has only its 'center'",
+    "x_axis": "the X axis (-1) has one point, the origin: [-1, 'start']",
+    "y_axis": "the Y axis (-2) has no point of its own; the origin is [-1, 'start']",
+}
+
+
+def geometry_kinds(internal: list[str], external: list[str] = ()) -> dict[int, str]:
+    """GeoId -> kind, from the Part class names of the sketch's geometry.
+
+    Internal geometry is numbered from 0, the axes are -1 (X) and -2 (Y), and
+    the i-th external geometry is -(3 + i).
+    """
+    kinds = {i: _KIND_OF_CLASS.get(name, "other") for i, name in enumerate(internal)}
+    kinds[-1], kinds[-2] = "x_axis", "y_axis"
+    for i, name in enumerate(external):
+        kinds[-(3 + i)] = _KIND_OF_CLASS.get(name, "other")
+    return kinds
+
+
+def _known_ids(kinds: dict) -> str:
+    internal = [g for g in kinds if g >= 0]
+    external = [g for g in kinds if g <= -3]
+    parts = [f"geometry 0..{max(internal)}" if internal else "no geometry"]
+    parts.append("the axes -1 (X) and -2 (Y)")
+    if external:
+        parts.append(f"external {-3}..{min(external)}")
+    return ", ".join(parts)
+
+
+def _check_geo(geo_id: int, kinds: dict | None) -> None:
+    if kinds is not None and geo_id not in kinds:
+        raise ValueError(f"GeoId {geo_id} does not exist; this sketch has {_known_ids(kinds)}")
+
 
 DIMENSIONAL = ("distance", "distance_x", "distance_y", "radius", "diameter", "angle")
 
@@ -36,24 +102,30 @@ CONSTRAINT_TYPES = (
 )
 
 
-def point_ref(item: Any, what: str = "item") -> tuple[int, int]:
-    """[geo_id, "start"|"end"|...] -> (geo_id, PointPos).
+def point_ref(item: Any, kinds: dict | None = None) -> tuple[int, int]:
+    """[geo_id, "start"|"end"|"center"|"mid"] -> (geo_id, PointPos).
 
-    GeoId -1 is the sketch X axis; its start point (origin) is the common
-    anchor, so any point keyword on -1 maps to the origin (PointPos 1).
+    With ``kinds`` (see :func:`geometry_kinds`) the GeoId must exist and the
+    keyword must name a point that kind of geometry has. The origin is
+    [-1, "start"] (or [-1, "center"]).
     """
     if not (isinstance(item, (list, tuple)) and len(item) == 2):
-        raise ValueError(f"{what} must be [geo_id, point], got {item!r}")
-    geo_id, pos = int(item[0]), str(item[1]).lower()
-    if geo_id == -1:
-        return -1, 1
-    p = POINT_POS.get(pos)
-    if p is None:
-        raise ValueError(f"{what}: point must be one of {sorted(POINT_POS)}, got {item[1]!r}")
-    return geo_id, p
+        raise ValueError(f"a point must be [geo_id, point], got {item!r}")
+    geo_id, pos = int(item[0]), item[1]
+    # FreeCAD's own PointPos numbers are accepted for the keywords.
+    pos = _POS_NAMES.get(pos, pos) if type(pos) is int else str(pos).lower()
+    if pos not in POINT_POS:
+        raise ValueError(f"point must be one of {sorted(POINT_POS)}, got {item!r}")
+    _check_geo(geo_id, kinds)
+    kind = (kinds or {}).get(geo_id) or {-1: "x_axis", -2: "y_axis"}.get(geo_id)
+    points = _KIND_POINTS.get(kind, POINT_POS)
+    if pos not in points:
+        hint = _POINT_HINTS.get(kind) or f"a {kind} has {sorted(points)}"
+        raise ValueError(f"{list(item)!r}: {hint}")
+    return geo_id, points[pos]
 
 
-def geo_ref(item: Any, what: str = "item") -> int:
+def geo_ref(item: Any, kinds: dict | None = None) -> int:
     """A whole-geometry reference: ``[geo_id]`` or a bare ``geo_id``.
 
     A caller writing a constraint by hand naturally writes ``"items": [0]``
@@ -61,10 +133,13 @@ def geo_ref(item: Any, what: str = "item") -> int:
     so a bare int can never be ambiguous here.
     """
     if isinstance(item, int):
-        return item
-    if not (isinstance(item, (list, tuple)) and len(item) == 1):
-        raise ValueError(f"{what} must be a geo_id or [geo_id] (the geometry index), got {item!r}")
-    return int(item[0])
+        geo_id = item
+    elif isinstance(item, (list, tuple)) and len(item) == 1:
+        geo_id = int(item[0])
+    else:
+        raise ValueError(f"an edge must be a geo_id or [geo_id] (the geometry index), got {item!r}")
+    _check_geo(geo_id, kinds)
+    return geo_id
 
 
 def is_point_item(item: Any) -> bool:
@@ -78,7 +153,32 @@ def _count(items: list, low: int, high: int | None, shape: str) -> None:
         raise ValueError(f"takes {shape}, got {n} item(s)")
 
 
-def constraint_args(ctype: str, items: list) -> list[tuple]:
+def _line_mid(item: Any, kinds: dict | None) -> bool:
+    return (
+        kinds is not None
+        and is_point_item(item)
+        and kinds.get(int(item[0])) == "line"
+        and str(item[1]).lower() in ("mid", "center")
+    )
+
+
+def _coincident(a: Any, b: Any, kinds: dict | None) -> tuple:
+    """Two points made one; a line's midpoint becomes Symmetric(start, end, point)."""
+    mids = [i for i in (a, b) if _line_mid(i, kinds)]
+    if len(mids) == 2:
+        raise ValueError(
+            "two line midpoints cannot meet in one constraint; put a construction point "
+            "at one midpoint and make the other symmetric about it"
+        )
+    if mids:
+        line = int(mids[0][0])
+        _check_geo(line, kinds)
+        other = b if mids[0] is a else a
+        return ("Symmetric", line, 1, line, 2, *point_ref(other, kinds))
+    return ("Coincident", *point_ref(a, kinds), *point_ref(b, kinds))
+
+
+def constraint_args(ctype: str, items: list, kinds: dict | None = None) -> list[tuple]:
     """spec constraint -> one Sketcher.Constraint args tuple per constraint.
 
     A list of edges or points expands instead of being cut to the first one or
@@ -87,69 +187,71 @@ def constraint_args(ctype: str, items: list) -> list[tuple]:
     so a single named dimension drives them all. ``point_on_object`` puts every
     point it lists on its last item.
     """
+
+    def pt(item):
+        return point_ref(item, kinds)
+
+    def geo(item):
+        return geo_ref(item, kinds)
+
     if ctype == "coincident":
         _count(items, 2, None, "two or more points [g, p]")
-        out = []
-        for a, b in pairwise(items):
-            g1, p1 = point_ref(a)
-            g2, p2 = point_ref(b)
-            out.append(("Coincident", g1, p1, g2, p2))
-        return out
+        return [_coincident(a, b, kinds) for a, b in pairwise(items)]
     if ctype in ("horizontal", "vertical"):
         if len(items) == 2 and all(is_point_item(i) for i in items):
-            g1, p1 = point_ref(items[0])
-            g2, p2 = point_ref(items[1])
+            g1, p1 = pt(items[0])
+            g2, p2 = pt(items[1])
             return [(ctype.capitalize(), g1, p1, g2, p2)]
-        return [(ctype.capitalize(), geo_ref(item)) for item in items]
+        return [(ctype.capitalize(), geo(item)) for item in items]
     if ctype in ("tangent", "perpendicular"):
         fc_type = ctype.capitalize()
         _count(items, 2, 3, "two edges, two points, a point and an edge, or two edges and a point")
         if len(items) == 3:
             # Two curves meeting at a point that lies on both (TangentViaPoint).
-            g, p = point_ref(items[2])
-            return [(f"{fc_type}ViaPoint", geo_ref(items[0]), geo_ref(items[1]), g, p)]
+            g, p = pt(items[2])
+            return [(f"{fc_type}ViaPoint", geo(items[0]), geo(items[1]), g, p)]
         a, b = items
         if is_point_item(a) and is_point_item(b):
-            g1, p1 = point_ref(a)
-            g2, p2 = point_ref(b)
+            g1, p1 = pt(a)
+            g2, p2 = pt(b)
             return [(fc_type, g1, p1, g2, p2)]
         if is_point_item(a) or is_point_item(b):
             point, edge = (a, b) if is_point_item(a) else (b, a)
-            g, p = point_ref(point)
-            return [(fc_type, g, p, geo_ref(edge))]
-        return [(fc_type, geo_ref(a), geo_ref(b))]
+            g, p = pt(point)
+            return [(fc_type, g, p, geo(edge))]
+        return [(fc_type, geo(a), geo(b))]
     if ctype in ("parallel", "equal"):
         _count(items, 2, None, "two or more edges")
-        return [(ctype.capitalize(), geo_ref(a), geo_ref(b)) for a, b in pairwise(items)]
+        return [(ctype.capitalize(), geo(a), geo(b)) for a, b in pairwise(items)]
     if ctype == "symmetric":
         _count(items, 3, 3, "two points and a line or a point")
-        g1, p1 = point_ref(items[0])
-        g2, p2 = point_ref(items[1])
+        g1, p1 = pt(items[0])
+        g2, p2 = pt(items[1])
         third = items[2]
         if is_point_item(third):  # symmetry about a point
-            g3, p3 = point_ref(third)
+            g3, p3 = pt(third)
             return [("Symmetric", g1, p1, g2, p2, g3, p3)]
-        return [("Symmetric", g1, p1, g2, p2, geo_ref(third))]  # about a line
+        return [("Symmetric", g1, p1, g2, p2, geo(third))]  # about a line
     if ctype == "point_on_object":
         _count(items, 2, None, "one or more points [g, p] followed by the edge they lie on")
-        edge = geo_ref(items[-1])
-        return [("PointOnObject", *point_ref(point), edge) for point in items[:-1]]
+        edge = geo(items[-1])
+        return [("PointOnObject", *pt(point), edge) for point in items[:-1]]
     if ctype == "block":
-        return [("Block", geo_ref(item)) for item in items]
+        return [("Block", geo(item)) for item in items]
     if ctype == "distance":
         _count(items, 1, 2, "one edge, two points, or a point and an edge")
         if len(items) == 1:
-            return [("Distance", geo_ref(items[0]))]
+            return [("Distance", geo(items[0]))]
         a, b = items[0], items[1]
         if is_point_item(a) and is_point_item(b):
-            g1, p1 = point_ref(a)
-            g2, p2 = point_ref(b)
+            g1, p1 = pt(a)
+            g2, p2 = pt(b)
             return [("Distance", g1, p1, g2, p2)]
         if is_point_item(a):
-            g1, p1 = point_ref(a)
-            return [("Distance", g1, p1, geo_ref(b))]
-        g2, p2 = point_ref(b)
-        return [("Distance", g2, p2, geo_ref(a))]
+            g1, p1 = pt(a)
+            return [("Distance", g1, p1, geo(b))]
+        g2, p2 = pt(b)
+        return [("Distance", g2, p2, geo(a))]
     if ctype in ("distance_x", "distance_y"):
         _count(items, 1, 2, "one point, one edge, or two points")
         fc_type = "DistanceX" if ctype == "distance_x" else "DistanceY"
@@ -157,20 +259,20 @@ def constraint_args(ctype: str, items: list) -> list[tuple]:
             # ONE item is either a point (distance from the origin) or a whole
             # geometry (FreeCAD's edge form: the x/y extent of a line).
             if is_point_item(items[0]):
-                g, p = point_ref(items[0])
+                g, p = pt(items[0])
                 return [(fc_type, g, p)]
-            return [(fc_type, geo_ref(items[0]))]
-        g1, p1 = point_ref(items[0])
-        g2, p2 = point_ref(items[1])
+            return [(fc_type, geo(items[0]))]
+        g1, p1 = pt(items[0])
+        g2, p2 = pt(items[1])
         return [(fc_type, g1, p1, g2, p2)]
     if ctype in ("radius", "diameter"):
-        first = geo_ref(items[0])
-        return [(ctype.capitalize(), first)] + [("Equal", first, geo_ref(i)) for i in items[1:]]
+        first = geo(items[0])
+        return [(ctype.capitalize(), first)] + [("Equal", first, geo(i)) for i in items[1:]]
     if ctype == "angle":
         _count(items, 1, 2, "one or two edges")
         if len(items) == 1:
-            return [("Angle", geo_ref(items[0]))]
-        return [("Angle", geo_ref(items[0]), geo_ref(items[1]))]
+            return [("Angle", geo(items[0]))]
+        return [("Angle", geo(items[0]), geo(items[1]))]
     raise ValueError(f"unknown constraint type {ctype!r}; supported: {', '.join(CONSTRAINT_TYPES)}")
 
 
@@ -192,7 +294,7 @@ def datum(ctype: str, value: Any) -> tuple[float, str | None]:
     return float(value), None
 
 
-def plan_constraints(constraints: list | None) -> list[dict]:
+def plan_constraints(constraints: list | None, kinds: dict | None = None) -> list[dict]:
     """The spec's constraint list -> one planned entry per Sketcher constraint.
 
     An entry can expand into several (see :func:`constraint_args`); each keeps
@@ -202,6 +304,7 @@ def plan_constraints(constraints: list | None) -> list[dict]:
     datum), ``datum`` (None for a geometric constraint), ``expr`` (to bind
     after adding), ``name``, and ``entry``/``type`` (the spec index and type it
     came from).
+    ``kinds`` (see :func:`geometry_kinds`) validates every GeoId and point.
     Raises ValueError naming the offending entry.
     """
     planned = []
@@ -214,7 +317,7 @@ def plan_constraints(constraints: list | None) -> list[dict]:
         if not isinstance(items, list) or not items:
             raise ValueError(f"{where}: 'items' must be a non-empty list.")
         try:
-            all_args = constraint_args(ctype, items)
+            all_args = constraint_args(ctype, items, kinds)
         except (IndexError, TypeError) as e:
             raise ValueError(f"{where}: malformed items: {e}") from e
         except ValueError as e:
