@@ -157,6 +157,7 @@ Two VERY different behaviours, picked by the base object:
   same step (a hole AND its counterbore).
 - Base is a Part-level solid (a boolean result, a primitive): a Draft array
   replicates the whole object (spacing, axis, angle, center only).
+- Base is a whole Body: refused — name the feature to repeat (e.g. its Tip).
 Linear (PartDesign): spacing is the PITCH between neighbours (FreeCAD's Spacing
 mode), so changing count keeps the pitch; a negative spacing goes the other way.
 mode="extent" with length spreads the copies over that overall length instead.

@@ -322,3 +322,10 @@ def test_a_pattern_of_a_pattern_points_to_multi_or_originals():
 def test_axis_accepts_a_direction_vector():
     assert "_centered_axis_line" in _src("_pattern_axis")
     assert "_vec3(value, 'axis')" in _src("_axis_vec")
+
+
+def test_patterning_a_whole_body_is_refused():
+    """It used to build a Draft array of the whole body at the document root."""
+    build = _src("_build_pattern")
+    assert build.index("PartDesign::Body") < build.index("import Draft")
+    assert "is a whole Body" in build

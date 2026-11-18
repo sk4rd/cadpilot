@@ -990,6 +990,15 @@ def _build_pattern(doc, spec):
     ptype = str(spec.get("pattern_type", "linear"))
     if ptype not in ("linear", "polar", "multi"):
         raise ValueError(f"pattern_type must be linear/polar/multi, got {ptype!r}")
+    if getattr(base, "TypeId", "") == "PartDesign::Body":
+        tip = getattr(base, "Tip", None)
+        raise ValueError(
+            f"'{base.Name}' is a whole Body. Patterning it would build a Draft array of the "
+            "entire body at the document root, outside any body, with the Body itself "
+            "unchanged. Name the feature to repeat instead"
+            + (f" (the Body's Tip is '{tip.Name}')" if tip is not None else "")
+            + "; for copies of the whole part, pattern a Part-level solid."
+        )
     body = _parent_body(base)
     if ptype == "multi":
         misplaced = sorted(k for k in tip_policy.TRANSFORM_STEP_KEYS["any"] if k in spec)
