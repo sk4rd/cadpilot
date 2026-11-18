@@ -6,6 +6,8 @@ so no real server is needed.
 
 import http.client
 import socket
+import struct
+import threading
 import xmlrpc.client
 
 import pytest
@@ -306,3 +308,116 @@ def test_connect_grace_env_override(monkeypatch):
     assert FreeCADConnection()._connect_grace == 2.5
     monkeypatch.setenv("CADPILOT_CONNECT_GRACE", "bogus")
     assert FreeCADConnection()._connect_grace == 10.0  # invalid value → default
+
+
+# --- the transport sends each request once ------------------------------------
+
+
+class _ResettingAddon:
+    """A raw HTTP endpoint that reads each request, then answers or resets.
+
+    ``answers[i]`` is False for "process the request, then die with a TCP RST"
+    (the addon applied the mutation and its process went away) and True for a
+    normal XML-RPC success reply. Every request body it read counts as an
+    execution, which is the number a silent re-send inflates.
+    """
+
+    _REPLY = (
+        b"<?xml version='1.0'?><methodResponse><params><param><value><struct>"
+        b"<member><name>success</name><value><boolean>1</boolean></value></member>"
+        b"</struct></value></param></params></methodResponse>"
+    )
+
+    def __init__(self, answers):
+        self.answers = list(answers)
+        self.executions: list[bytes] = []
+        self.sock = socket.socket()
+        self.sock.bind(("127.0.0.1", 0))
+        self.sock.listen(5)
+        self.sock.settimeout(0.05)
+        self.stopped = threading.Event()
+        self.port = self.sock.getsockname()[1]
+        self.thread = threading.Thread(target=self._serve, daemon=True)
+        self.thread.start()
+
+    def _read_request(self, conn) -> bytes:
+        data = b""
+        while b"\r\n\r\n" not in data:
+            data += conn.recv(65536)
+        head, body = data.split(b"\r\n\r\n", 1)
+        length = next(
+            int(line.split(b":", 1)[1])
+            for line in head.split(b"\r\n")
+            if line.lower().startswith(b"content-length")
+        )
+        while len(body) < length:
+            body += conn.recv(65536)
+        return body
+
+    def _serve(self):
+        for answer in self.answers:
+            while not self.stopped.is_set():
+                try:
+                    conn, _ = self.sock.accept()
+                    break
+                except TimeoutError:
+                    continue
+            else:
+                return
+            conn.settimeout(5)
+            with conn:
+                self.executions.append(self._read_request(conn))
+                if answer:
+                    head = (
+                        b"HTTP/1.0 200 OK\r\nContent-Type: text/xml\r\nContent-Length: %d\r\n\r\n"
+                    )
+                    conn.sendall(head % len(self._REPLY) + self._REPLY)
+                else:
+                    conn.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
+
+    def close(self):
+        self.stopped.set()
+        self.thread.join(timeout=5)
+        self.sock.close()
+
+
+def test_a_reset_after_delivery_does_not_execute_a_mutation_twice():
+    """Live audit: the stdlib transport re-sent execute_code after the addon
+    reset the connection, the fake addon executed it twice and the client
+    reported one success."""
+    addon = _ResettingAddon([False, True])
+    try:
+        conn = FreeCADConnection(port=addon.port, timeout=5, connect_grace=0)
+        with pytest.raises(RuntimeError, match="MAY have been applied"):
+            conn.execute_code("App.ActiveDocument.addObject('Part::Box')")
+    finally:
+        addon.close()
+    assert len(addon.executions) == 1, addon.executions
+
+
+def test_a_reset_read_is_retried_once_by_the_client_not_the_transport():
+    addon = _ResettingAddon([False, True, True])
+    try:
+        conn = FreeCADConnection(port=addon.port, timeout=5, connect_grace=0)
+        assert conn.get_gui_state() == {"success": True}
+    finally:
+        addon.close()
+    assert len(addon.executions) == 2, "one send, one client-level retry"
+
+
+def test_dismissal_is_never_retried(monkeypatch):
+    """A resent dismissal could close a second, unrelated dialog."""
+
+    class DismissProxy:
+        def __init__(self):
+            self.calls = 0
+
+        def dismiss_blocking_dialog(self):
+            self.calls += 1
+            raise ConnectionResetError(104, "reset")
+
+    proxy = DismissProxy()
+    conn, made = _make_conn(monkeypatch, lambda n: proxy)
+    with pytest.raises(RuntimeError, match="MAY have been applied"):
+        conn.dismiss_blocking_dialog()
+    assert proxy.calls == 1 and len(made) == 1

@@ -24,7 +24,6 @@ _RETRYABLE_METHODS = frozenset(
     {
         "ping",
         "get_gui_state",
-        "dismiss_blocking_dialog",
         "get_active_screenshot",
         "get_last_screenshot_error",
         "get_objects",
@@ -52,7 +51,10 @@ _RETRYABLE_METHODS = frozenset(
 _DISPATCH_SHAPE_ERRORS = ("positional argument", "keyword argument", "is not supported")
 
 # Connection-refused means the TCP connect itself failed, so nothing was sent
-# and retrying cannot double-execute an operation. The addon's watchdog
+# and retrying cannot double-execute an operation. That holds only because
+# _TimeoutTransport sends each request once: the stdlib transport's silent
+# re-send could hit a refusal AFTER its first attempt had delivered the
+# request to an addon that then died. The addon's watchdog
 # revives a dead RPC server within seconds and a FreeCAD restart takes ~10 s,
 # so refusals get a bounded grace window instead of failing on first sight.
 _CONNECT_GRACE_DEFAULT = 10.0
@@ -88,6 +90,13 @@ class _TimeoutTransport(xmlrpc.client.Transport):
         conn = super().make_connection(host)
         conn.timeout = self._timeout
         return conn
+
+    def request(self, host, handler, request_body, verbose=False):
+        # The stdlib request() re-sends once on ECONNRESET/EPIPE/RemoteDisconnected,
+        # which all arrive AFTER the body was written: a mutation the addon already
+        # applied ran twice while the caller saw one success. FreeCADConnection
+        # decides what may be retried.
+        return self.single_request(host, handler, request_body, verbose)
 
 
 def default_port() -> int:
