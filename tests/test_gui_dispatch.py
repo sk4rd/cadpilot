@@ -549,3 +549,15 @@ def test_a_call_cancelled_before_it_started_says_nothing_was_applied(dispatch):
     assert "may_still_complete" not in result["reply"]
     assert ran == [], "a cancelled task must never run"
     assert mod.take_late_completions() == []
+
+
+def test_queue_depth_leaves_out_cancelled_tasks(dispatch):
+    """A timed-out caller's task stays queued, cancelled; it will never run and
+    must not make get_gui_state report a backed-up queue."""
+    mod, _state = dispatch
+    mod.dispatch_to_gui(lambda: None, timeout=0.01)  # nobody drains: it times out
+    assert mod._rpc_request_queue.qsize() == 1
+    assert mod.backpressure()["queue_depth"] == 0
+
+    mod._rpc_request_queue.put(lambda: None)
+    assert mod.backpressure()["queue_depth"] == 1

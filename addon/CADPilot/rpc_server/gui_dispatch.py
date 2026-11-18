@@ -170,6 +170,23 @@ def _record_late_completion(
         del _late_completions[:-_LATE_MAX]
 
 
+def _queue_depth() -> int:
+    """Queued tasks that will still run.
+
+    A caller that timed out leaves its task in the queue, marked cancelled, and
+    the drain skips it; counting those made a queue that would run nothing look
+    backed up.
+    """
+    with _rpc_request_queue.mutex:
+        pending = list(_rpc_request_queue.queue)
+    return sum(1 for task in pending if not _is_cancelled(task))
+
+
+def _is_cancelled(task: Any) -> bool:
+    flag = getattr(task, "cancelled", None)
+    return flag is not None and flag.is_set()
+
+
 def _note_defer(reason: str) -> None:
     """Record a deferral, warning once when it outlasts _DEFER_WARN_SECONDS.
 
@@ -190,7 +207,7 @@ def _note_defer(reason: str) -> None:
             "until it clears; the heartbeat is fine, this is back-pressure",
             now - _defer_since,
             _DEFER_LABELS.get(reason, reason),
-            _rpc_request_queue.qsize(),
+            _queue_depth(),
         )
 
 
@@ -291,7 +308,7 @@ def backpressure() -> dict:
         "deferred_s": round(time.monotonic() - _defer_since, 1) if _defer_reason else 0.0,
         "processing": bool(_processing),
         "processing_s": round(time.monotonic() - _processing_since, 1) if _processing else 0.0,
-        "queue_depth": _rpc_request_queue.qsize(),
+        "queue_depth": _queue_depth(),
     }
 
 
@@ -627,6 +644,7 @@ def dispatch_to_gui(task: Callable[[], Any], timeout: float = 60, force: bool = 
         finally:
             dbglog.clear_request_id()
 
+    _wrapped.cancelled = cancelled
     queued_at = time.monotonic()
     (_force_queue if force else _rpc_request_queue).put(_wrapped)
     waker = _waker  # read once: a concurrent stop may clear the global
@@ -661,9 +679,7 @@ def dispatch_to_gui(task: Callable[[], Any], timeout: float = 60, force: bool = 
     if result is not _MISSING:
         waited = (time.monotonic() - queued_at) * 1000
         if waited > 1000:
-            logger.warning(
-                "GUI task waited %.1fms (queue depth %d)", waited, _rpc_request_queue.qsize()
-            )
+            logger.warning("GUI task waited %.1fms (queue depth %d)", waited, _queue_depth())
         else:
             # INFO, not DEBUG: this is the line that proves where a call spent
             # its time (RPC thread vs. GUI queue), so it has to be there by
@@ -711,7 +727,7 @@ def dispatch_to_gui(task: Callable[[], Any], timeout: float = 60, force: bool = 
             "back-pressure from user interaction, not a dead dispatcher",
             _USER_HOLD_GRACE,
             label,
-            _rpc_request_queue.qsize(),
+            _queue_depth(),
             deferred_for,
         )
         return {
@@ -746,7 +762,7 @@ def dispatch_to_gui(task: Callable[[], Any], timeout: float = 60, force: bool = 
             "GUI dispatch timed out after %ss — %s (queue depth %d)",
             timeout,
             label,
-            _rpc_request_queue.qsize(),
+            _queue_depth(),
         )
         return {
             "success": False,
@@ -765,7 +781,7 @@ def dispatch_to_gui(task: Callable[[], Any], timeout: float = 60, force: bool = 
         "GUI dispatch timed out after %ss with an idle GUI thread (queue depth %d) "
         "— the waker and its heartbeat timer may be gone",
         timeout,
-        _rpc_request_queue.qsize(),
+        _queue_depth(),
     )
     return {
         "success": False,
