@@ -25,10 +25,6 @@ sketch_spec = importlib.reload(importlib.import_module("rpc_server.sketch_spec")
 # describe_feature() via pop_last_sketch_info().
 _LAST_SKETCH_INFO: dict | None = None
 
-# Which plane/face the last _attach_sketch call resolved to (echoed in the
-# sketch result so a wrong face pick is visible).
-_LAST_ATTACHMENT: dict | None = None
-_CENTER_OFF_MATERIAL: str | None = None
 
 # A base plane is the body's own origin plane, found by Role. Attaching to it
 # (instead of writing a Placement) keeps the sketch with the body and lets the
@@ -387,7 +383,8 @@ def center_attachment(obj, ref, face_name, doc, extra_offset: float = 0.0):
     the pocket cut a clipped half-hole through the wall, reported as plain
     success (live). ``plane={"face": [...], "center": true}`` asks for the
     middle; the delta is stored as an AttachmentOffset in the attachment's own
-    frame, so the association with the face is kept.
+    frame, so the association with the face is kept. Returns a warning when
+    that middle is off the material, else None.
     """
     doc.recompute()
     try:
@@ -406,12 +403,12 @@ def center_attachment(obj, ref, face_name, doc, extra_offset: float = 0.0):
     if not on_material:
         # A hole or a concave section swallows the centroid: the origin sits
         # at the visual middle, but the material is an offset ring/limb away.
-        global _CENTER_OFF_MATERIAL
-        _CENTER_OFF_MATERIAL = (
+        return (
             "the face's middle lies off the material (a hole or a concave "
             "section) — the sketch origin is placed there anyway, so offset "
             "the profile from it rather than drawing at [0, 0]"
         )
+    return None
 
 
 def origin_plane(body, key: str):
@@ -446,8 +443,19 @@ def _apply_offset(obj, offset: float, expr: str | None) -> None:
             raise ValueError(f"offset expression {expr!r} failed: {e}") from e
 
 
-def _attach_sketch(sketch, doc, spec, body):
-    global _LAST_ATTACHMENT
+def _face_fragility(ref, face_name: str, token: str, via: str = "") -> str:
+    picked = f" (picked by {token!r})" if token != face_name else ""
+    return (
+        f"{via}hangs off {ref.Name}.{face_name}{picked}. A face reference can break when "
+        "upstream geometry changes: FreeCAD re-derives face names, so after an edit the "
+        f"attachment can move to another face, or read '?{face_name}' and go Invalid. For a "
+        "sketch that survives edits, attach it to a base plane with an expression offset "
+        '(plane="XY", offset="=Params.h") or to a datum plane on an origin plane.'
+    )
+
+
+def _attach_sketch(sketch, doc, spec, body) -> tuple[dict, list[str]]:
+    """Attach ``sketch`` as ``spec`` says; returns (echo, warnings)."""
     plane = spec.get("plane", "XY")
     offset, offset_expr = _offset_spec(spec, plane)
     support_prop = "AttachmentSupport" if hasattr(sketch, "AttachmentSupport") else "Support"
@@ -460,12 +468,12 @@ def _attach_sketch(sketch, doc, spec, body):
         setattr(sketch, support_prop, [(support, "")])
         sketch.MapMode = "FlatFace"
         _apply_offset(sketch, offset, offset_expr)
-        _LAST_ATTACHMENT = {
+        echo = {
             "plane": key,
             "support": support.Name,
             "offset": f"={offset_expr}" if offset_expr else offset,
         }
-        return
+        return echo, []
 
     if isinstance(plane, dict) and plane.get("face"):
         face = plane["face"]
@@ -478,7 +486,7 @@ def _attach_sketch(sketch, doc, spec, body):
         # itself makes the next feature built on this profile a dependency cycle
         # (see attachment_ref).
         ref = attachment_ref(ref)
-        face_name = str(face[1])
+        token = face_name = str(face[1])
         if face_name.startswith(("+", "-")) or face_name.lower() in _FACE_WORDS:
             face_name = _resolve_semantic_face(ref, face_name)
         n = int(face_name[4:]) if face_name.startswith("Face") else 0
@@ -495,32 +503,29 @@ def _attach_sketch(sketch, doc, spec, body):
             )
         setattr(sketch, support_prop, [(ref, face_name)])
         sketch.MapMode = "FlatFace"
-        global _CENTER_OFF_MATERIAL
-        _CENTER_OFF_MATERIAL = None
-        _LAST_ATTACHMENT = _face_echo(ref, face_name)
-        _LAST_ATTACHMENT["centered"] = bool(plane.get("center"))
+        warnings = [_face_fragility(ref, face_name, token, "the sketch ")]
+        echo = _face_echo(ref, face_name)
+        echo["centered"] = bool(plane.get("center"))
         if plane.get("center"):
             # Origin at the middle of the face instead of its parametric
             # origin (a corner on rectangular faces); the caller's offset is
             # along the face normal = the attachment frame's Z.
-            center_attachment(sketch, ref, face_name, doc)
+            off_material = center_attachment(sketch, ref, face_name, doc)
+            if off_material:
+                warnings.append(off_material)
         _apply_offset(sketch, offset, offset_expr)
         # The echo used to report only the FACE center, which a caller reads as
         # "the sketch origin is here" — while the origin actually sits on the
         # face's parametric origin (a corner). Say where the origin IS (live: a
         # centered rib profile drew its rectangle around the corner and hung
         # half of it outside the part, with the volume still adding up).
-        _LAST_ATTACHMENT["sketch_origin"] = _vec3(sketch.Placement.Base)
-        if _CENTER_OFF_MATERIAL:
-            _LAST_ATTACHMENT["warnings"] = (_LAST_ATTACHMENT.get("warnings") or []) + [
-                _CENTER_OFF_MATERIAL
-            ]
+        echo["sketch_origin"] = _vec3(sketch.Placement.Base)
         if not plane.get("center"):
-            _LAST_ATTACHMENT["note"] = (
+            echo["note"] = (
                 "the sketch origin sits on the face's parametric origin (a corner on a "
                 'rectangular face); pass "center": true to put it at the face center'
             )
-        return
+        return echo, warnings
 
     if isinstance(plane, dict) and plane.get("datum"):
         ref = doc.getObject(str(plane["datum"]))
@@ -528,7 +533,8 @@ def _attach_sketch(sketch, doc, spec, body):
             raise ValueError(f"datum plane '{plane['datum']}' not found.")
         setattr(sketch, support_prop, [(ref, "")])
         sketch.MapMode = "FlatFace"
-        _LAST_ATTACHMENT = {"object": ref.Name, "type": "datum"}
+        echo = {"object": ref.Name, "type": "datum"}
+        warnings = []
         with contextlib.suppress(Exception):
             # Follow the datum's own support so the echo names the REAL base
             # face the sketch hangs off. LinkSub sub-elements arrive as a list
@@ -539,11 +545,17 @@ def _attach_sketch(sketch, doc, spec, body):
                 if isinstance(subs, (list, tuple)):
                     subs = subs[0] if subs else ""
                 if subs:
-                    _LAST_ATTACHMENT["support"] = _face_echo(support[0][0], str(subs))
+                    echo["support"] = _face_echo(support[0][0], str(subs))
+                    if str(subs).startswith("Face"):
+                        warnings.append(
+                            _face_fragility(
+                                support[0][0], str(subs), str(subs), f"the datum plane {ref.Name} "
+                            )
+                        )
                 else:
-                    _LAST_ATTACHMENT["support"] = {"object": support[0][0].Name}
+                    echo["support"] = {"object": support[0][0].Name}
         _apply_offset(sketch, offset, offset_expr)
-        return
+        return echo, warnings
 
     raise ValueError(
         f"plane must be XY/XZ/YZ or {{'face': ...}} or {{'datum': ...}}, got {plane!r}"
@@ -587,9 +599,8 @@ def build_sketch_gui(doc, spec):
     Raises on any failure — the caller's transaction wrapper aborts, so the
     document stays untouched.
     """
-    global _LAST_SKETCH_INFO, _LAST_ATTACHMENT
+    global _LAST_SKETCH_INFO
     _LAST_SKETCH_INFO = None
-    _LAST_ATTACHMENT = None
 
     geometry = spec.get("geometry")
     if not isinstance(geometry, list) or not geometry:
@@ -598,7 +609,7 @@ def build_sketch_gui(doc, spec):
     body = _get_or_create_body(doc, spec.get("body"))
     sketch = body.newObject("Sketcher::SketchObject", spec.get("base") or "Sketch")
 
-    _attach_sketch(sketch, doc, spec, body)
+    attachment, warnings = _attach_sketch(sketch, doc, spec, body)
     geometry_ids, implied = _add_geometry(sketch, geometry, spec.get("construction"))
     _add_external(sketch, doc, body, spec.get("external"))
     origins, unnamed = _add_constraints(sketch, spec.get("constraints"), implied)
@@ -619,15 +630,16 @@ def build_sketch_gui(doc, spec):
         _LAST_SKETCH_INFO["geometry_ids"] = geometry_ids
     if unnamed:
         _LAST_SKETCH_INFO["unnamed_dimensions"] = unnamed
-    if _LAST_ATTACHMENT:
-        # Which face/plane the sketch actually landed on, with its center and
-        # normal — a direction token on a stepped part picks the FARTHEST face
-        # facing that way, and without this echo the wrong pick looked exactly
-        # like success (live: a seat-face sketch landed on a wall top 92 mm up).
-        _LAST_SKETCH_INFO["plane"] = _LAST_ATTACHMENT
-        if "plane" in _LAST_ATTACHMENT:
-            # "Which way is +v" is the most surprising thing about a non-XY
-            # base plane; without the axes a caller infers it from a flipped
-            # result.
-            _LAST_ATTACHMENT.update(_frame_echo(sketch))
+    # Which face/plane the sketch actually landed on, with its center and
+    # normal — a direction token on a stepped part picks the FARTHEST face
+    # facing that way, and without this echo the wrong pick looked exactly
+    # like success (live: a seat-face sketch landed on a wall top 92 mm up).
+    _LAST_SKETCH_INFO["plane"] = attachment
+    if "plane" in attachment:
+        # "Which way is +v" is the most surprising thing about a non-XY
+        # base plane; without the axes a caller infers it from a flipped
+        # result.
+        attachment.update(_frame_echo(sketch))
+    if warnings:
+        _LAST_SKETCH_INFO["warnings"] = warnings
     return sketch

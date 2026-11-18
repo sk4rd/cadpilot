@@ -2865,7 +2865,8 @@ def describe_feature(feat, spec) -> dict:
             out["resolved"] = resolved
         return out
     info = sketcher_ops.pop_last_sketch_info() or {}
-    out = {k: v for k, v in info.items() if k != "object_name"}
+    out = {k: v for k, v in info.items() if k not in ("object_name", "warnings")}
+    warnings.extend(info.get("warnings") or [])
     if info.get("fully_constrained") is False:
         warnings.append(
             f"sketch '{feat.Name}' is under-constrained (DoF={info.get('dof')}); "

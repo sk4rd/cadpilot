@@ -430,6 +430,57 @@ def m3_base_planes_attach_to_the_origin_with_an_expression_offset():
     )
 
 
+def _stepped_block(doc):
+    """A 30x20x10 block from a named, spreadsheet-driven rectangle."""
+    cad("variables", doc, "Params", cells={"A1": ["width", 30], "A2": ["depth", 20]})
+    cad(
+        "sketch",
+        doc,
+        "Base",
+        geometry=[{"type": "rectangle", "from": [0, 0], "to": [30, 20]}],
+        constraints=[
+            {"type": "coincident", "items": [[0, "start"], [-1, "start"]]},
+            {"type": "distance_x", "items": [0], "value": "=Params.width", "name": "W"},
+            {"type": "distance_y", "items": [1], "value": "=Params.depth", "name": "D"},
+        ],
+    )
+    return made(cad("pad", doc, "Base", length=10))
+
+
+def m4_face_attachments_warn_that_they_are_fragile():
+    doc = "SkFace"
+    newdoc(doc)
+    pad = _stepped_block(doc)
+    res = cad(
+        "sketch",
+        doc,
+        "Top",
+        plane={"face": [pad, "+Z"]},
+        geometry=[{"type": "circle", "center": [5, 5], "radius": 2}],
+    )
+    warnings = " ".join(res.get("warnings") or []) + err(res)
+    check(
+        "M4 a face attachment warns that it can break on upstream edits",
+        ok(res)
+        and "can break when upstream geometry changes" in warnings
+        and "picked by '+Z'" in warnings,
+        str(res),
+    )
+    res = cad(
+        "sketch",
+        doc,
+        "Lifted",
+        plane="XY",
+        offset="=Params.depth / 2",
+        geometry=[{"type": "circle", "center": [5, 5], "radius": 2}],
+    )
+    check(
+        "M4 a base-plane sketch carries no fragility warning",
+        ok(res) and not any("upstream" in w for w in res.get("warnings") or []),
+        str(res),
+    )
+
+
 CHECKS = [
     m1_diagnostics_name_the_spec_entry,
     m7_lists_expand_into_one_constraint_per_item,
@@ -439,6 +490,7 @@ CHECKS = [
     m6_names_are_checked_and_reported,
     m1_composite_geometry_is_fully_constrainable,
     m3_base_planes_attach_to_the_origin_with_an_expression_offset,
+    m4_face_attachments_warn_that_they_are_fragile,
 ]
 
 if __name__ == "__main__":

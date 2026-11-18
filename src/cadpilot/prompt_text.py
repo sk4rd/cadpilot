@@ -16,8 +16,9 @@ Asset Creation Strategy for CADPilot
 1. cad(operation="sketch") — atomic constrained sketch: geometry + constraints
    in one call; the result reports dof / fully_constrained. ALWAYS fully
    constrain (dof=0) before turning a profile into 3D.
-   - plane: "XY"/"XZ"/"YZ" (+offset), {"face": [obj, "FaceN"]} on an existing
-     solid face, or {"datum": name} on a datum plane.
+   - plane: "XY"/"XZ"/"YZ" (+offset, which may be "=Params.x"), {"datum":
+     name} on a datum plane, or {"face": [obj, "+Z"]} on a solid face. Prefer
+     the planes: a face attachment breaks when upstream geometry changes.
    - external: [[obj, "EdgeN"|"VertexN"], ...] adds external geometry (GeoIds
      from -3 in list order); constraints may reference it, e.g.
      {"type": "coincident", "items": [[0, "start"], [-3, "start"]]} — this is

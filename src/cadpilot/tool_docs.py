@@ -289,12 +289,16 @@ Optional: plane, offset, body, construction, external, constraints.
   plane dict: a number (mm), a unit string ("5 mm"), or an expression
   ("=Params.lift") bound to the attachment, so the sketch follows the
   spreadsheet.
-  PREFER A DIRECTION OVER A FACE NAME: {"face": ["ObjName", "+Z"]} (also -Z,
-  +X/-X, +Y/-Y, top/bottom/left/right/front/back, MaxX/MinZ/…) resolves to the
-  planar face facing that way. Face names (Face1, Face2, …) are re-derived
-  after every feature, so a name read off one feature can silently mean a
-  different face on the next one — the sketch then lands on the wrong plane and
-  its pocket cuts air while still reporting success.
+  PREFER PLANES TO FACES: a base plane with an expression offset (plane "XY",
+  offset "=Params.lift") or a datum plane on an origin plane keeps its
+  reference through every later edit. A face attachment stores a face NAME
+  (FaceN), and FreeCAD re-derives face names when upstream geometry changes:
+  after an edit the sketch can move to another face, or read "?Face6" and go
+  Invalid. The reply warns on every face attachment.
+  If you attach to a face, pick it by direction: {"face": ["ObjName", "+Z"]}
+  (also -Z, +X/-X, +Y/-Y, top/bottom/left/right/front/back, MaxX/MinZ/…)
+  picks the planar face facing that way NOW, which beats a name read off an
+  earlier feature; it is still stored as FaceN and not re-resolved later.
   {"face": [...], "center": true} puts the sketch origin at the MIDDLE of the
   face; without it the origin sits on the face's parametric origin, which is a
   CORNER on rectangular faces (a circle meant for the middle of a 100x60 side
