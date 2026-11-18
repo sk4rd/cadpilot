@@ -29,8 +29,10 @@
 #
 # Diagnostics go through rpc_server.dbglog (ring buffer + rotating file under
 # FreeCAD's user data dir + Report View; read them with the get_addon_log tool).
-# Should that import fail, this file falls back to <addon dir>/initgui_debug.log
-# — bootstrap is the one thing that cannot be debugged any other way.
+# Should that import fail, this file falls back to
+# <user data dir>/CADPilot/initgui_debug.log — bootstrap is the one thing that
+# cannot be debugged any other way. Not the addon dir: a Nix store install is
+# read-only, so the one record of a failed bootstrap was lost there.
 
 import contextlib
 import os as _os
@@ -81,11 +83,20 @@ def _bootstrap():
             addon_dir = os.path.dirname(os.path.dirname(os.path.abspath(rpc_server.__file__)))
         except Exception:
             addon_dir = os.path.dirname(os.path.abspath(sys.argv[0] or "."))
-    debug_log = os.path.join(addon_dir, "initgui_debug.log")
+
+    def debug_log_path():
+        try:
+            import FreeCAD
+
+            return os.path.join(FreeCAD.getUserAppDataDir(), "CADPilot", "initgui_debug.log")
+        except Exception:
+            return os.path.join(addon_dir, "initgui_debug.log")
+
+    debug_log = debug_log_path()
 
     # Logging is the one thing that must survive its own failure: if the
-    # framework cannot be imported we still write to a file next to this
-    # module, because nothing else can report a broken bootstrap.
+    # framework cannot be imported we still write to a file under FreeCAD's
+    # user data dir, because nothing else can report a broken bootstrap.
     try:
         from rpc_server import dbglog
 
@@ -107,6 +118,7 @@ def _bootstrap():
         if exc and exc.strip() != "NoneType: None":
             text += "\n" + exc
         try:
+            os.makedirs(os.path.dirname(debug_log), exist_ok=True)
             if os.path.exists(debug_log) and os.path.getsize(debug_log) > 512 * 1024:
                 os.remove(debug_log)
             with open(debug_log, "a", encoding="utf-8") as fh:
@@ -358,18 +370,21 @@ except BaseException:
         # addon dir, and it is where a human looks after "the addon is gone".
         with contextlib.suppress(BaseException):
             _s.stderr.write("[CADPilot] InitGui bootstrap crashed:\n" + _text)
-        # __file__ is absent under bare exec(), so _ADDON_HINT is often None;
-        # fall back to the user's Mod path before the (exe dir) cwd.
-        _cands = [_ADDON_HINT]
+        # The user data dir first (the addon dir may be a read-only store);
+        # __file__ is absent under bare exec(), so _ADDON_HINT is often None,
+        # and the cwd (the exe dir) is the last resort.
+        _cands = []
         with contextlib.suppress(BaseException):
             import FreeCAD as _fc
 
+            _cands.append(_o.path.join(_fc.getUserAppDataDir(), "CADPilot"))
             _cands.append(_o.path.join(_fc.getUserAppDataDir(), "Mod", "CADPilot"))
-        _cands.append(".")
+        _cands += [_ADDON_HINT, "."]
         for _p in _cands:
             if not _p:
                 continue
             try:
+                _o.makedirs(_p, exist_ok=True)
                 with open(_o.path.join(_p, "initgui_debug.log"), "a", encoding="utf-8") as _f:
                     _f.write(_text)
                 break

@@ -115,6 +115,17 @@ def test_bootstrap_crash_log_is_surfaced_with_its_traceback(tmp_path, monkeypatc
     assert any("NameError" in line for line in mine[0]["tail"])
 
 
+def test_bootstrap_log_in_the_user_data_dir_is_found(tmp_path, monkeypatch):
+    """InitGui writes it to <user data dir>/CADPilot/: the addon dir may be a
+    read-only Nix store install, where the log was lost."""
+    userdir = _userdir(tmp_path, monkeypatch=monkeypatch)
+    log = userdir / "CADPilot" / "initgui_debug.log"
+    log.parent.mkdir(parents=True)
+    log.write_text("=== 18:37:50 autostart FAILED\nTraceback (most recent call last):\n")
+    entry = next(e for e in diag.bootstrap_logs() if e["path"] == str(log))
+    assert entry["crash"] is True
+
+
 def test_routine_bootstrap_output_is_not_reported_as_a_crash(tmp_path, monkeypatch):
     """initgui_debug.log also receives watchdog lines; a false crash report is
     worse than none, because it sends the reader after the wrong cause."""

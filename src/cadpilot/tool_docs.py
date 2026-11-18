@@ -865,8 +865,8 @@ and Linux:
      ~/.local/share/FreeCAD/v1-1/Mod). An addon in the wrong level never
      loads, and older builds wrote straight into the config root.
   4. Did it load at all? A bootstrap crash is written to initgui_debug.log
-     — in the addon dir, or next to the FreeCAD executable when __file__ is
-     unavailable under FreeCAD's bare exec(). When the addon fails to load
+     in <user data dir>/CADPilot/ (older add-ons: the addon dir, or next to
+     the FreeCAD executable). When the addon fails to load
      there is no workbench entry, no RPC server and a stale addon log; the
      crash log names the cause.
   5. Did you change anything? Addon files, the MCP client config and the MCP

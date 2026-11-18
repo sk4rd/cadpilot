@@ -245,13 +245,15 @@ def bootstrap_logs(extra_dirs: list[Path] | None = None) -> list[dict[str, objec
     """``initgui_debug.log`` files, flagged as an actual crash or not.
 
     This is the only evidence of a failed addon load. InitGui.py writes one
-    when its bootstrap dies before the logging framework is up, and under
-    FreeCAD's bare ``exec()`` it may land next to the FreeCAD executable
-    instead of in the addon dir, so both are searched (``extra_dirs`` lets the
-    caller add the directory a *running* FreeCAD was started from).
+    to ``<user data dir>/CADPilot/`` when its bootstrap dies before the logging
+    framework is up. Older add-ons wrote it to the addon dir, or next to the
+    FreeCAD executable when ``__file__`` was unavailable under FreeCAD's bare
+    ``exec()``, so those are searched too (``extra_dirs`` lets the caller add
+    the directory a *running* FreeCAD was started from).
     """
     seen: dict[str, dict[str, object]] = {}
-    cands = [d / "initgui_debug.log" for d in addon_roots()]
+    cands = [d / "CADPilot" / "initgui_debug.log" for d in user_data_dirs()]
+    cands += [d / "initgui_debug.log" for d in addon_roots()]
     cands += [d / "initgui_debug.log" for d in freecad_exe_dirs()]
     cands += [d / "initgui_debug.log" for d in extra_dirs or []]
     for path in cands:
@@ -515,10 +517,11 @@ Diagnostic order that applies on Windows, macOS and Linux alike:
                         auto_start_rpc). Auto-start only happens at startup.
 3. Addon installed?     <user data dir>/Mod/CADPilot must exist for the SAME
                         FreeCAD version that is running (v1-1, v0-21, ...).
-4. Did it load?         Read initgui_debug.log (addon dir, or next to the
-                        FreeCAD executable) — a bootstrap crash lands there and
-                        the addon then stays invisible, with no workbench, no
-                        RPC server and a stale addon log.
+4. Did it load?         Read <user data dir>/CADPilot/initgui_debug.log (older
+                        add-ons: the addon dir, or next to the FreeCAD
+                        executable) — a bootstrap crash lands there and the
+                        addon then stays invisible, with no workbench, no RPC
+                        server and a stale addon log.
 5. Changed anything?    Addon files, MCP client config and the tool list are
                         only picked up after a restart: restart FreeCAD, then
                         the MCP client (it builds tools/list at startup).
