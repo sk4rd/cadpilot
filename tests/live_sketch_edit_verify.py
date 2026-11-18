@@ -175,9 +175,35 @@ def m7_lists_expand_into_one_constraint_per_item():
     check("M7 a distance over three edges is refused", "takes one edge" in err(res), err(res))
 
 
+def m1_new_constraint_types_solve():
+    doc = "SkTypes"
+    newdoc(doc)
+    geo = [
+        LINE([0, 0], [10, 0]),
+        {"type": "circle", "center": [5, 5], "radius": 4.5},
+        LINE([12, 0], [12, 10]),
+        {"type": "point", "at": [3, 3]},
+    ]
+    cases = {
+        "point_on_object": {"type": "point_on_object", "items": [[3, "start"], 0]},
+        "diameter": {"type": "diameter", "items": [1], "value": 9},
+        "block": {"type": "block", "items": [2]},
+        "horizontal two points": {"type": "horizontal", "items": [[0, "start"], [1, "center"]]},
+        "vertical two points": {"type": "vertical", "items": [[2, "start"], [0, "end"]]},
+        "distance point to line": {"type": "distance", "items": [[3, "start"], 0], "value": 2},
+        "tangent edge to edge": {"type": "tangent", "items": [0, 1]},
+        "tangent via point": {"type": "tangent", "items": [0, 1, [3, "start"]]},
+        "perpendicular endpoint on edge": {"type": "perpendicular", "items": [[2, "start"], 0]},
+    }
+    for label, con in cases.items():
+        res = cad("sketch", doc, None, geometry=geo, constraints=[con])
+        check(f"m1 {label} solves", ok(res) and not res.get("diagnostics"), err(res) or str(res))
+
+
 CHECKS = [
     m1_diagnostics_name_the_spec_entry,
     m7_lists_expand_into_one_constraint_per_item,
+    m1_new_constraint_types_solve,
 ]
 
 if __name__ == "__main__":

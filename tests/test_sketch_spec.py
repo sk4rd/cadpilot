@@ -121,7 +121,7 @@ def test_a_radius_list_is_one_named_dimension_plus_equalities():
 def test_extra_items_that_cannot_expand_are_refused():
     for c in (
         {"type": "distance", "items": [0, 1, 2], "value": 5},
-        {"type": "tangent", "items": [0, 1, 2]},
+        {"type": "tangent", "items": [0, 1, 2, 3]},
         {"type": "symmetric", "items": [[0, "start"], [0, "end"], 1, 2]},
         {"type": "angle", "items": [0, 1, 2], "value": 5},
         {"type": "equal", "items": [0]},
@@ -133,3 +133,42 @@ def test_extra_items_that_cannot_expand_are_refused():
 def test_a_name_cannot_label_an_expanded_geometric_entry():
     with pytest.raises(ValueError, match="one name cannot label the 2 constraints"):
         _plan({"type": "horizontal", "items": [0, 2], "name": "H"})
+
+
+def test_point_on_object_diameter_and_block():
+    assert _args({"type": "point_on_object", "items": [[0, "start"], -1]}) == [
+        ("PointOnObject", 0, 1, -1)
+    ]
+    assert _args({"type": "point_on_object", "items": [[0, "start"], [1, "end"], 3]}) == [
+        ("PointOnObject", 0, 1, 3),
+        ("PointOnObject", 1, 2, 3),
+    ]
+    plans = _plan({"type": "diameter", "items": [2, 3], "value": 8, "name": "Bore"})
+    assert [(p["args"], p["datum"], p["name"]) for p in plans] == [
+        (("Diameter", 2), 8.0, "Bore"),
+        (("Equal", 2, 3), None, None),
+    ]
+    assert _args({"type": "block", "items": [0, 1]}) == [("Block", 0), ("Block", 1)]
+
+
+def test_horizontal_and_vertical_between_two_points():
+    assert _args({"type": "horizontal", "items": [[0, "start"], [2, "center"]]}) == [
+        ("Horizontal", 0, 1, 2, 3)
+    ]
+    assert _args({"type": "vertical", "items": [[0, "end"], [1, "start"]]}) == [
+        ("Vertical", 0, 2, 1, 1)
+    ]
+
+
+def test_tangent_and_perpendicular_forms():
+    assert _args({"type": "tangent", "items": [0, 1]}) == [("Tangent", 0, 1)]
+    assert _args({"type": "tangent", "items": [[0, "end"], [1, "start"]]}) == [
+        ("Tangent", 0, 2, 1, 1)
+    ]
+    assert _args({"type": "tangent", "items": [[0, "end"], 1]}) == [("Tangent", 0, 2, 1)]
+    assert _args({"type": "perpendicular", "items": [1, [0, "end"]]}) == [
+        ("Perpendicular", 0, 2, 1)
+    ]
+    assert _args({"type": "tangent", "items": [0, 1, [3, "start"]]}) == [
+        ("TangentViaPoint", 0, 1, 3, 1)
+    ]

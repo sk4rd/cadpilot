@@ -14,7 +14,7 @@ from typing import Any
 # spec point keyword -> Sketcher PointPos
 POINT_POS = {"start": 1, "end": 2, "center": 3, "mid": 3}
 
-DIMENSIONAL = ("distance", "distance_x", "distance_y", "radius", "angle")
+DIMENSIONAL = ("distance", "distance_x", "distance_y", "radius", "diameter", "angle")
 
 CONSTRAINT_TYPES = (
     "coincident",
@@ -25,10 +25,13 @@ CONSTRAINT_TYPES = (
     "parallel",
     "equal",
     "symmetric",
+    "point_on_object",
+    "block",
     "distance",
     "distance_x",
     "distance_y",
     "radius",
+    "diameter",
     "angle",
 )
 
@@ -81,7 +84,8 @@ def constraint_args(ctype: str, items: list) -> list[tuple]:
     A list of edges or points expands instead of being cut to the first one or
     two: ``horizontal [0, 2]`` is two constraints, ``equal [0, 1, 2]`` the chain
     0=1, 1=2, and ``radius [0, 1, 2]`` one radius on 0 with 1 and 2 equal to it,
-    so a single named dimension drives them all.
+    so a single named dimension drives them all. ``point_on_object`` puts every
+    point it lists on its last item.
     """
     if ctype == "coincident":
         _count(items, 2, None, "two or more points [g, p]")
@@ -92,14 +96,28 @@ def constraint_args(ctype: str, items: list) -> list[tuple]:
             out.append(("Coincident", g1, p1, g2, p2))
         return out
     if ctype in ("horizontal", "vertical"):
-        return [(ctype.capitalize(), geo_ref(item)) for item in items]
-    if ctype in ("tangent", "perpendicular"):
-        _count(items, 2, 2, "two edges or two points")
-        if all(is_point_item(i) for i in items):
+        if len(items) == 2 and all(is_point_item(i) for i in items):
             g1, p1 = point_ref(items[0])
             g2, p2 = point_ref(items[1])
             return [(ctype.capitalize(), g1, p1, g2, p2)]
-        return [(ctype.capitalize(), geo_ref(items[0]), geo_ref(items[1]))]
+        return [(ctype.capitalize(), geo_ref(item)) for item in items]
+    if ctype in ("tangent", "perpendicular"):
+        fc_type = ctype.capitalize()
+        _count(items, 2, 3, "two edges, two points, a point and an edge, or two edges and a point")
+        if len(items) == 3:
+            # Two curves meeting at a point that lies on both (TangentViaPoint).
+            g, p = point_ref(items[2])
+            return [(f"{fc_type}ViaPoint", geo_ref(items[0]), geo_ref(items[1]), g, p)]
+        a, b = items
+        if is_point_item(a) and is_point_item(b):
+            g1, p1 = point_ref(a)
+            g2, p2 = point_ref(b)
+            return [(fc_type, g1, p1, g2, p2)]
+        if is_point_item(a) or is_point_item(b):
+            point, edge = (a, b) if is_point_item(a) else (b, a)
+            g, p = point_ref(point)
+            return [(fc_type, g, p, geo_ref(edge))]
+        return [(fc_type, geo_ref(a), geo_ref(b))]
     if ctype in ("parallel", "equal"):
         _count(items, 2, None, "two or more edges")
         return [(ctype.capitalize(), geo_ref(a), geo_ref(b)) for a, b in pairwise(items)]
@@ -112,6 +130,12 @@ def constraint_args(ctype: str, items: list) -> list[tuple]:
             g3, p3 = point_ref(third)
             return [("Symmetric", g1, p1, g2, p2, g3, p3)]
         return [("Symmetric", g1, p1, g2, p2, geo_ref(third))]  # about a line
+    if ctype == "point_on_object":
+        _count(items, 2, None, "one or more points [g, p] followed by the edge they lie on")
+        edge = geo_ref(items[-1])
+        return [("PointOnObject", *point_ref(point), edge) for point in items[:-1]]
+    if ctype == "block":
+        return [("Block", geo_ref(item)) for item in items]
     if ctype == "distance":
         _count(items, 1, 2, "one edge, two points, or a point and an edge")
         if len(items) == 1:
@@ -139,9 +163,9 @@ def constraint_args(ctype: str, items: list) -> list[tuple]:
         g1, p1 = point_ref(items[0])
         g2, p2 = point_ref(items[1])
         return [(fc_type, g1, p1, g2, p2)]
-    if ctype == "radius":
+    if ctype in ("radius", "diameter"):
         first = geo_ref(items[0])
-        return [("Radius", first)] + [("Equal", first, geo_ref(i)) for i in items[1:]]
+        return [(ctype.capitalize(), first)] + [("Equal", first, geo_ref(i)) for i in items[1:]]
     if ctype == "angle":
         _count(items, 1, 2, "one or two edges")
         if len(items) == 1:

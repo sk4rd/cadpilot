@@ -321,15 +321,22 @@ Optional: plane, offset, body, construction, external, constraints.
 - constraints: list of {"type": ..., "items": [...], "value": ...}.
   Point references are [geo_id, "start"|"end"|"center"|"mid"].
   Supported types: coincident, horizontal, vertical, tangent, perpendicular,
-  parallel, equal, symmetric, distance, distance_x, distance_y, radius, angle.
+  parallel, equal, symmetric, point_on_object, block, distance, distance_x,
+  distance_y, radius, diameter, angle.
   value accepts numbers or "=expressions".
   Item shapes per type (a whole-geometry reference is the GeoId or [GeoId]):
     coincident     [[g,p], [g,p], ...]                (points, chained a=b, b=c)
     horizontal     [g, ...]   vertical     [g, ...]   (one constraint per edge)
-    tangent/perpendicular  [g, g] | [[g,p], [g,p]]
+                   | [[g,p], [g,p]]                   (two points level/plumb)
+    tangent/perpendicular  [g, g] | [[g,p], [g,p]] (endpoint to endpoint) |
+                   [[g,p], g] (endpoint on the edge) |
+                   [g, g, [g,p]] (the two curves meet at that point)
     parallel/equal [g, g, ...]                        (chained a-b, b-c)
     symmetric      [[g,p], [g,p], [g]|  [g,p]]        (about a line or a point)
-    distance       [g] | [[g,p],[g,p]] | [[g,p], g]
+    point_on_object [[g,p], ..., g]                   (each point lies on edge g;
+                                                       g may be an axis, -1/-2)
+    block          [g, ...]                           (fix each edge where it is)
+    distance       [g] (length) | [[g,p],[g,p]] | [[g,p], g] (point to line)
     distance_x / _y  [[g,p]] (that point's x/y from the ORIGIN, the usual way
                      to place a wall at an absolute coordinate) |
                      [g] (the edge's own horizontal/vertical EXTENT, i.e. the
@@ -337,7 +344,7 @@ Optional: plane, offset, body, construction, external, constraints.
                      position: on a VERTICAL line that extent is 0, so pairing
                      [g] with a `vertical` constraint conflicts) |
                      [[g,p],[g,p]]
-    radius         [g, ...]   (the value goes on the first; the rest are made
+    radius/diameter [g, ...]  (the value goes on the first; the rest are made
                                equal to it, so one named dimension drives all)
     angle          [g] | [g, g]
   A bare GeoId (not wrapped in a list) is accepted wherever one edge is meant.
