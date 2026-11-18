@@ -10,6 +10,7 @@ The port is required: this script never falls back to the default 9875.
 """
 
 import json
+import math
 import os
 import sys
 import tempfile
@@ -258,11 +259,35 @@ def m2_m3_m8_points_follow_the_geometry():
         check(f"m8 {item} is refused", hint in err(res), err(res))
 
 
+def m4_unit_strings_are_values():
+    doc = "SkUnits"
+    newdoc(doc)
+    res = cad(
+        "sketch",
+        doc,
+        "U",
+        geometry=[LINE([0, 0], [10, 0]), LINE([0, 0], [5, 5])],
+        constraints=[
+            {"type": "distance", "items": [0], "value": "1.5 cm"},
+            {"type": "angle", "items": [0, 1], "value": "30 deg"},
+        ],
+    )
+    cons = inspect(doc, "U")["cons"] if ok(res) else []
+    check(
+        "m4 '1.5 cm' and '30 deg' are accepted as values",
+        ok(res)
+        and math.isclose(cons[0]["value"], 15.0)
+        and math.isclose(cons[1]["value"], math.radians(30), abs_tol=1e-6),
+        err(res) or str(cons),
+    )
+
+
 CHECKS = [
     m1_diagnostics_name_the_spec_entry,
     m7_lists_expand_into_one_constraint_per_item,
     m1_new_constraint_types_solve,
     m2_m3_m8_points_follow_the_geometry,
+    m4_unit_strings_are_values,
 ]
 
 if __name__ == "__main__":

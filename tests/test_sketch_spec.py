@@ -258,3 +258,46 @@ def test_a_missing_geo_id_names_the_constraint_and_the_valid_range():
     )
     with pytest.raises(ValueError, match=r"GeoId -5 does not exist"):
         _kplan({"type": "point_on_object", "items": [[0, "start"], -5]})
+
+
+@pytest.mark.parametrize(
+    ("value", "dimension", "expected"),
+    [
+        (10, "length", 10.0),
+        ("10", "length", 10.0),
+        ("10 mm", "length", 10.0),
+        ("1.5cm", "length", 15.0),
+        ("0.5 in", "length", 12.7),
+        ("-2.5e1 mm", "length", -25.0),
+        ("45 deg", "angle", 45.0),
+        ("45°", "angle", 45.0),
+        (" 90 ", "angle", 90.0),
+    ],
+)
+def test_parse_quantity(value, dimension, expected):
+    assert math.isclose(ss.parse_quantity(value, dimension), expected)
+
+
+def test_parse_quantity_refuses_the_wrong_dimension_and_junk():
+    with pytest.raises(ValueError, match="'deg' is not a length unit"):
+        ss.parse_quantity("10 deg", "length")
+    with pytest.raises(ValueError, match="is not a number or a quantity"):
+        ss.parse_quantity("ten mm", "length")
+    with pytest.raises(ValueError, match="is not a number"):
+        ss.parse_quantity(True, "length")
+
+
+def test_unit_values_reach_the_datum_in_internal_units():
+    """ "10 mm" died as float('10 mm'); an angle in rad must not be converted again."""
+    (dist,) = _plan({"type": "distance", "items": [0], "value": "10 mm"})
+    assert dist["datum"] == 10.0
+    (ang,) = _plan({"type": "angle", "items": [0], "value": "0.5 rad"})
+    assert math.isclose(ang["datum"], 0.5)
+    (ang,) = _plan({"type": "angle", "items": [0], "value": "30 deg"})
+    assert math.isclose(ang["datum"], math.radians(30))
+    with pytest.raises(ValueError, match=r"constraints\[0\] \(distance\): value '10 deg'"):
+        _plan({"type": "distance", "items": [0], "value": "10 deg"})
+    with pytest.raises(
+        ValueError, match=r"constraints\[0\] \(radius\): value '-3 mm': a radius must be"
+    ):
+        _plan({"type": "radius", "items": [0], "value": "-3 mm"})

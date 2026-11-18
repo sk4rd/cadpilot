@@ -330,7 +330,8 @@ Optional: plane, offset, body, construction, external, constraints.
   Supported types: coincident, horizontal, vertical, tangent, perpendicular,
   parallel, equal, symmetric, point_on_object, block, distance, distance_x,
   distance_y, radius, diameter, angle.
-  value accepts numbers or "=expressions".
+  value: a number (mm, angles in degrees), a unit string ("10 mm", "1.5 cm",
+  "0.5 in", "30 deg", "0.5 rad"), or an "=expression" such as "=Params.width".
   Item shapes per type (a whole-geometry reference is the GeoId or [GeoId]):
     coincident     [[g,p], [g,p], ...]                (points, chained a=b, b=c)
     horizontal     [g, ...]   vertical     [g, ...]   (one constraint per edge)

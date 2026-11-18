@@ -8,6 +8,7 @@ and owns everything that needs a live document.
 from __future__ import annotations
 
 import math
+import re
 from itertools import pairwise
 from typing import Any
 
@@ -280,18 +281,51 @@ def constraint_args(ctype: str, items: list, kinds: dict | None = None) -> list[
 _DATUM_TYPES = frozenset({"Distance", "DistanceX", "DistanceY", "Radius", "Diameter", "Angle"})
 
 
+_UNITS = {
+    "length": {"mm": 1.0, "cm": 10.0, "m": 1000.0, "um": 0.001, "µm": 0.001, "in": 25.4},
+    "angle": {"deg": 1.0, "°": 1.0, "rad": 180.0 / math.pi},
+}
+_QUANTITY = re.compile(r"\s*([-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?)\s*(\S*)\s*")
+
+
+def parse_quantity(value: Any, dimension: str = "length") -> float:
+    """A number or a unit string ("10 mm", "1.5cm", "45 deg", "45°") -> mm or degrees."""
+    if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+        raise ValueError(f"{value!r} is not a number")
+    if not isinstance(value, str):
+        return float(value)
+    match = _QUANTITY.fullmatch(value)
+    if match is None:
+        raise ValueError(f"{value!r} is not a number or a quantity like '10 mm'")
+    number, unit = float(match[1]), match[2]
+    if not unit:
+        return number
+    units = _UNITS[dimension]
+    factor = units.get(unit) or units.get(unit.lower())
+    if factor is None:
+        raise ValueError(f"{value!r}: {unit!r} is not a {dimension} unit ({', '.join(units)})")
+    return number * factor
+
+
 def datum(ctype: str, value: Any) -> tuple[float, str | None]:
     """A dimensional constraint's (datum, expression).
 
     The datum is in Sketcher's internal units (mm, radians); the spec gives
-    angles in degrees. An ``"=expr"`` value yields a placeholder datum that
-    the expression replaces on the next recompute.
+    lengths in mm and angles in degrees unless the value names its unit. An
+    ``"=expr"`` value yields a placeholder datum that the expression replaces
+    on the next recompute.
     """
-    if isinstance(value, str) and value.startswith("="):
-        return 1.0, value[1:]
+    if isinstance(value, str) and value.strip().startswith("="):
+        expr = value.strip()[1:].strip()
+        if not expr:
+            raise ValueError(f"{value!r}: '=' needs an expression after it")
+        return 1.0, expr
     if ctype == "angle":
-        return math.radians(float(value)), None
-    return float(value), None
+        return math.radians(parse_quantity(value, "angle")), None
+    number = parse_quantity(value, "length")
+    if ctype in ("radius", "diameter") and number <= 0:
+        raise ValueError(f"{value!r}: a {ctype} must be positive")
+    return number, None
 
 
 def plan_constraints(constraints: list | None, kinds: dict | None = None) -> list[dict]:
@@ -327,7 +361,10 @@ def plan_constraints(constraints: list | None, kinds: dict | None = None) -> lis
         if ctype in DIMENSIONAL:
             if value is None:
                 raise ValueError(f"{where}: dimensional constraint requires 'value'.")
-            value_datum, expr = datum(ctype, value)
+            try:
+                value_datum, expr = datum(ctype, value)
+            except ValueError as e:
+                raise ValueError(f"{where}: value {e}") from e
         else:
             if value is not None:
                 raise ValueError(f"{where}: geometric constraint takes no 'value'.")
