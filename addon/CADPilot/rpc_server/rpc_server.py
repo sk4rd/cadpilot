@@ -53,8 +53,6 @@ from rpc_server.gui_dispatch import (
     cleanup_waker,
     dispatch_to_gui,
     init_waker,
-    process_gui_tasks,
-    request_shutdown,
 )
 from rpc_server.joint_ops import assembly_op as _assembly_op
 from rpc_server.object_factory import (
@@ -1586,7 +1584,6 @@ def start_rpc_server(port=None):
     rpc_server_thread.start()
 
     init_waker()
-    QtCore.QTimer.singleShot(500, process_gui_tasks)
 
     msg = f"RPC Server started at {host}:{port}."
     if remote_enabled:
@@ -1605,7 +1602,6 @@ def stop_rpc_server():
     rpc_server_instance = None
     rpc_server_thread = None
 
-    request_shutdown()
     cleanup_waker()
 
     def _shutdown_and_close():

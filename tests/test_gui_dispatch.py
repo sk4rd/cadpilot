@@ -99,9 +99,28 @@ def dispatch(monkeypatch):
     qtcore.QObject = _FakeQObject
     qtcore.Signal = _FakeSignal
     qtcore.QEventLoop = types.SimpleNamespace(ExcludeUserInputEvents=1, ExcludeSocketNotifiers=2)
-    qtcore.QTimer = types.SimpleNamespace(
-        singleShot=lambda _ms, cb: state.timer_callbacks.append(cb)
-    )
+
+    class _FakeTimer:
+        singleShot = staticmethod(lambda _ms, cb: state.timer_callbacks.append(cb))
+
+        def __init__(self, *_args):
+            self.timeout = _FakeSignal()
+            self.active = False
+
+        def setInterval(self, _ms):
+            pass
+
+        def start(self):
+            self.active = True
+
+        def stop(self):
+            self.active = False
+
+        def fire(self):
+            if self.active:
+                self.timeout.emit()
+
+    qtcore.QTimer = _FakeTimer
     qtcore.QThread = types.SimpleNamespace(msleep=lambda _ms: None)
 
     qtwidgets = types.ModuleType("PySide.QtWidgets")
@@ -148,7 +167,7 @@ def dispatch(monkeypatch):
 
 def _run_ticks(mod, n):
     for _ in range(n):
-        mod.process_gui_tasks(reschedule=False)
+        mod.process_gui_tasks()
 
 
 def test_no_button_runs_immediately(dispatch):
@@ -284,6 +303,31 @@ def test_press_mid_drain_pauses_remaining_backlog(dispatch):
     state.buttons = 0
     _run_ticks(mod, 1)
     assert ran == [1, 2], "the next tick resumes the drain"
+
+
+def test_heartbeat_survives_a_task_that_outlasts_its_tick(dispatch):
+    """Live audit: a tick that fired inside a task pumping events for over
+    500 ms returned at the re-entrancy guard before re-arming, the heartbeat
+    died for good, and a task queued without a wake never ran."""
+    mod, _state = dispatch
+    mod.init_waker()
+    heartbeat = mod._heartbeat
+    ran = []
+
+    def long_task():
+        heartbeat.fire()  # the tick lands while this task is still running
+        ran.append("long")
+
+    mod._rpc_request_queue.put(long_task)
+    heartbeat.fire()
+    assert ran == ["long"]
+
+    mod._rpc_request_queue.put(lambda: ran.append("unwoken"))
+    heartbeat.fire()
+    assert ran == ["long", "unwoken"], "the heartbeat must still drain the queue"
+
+    mod.cleanup_waker()
+    assert not heartbeat.active, "stopping the server stops the heartbeat"
 
 
 def test_modal_dialog_defers(dispatch):

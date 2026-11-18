@@ -1,6 +1,6 @@
 """GUI-thread task dispatch for the RPC server.
 
-The XML-RPC server runs in its own thread. FreeCAD APIs that touch the GUI
+The XML-RPC server answers on its own threads. FreeCAD APIs that touch the GUI
 or the document tree must run in the main GUI thread. This module owns the
 queue that ferries wrapped callables onto the GUI thread and the helper that
 RPC handlers use to invoke them.
@@ -12,8 +12,9 @@ Robustness and performance guarantees:
    a subsequent call.
 2. Immediate wake via Qt signal: ``dispatch_to_gui`` emits a signal from the
    RPC thread; the GUI thread processes the task immediately rather than
-   waiting for the next 500 ms heartbeat tick. The 500 ms heartbeat is kept
-   only as a fallback.
+   waiting for the next 500 ms heartbeat tick. The heartbeat is one persistent
+   QTimer started and stopped with the server, kept as a fallback for a lost
+   wake and for a queue that was held back by the guards below.
 3. Mouse-button guard: ``process_gui_tasks`` skips the current tick while
    mouse buttons are held so MCP tasks cannot interrupt 3D navigation drags,
    and re-checks the guard BETWEEN queued tasks so a press that begins
@@ -25,9 +26,7 @@ Robustness and performance guarantees:
    releases (the race that let tasks punch through mid-drag). Off Windows,
    phantom/stuck states are filtered by a static-state time cap and a
    hold-duration cap — see ``_user_holding_button``.
-4. Clean shutdown: the ``_SHUTDOWN`` sentinel sets a flag that suppresses the
-   ``finally`` reschedule, so ``stop_rpc_server`` actually stops the loop.
-5. Exception isolation: exceptions inside a task are caught, logged, and
+4. Exception isolation: exceptions inside a task are caught, logged, and
    returned as error strings; they never kill the dispatch loop.
 """
 
@@ -53,7 +52,6 @@ _rpc_request_queue: "queue.Queue[Any]" = queue.Queue()
 #: client with no GUI (Claude Code, opencode, ...) recovers a session wedged on
 #: FreeCAD's document-recovery dialog.
 _force_queue: "queue.Queue[Any]" = queue.Queue()
-_SHUTDOWN = object()
 _processing = False  # re-entrancy guard: True while process_gui_tasks is draining
 _processing_since: float = 0.0  # wall-clock time when _processing became True
 
@@ -347,22 +345,44 @@ class _WakeSignal(QtCore.QObject):
         self._sig.emit()
 
     def _on_wake(self) -> None:
-        process_gui_tasks(reschedule=False)
+        process_gui_tasks()
 
 
 _waker: "_WakeSignal | None" = None
 
+_HEARTBEAT_MS = 500
+# One persistent timer, not a singleShot chain: a chain re-armed itself only at
+# the end of a tick, and a tick that fired inside a running task (any task that
+# pumps events for longer than 500 ms) returned at the re-entrancy guard
+# without re-arming, so the heartbeat died for good and queued work nobody
+# woke never ran.
+_heartbeat: "QtCore.QTimer | None" = None
+
 
 def init_waker() -> None:
-    """Create the wake-signal bridge. Call once from the GUI thread."""
-    global _waker
+    """Create the wake-signal bridge and start the heartbeat (GUI thread)."""
+    global _waker, _heartbeat
     _waker = _WakeSignal()
+    if _heartbeat is None:
+        _heartbeat = QtCore.QTimer()
+        _heartbeat.setInterval(_HEARTBEAT_MS)
+        _heartbeat.timeout.connect(process_gui_tasks)
+    _heartbeat.start()
 
 
 def cleanup_waker() -> None:
-    """Release the wake-signal bridge on server stop."""
-    global _waker
+    """Stop the heartbeat and release the wake-signal bridge on server stop."""
+    global _waker, _heartbeat
+    timer, _heartbeat = _heartbeat, None
     _waker = None
+    if timer is None:
+        return
+    if threading.current_thread() is threading.main_thread():
+        timer.stop()
+    else:
+        # A QTimer can only be stopped from its own thread; the queued task
+        # also keeps the timer alive until it has been stopped there.
+        _rpc_request_queue.put(timer.stop)
 
 
 def _flush_gui_events(delay_ms: int = 20) -> None:
@@ -380,22 +400,18 @@ def _flush_gui_events(delay_ms: int = 20) -> None:
         app.processEvents(flags, delay_ms)
 
 
-def process_gui_tasks(reschedule: bool = True) -> None:
-    """Drain queued GUI-thread callables and optionally reschedule.
+def process_gui_tasks() -> None:
+    """Drain queued GUI-thread callables (wake signal and heartbeat tick).
 
     Skips the current tick when any mouse button is held (e.g., 3D navigation
     drag) or when already executing a task (re-entrancy guard). The guard
     prevents ``doc.recompute()`` or ``processEvents()`` inside a task from
     triggering a nested ``process_gui_tasks`` call that corrupts FreeCAD state.
-
-    ``reschedule=False`` is used by the immediate-wake path so it does not
-    start a second heartbeat chain alongside the existing 500 ms one.
     """
     global _processing, _processing_since
     if _processing:
         return  # re-entrant call from processEvents inside a task; skip
 
-    shutdown = False
     try:
         # Refresh the guard state on EVERY tick, empty queue included: it is the
         # RPC thread's only safe view of whether a dialog/popup is in the way.
@@ -466,13 +482,6 @@ def process_gui_tasks(reschedule: bool = True) -> None:
                         _note_defer("modal")
                         return
                 task = _rpc_request_queue.get()
-                if task is _SHUTDOWN:
-                    shutdown = True
-                    logger.info(
-                        "GUI dispatch shutting down (queue depth %d)",
-                        _rpc_request_queue.qsize(),
-                    )
-                    return
                 try:
                     task()
                 except Exception as e:
@@ -491,13 +500,6 @@ def process_gui_tasks(reschedule: bool = True) -> None:
                 status_bar.clearMessage()
     finally:
         _processing = False
-        if not shutdown and reschedule:
-            QtCore.QTimer.singleShot(500, process_gui_tasks)
-
-
-def request_shutdown() -> None:
-    """Post the sentinel so the next dispatch tick exits without rescheduling."""
-    _rpc_request_queue.put(_SHUTDOWN)
 
 
 def dispatch_to_gui(task: Callable[[], Any], timeout: float = 60, force: bool = False) -> Any:
@@ -641,7 +643,7 @@ def dispatch_to_gui(task: Callable[[], Any], timeout: float = 60, force: bool = 
     # addon with nothing in any log to show for it.
     logger.error(
         "GUI dispatch timed out after %ss with an idle GUI thread (queue depth %d) "
-        "— the waker/heartbeat chain may be dead",
+        "— the waker and its heartbeat timer may be gone",
         timeout,
         _rpc_request_queue.qsize(),
     )
@@ -649,8 +651,9 @@ def dispatch_to_gui(task: Callable[[], Any], timeout: float = 60, force: bool = 
         "success": False,
         "error": (
             f"GUI dispatch timed out after {timeout}s: nothing is holding the queue and "
-            "the GUI thread is idle, so the waker/heartbeat chain may be dead. Repair it "
-            "with execute_code_async (its worker needs no GUI dispatch); see the addon "
+            "the GUI thread is idle, so the waker and its heartbeat timer may be gone "
+            "(gui_dispatch reloaded outside restart_rpc_server). Restart them with "
+            "execute_code_async (its worker needs no GUI dispatch); see the addon "
             "section of AGENTS.md."
         ),
     }

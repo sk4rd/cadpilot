@@ -51,7 +51,7 @@ The addon defers to interactive use: while a mouse button is held, a popup is op
 
 A modal dialog deserves its own note, because it can hold the queue indefinitely: FreeCAD opens its document-recovery dialog after an unclean shutdown, before any tool can reach the document. The queue states why it is held (readable through the `get_gui_state` RPC and printed by `diagnose` as a GUI queue line), and `diagnose(dismiss=true)` closes the active modal with Cancel semantics, so nothing is ever confirmed. The dismissal rides on `diagnose` rather than being its own tool: the blocker is exactly what the report names, and a plain `diagnose` must not touch FreeCAD at all, since it has to work while FreeCAD is down.
 
-Errors raised inside a queued task are caught, written to FreeCAD's report view, and returned to the caller as an error message; the processing loop is never killed. A shutdown sentinel stops the timer from rescheduling itself, so the server stops cleanly.
+Errors raised inside a queued task are caught, written to FreeCAD's report view, and returned to the caller as an error message; the processing loop is never killed. The fallback timer is one persistent timer started and stopped with the server: a self-rescheduling chain died for good the first time a tick fired inside a task that ran longer than the tick.
 
 Code submitted through `execute_code` runs in a copy of the addon's namespace, so assignments in user code cannot corrupt the server's own variables.
 

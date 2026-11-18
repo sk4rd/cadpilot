@@ -110,24 +110,19 @@ During development you can reload the addon **without restarting FreeCAD**:
 
 3. Wait ~8 seconds before issuing the next MCP call so the new server is ready.
 
-4. If GUI-dispatched calls (e.g. `execute_code`) hang after the reload but
-   `ping` still answers, the heartbeat/waker chain died during the race.
-   Repair via `execute_code_async` (its worker runs without GUI dispatch):
+4. If GUI-dispatched calls (e.g. `execute_code`) time out with an idle GUI
+   thread while `ping` still answers, the wake signal and the heartbeat are
+   gone: `gui_dispatch` was reloaded outside `restart_rpc_server`, which resets
+   both. The heartbeat is one persistent `QTimer` (`init_waker` starts it,
+   `cleanup_waker` stops it), so a long task can no longer kill it. Restart
+   them on the GUI thread via `execute_code_async` (its worker needs no GUI
+   dispatch):
    ```python
    import rpc_server.gui_dispatch as gd
    from PySide import QtCore
    import FreeCADGui
 
-
-   def repair():
-       while not gd._rpc_request_queue.empty():
-           t = gd._rpc_request_queue.get()
-           if t is not gd._SHUTDOWN:
-               t()
-       QtCore.QTimer.singleShot(500, gd.process_gui_tasks)
-
-
-   QtCore.QTimer.singleShot(0, FreeCADGui.getMainWindow(), repair)
+   QtCore.QTimer.singleShot(0, FreeCADGui.getMainWindow(), gd.init_waker)
    ```
 
 3b. **Reloading a module does NOT rebind names other modules imported from it.**
