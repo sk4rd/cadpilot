@@ -858,6 +858,9 @@ def execute_record(doc, rec: sj.StepRecord) -> dict[str, Any]:
         ops = (rec.params or {}).get("ops") or []
         if not ops:
             return {"success": False, "error": "batch step has no ops"}
+        # Each op's own report (warnings, volumes, a sketch's DoF), as a single-op
+        # step gives it: without it a batch step came back as a bare success.
+        results = []
         for i, sub in enumerate(ops, start=1):
             op_name = sj.sub_operation(sub)
             res = _execute_one(doc, op_name, sj.params_for(sub))
@@ -865,8 +868,10 @@ def execute_record(doc, rec: sj.StepRecord) -> dict[str, Any]:
                 return {
                     "success": False,
                     "error": f"batch op {i} ({op_name}): {res.get('error')}",
+                    "results": results,
                 }
-        return {"success": True}
+            results.append({"op": op_name, **{k: v for k, v in res.items() if k != "success"}})
+        return {"success": True, "results": results}
     return _execute_one(doc, rec.operation, rec.params or {})
 
 
