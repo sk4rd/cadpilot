@@ -140,6 +140,32 @@ class FreeCADRPC:
     TIMEOUT = 60  # generous wait for GUI thread to become free
     EXECUTE_CODE_TIMEOUT = 90  # GUI-thread execution; use execute_code_async for heavy OCCT ops
 
+    # diagnose reads these replies and prints its own report, which would drop
+    # the field; late completions wait for the next modelling reply instead.
+    _NO_LATE_COMPLETIONS = frozenset({"get_gui_state", "get_addon_log", "dismiss_blocking_dialog"})
+
+    def _dispatch(self, method: str, params: tuple) -> Any:
+        """SimpleXMLRPCDispatcher hook: every call on this instance comes through here.
+
+        Mirrors the stdlib lookup (no private names, no dotted names, the same
+        "is not supported" fault the client's legacy fallback keys on), records
+        which method a request thread serves, and hands out the late
+        completions of calls that timed out while their task was running.
+        """
+        func = None if method.startswith("_") else getattr(self, method, None)
+        if not callable(func):
+            raise Exception(f'method "{method}" is not supported')
+        gui_dispatch.set_call_method(method)
+        try:
+            result = func(*params)
+        finally:
+            gui_dispatch.set_call_method(None)
+        if isinstance(result, dict) and method not in self._NO_LATE_COMPLETIONS:
+            late = gui_dispatch.take_late_completions()
+            if late:
+                result["late_completions"] = late
+        return result
+
     def ping(self):
         return True
 

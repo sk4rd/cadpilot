@@ -109,6 +109,66 @@ _defer_warned = False
 _USER_HOLD_GRACE = 2.0
 _MISSING = object()
 
+# Calls whose caller was told "timed out" while their task was already running
+# on the GUI thread, and which then ran to the end anyway: the change, its undo
+# entry and its journal step landed after the error (live-caught: LateBox). The
+# RPC layer hands these out on the next reply as ``late_completions``.
+_late_completions: list[dict] = []
+_late_lock = threading.Lock()
+_LATE_MAX = 20
+
+# The RPC method each request thread is serving, for the late-completion record.
+_call = threading.local()
+
+
+def set_call_method(method: str | None) -> None:
+    _call.method = method
+
+
+def take_late_completions() -> list[dict]:
+    """Every late completion recorded since the last call, oldest first."""
+    with _late_lock:
+        taken = list(_late_completions)
+        _late_completions.clear()
+    return taken
+
+
+def _record_late_completion(
+    request: int | None, method: str | None, queued_at: float, timeout: float, error: str | None
+) -> None:
+    finished_after = time.monotonic() - queued_at
+    entry: dict[str, Any] = {
+        "request": request,
+        "method": method or "unknown",
+        "outcome": "raised" if error else "completed",
+        "timed_out_after_s": round(float(timeout), 1),
+        "finished_after_s": round(finished_after, 1),
+        "finished_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+    }
+    if error:
+        entry["error"] = error[:500]
+        entry["note"] = (
+            "its caller was told it timed out; it then failed, so a transactional call "
+            "rolled its changes back"
+        )
+    else:
+        entry["note"] = (
+            "its caller was told it timed out, but it ran to completion afterwards: its "
+            "document changes, undo entry and journal step are in place, so do not repeat it"
+        )
+    logger.warning(
+        "late completion: req#%s %s %s %.1fs after it was queued; its caller had been "
+        "told it timed out after %.1fs",
+        request,
+        entry["method"],
+        entry["outcome"],
+        finished_after,
+        timeout,
+    )
+    with _late_lock:
+        _late_completions.append(entry)
+        del _late_completions[:-_LATE_MAX]
+
 
 def _note_defer(reason: str) -> None:
     """Record a deferral, warning once when it outlasts _DEFER_WARN_SECONDS.
@@ -525,30 +585,47 @@ def dispatch_to_gui(task: Callable[[], Any], timeout: float = 60, force: bool = 
     On timeout the queued task is cancelled: if it has not started yet it
     will never run, so a caller retrying after a timeout cannot trigger a
     double execution. A task already running on the GUI thread cannot be
-    interrupted; only its result is discarded.
+    interrupted: the error says it may still complete, and a completion is
+    recorded for ``take_late_completions``.
 
     Returns the task's return value on success, an error string if the task
     raises, or ``{"success": False, "error": ...}`` on timeout.
     """
     response_queue: queue.Queue[Any] = queue.Queue(maxsize=1)
     cancelled = threading.Event()
+    started = threading.Event()
+    # The task's start and its hand-over of the result each race the caller's
+    # give-up; under one lock, a task that starts (or finishes) in that instant
+    # is seen by the caller, and one that finishes later is recorded as late
+    # instead of being reported as applied by nobody.
+    handoff = threading.Lock()
     # Captured HERE, on the RPC thread: the GUI thread has no request id of its
     # own, so this is what keeps a call's deferred work correlatable with the
     # request that caused it.
     inherited_request = dbglog.request_id()
+    method = getattr(_call, "method", None)
 
     def _wrapped() -> None:
-        if cancelled.is_set():
-            return  # caller timed out and went away; don't run a stale task
+        with handoff:
+            if cancelled.is_set():
+                return  # caller timed out and went away; don't run a stale task
+            started.set()
         dbglog.set_request_id(inherited_request)
         try:
-            res = task()
-        except Exception as e:
-            logger.error("GUI task raised %s: %s", type(e).__name__, e, exc_info=True)
-            res = f"{type(e).__name__}: {e}"
+            error = None
+            try:
+                res = task()
+            except Exception as e:
+                logger.error("GUI task raised %s: %s", type(e).__name__, e, exc_info=True)
+                res = error = f"{type(e).__name__}: {e}"
+            with handoff:
+                late = cancelled.is_set()
+                if not late:
+                    response_queue.put(res)
+            if late:
+                _record_late_completion(inherited_request, method, queued_at, timeout, error)
         finally:
             dbglog.clear_request_id()
-        response_queue.put(res)
 
     queued_at = time.monotonic()
     (_force_queue if force else _rpc_request_queue).put(_wrapped)
@@ -596,7 +673,34 @@ def dispatch_to_gui(task: Callable[[], Any], timeout: float = 60, force: bool = 
         return result
 
     # Timed out (or gave up early on user interaction): diagnose why.
-    cancelled.set()  # a not-yet-started task must not run after we give up
+    with handoff:
+        cancelled.set()  # a not-yet-started task must not run after we give up
+        running = started.is_set()
+        with contextlib.suppress(queue.Empty):
+            return response_queue.get_nowait()  # it finished in the last instant
+    if running:
+        busy = (
+            f" (GUI thread busy for {time.monotonic() - _processing_since:.1f}s)"
+            if _processing
+            else ""
+        )
+        logger.error(
+            "GUI dispatch timed out after %ss while its task was running%s; it may still complete",
+            timeout,
+            busy,
+        )
+        return {
+            "success": False,
+            "may_still_complete": True,
+            "error": (
+                f"GUI dispatch timed out after {timeout}s while the call was still running "
+                f"on the GUI thread{busy}. It was not stopped and may still complete: its "
+                "document changes, undo entry and journal step would then appear after this "
+                "error. Inspect the document (get_objects, step_control status) before "
+                "retrying; a completion is reported on a later reply as late_completions. "
+                "Use execute_code_async for heavy OCCT operations."
+            ),
+        }
     if deferred_reason is not None:
         # The guards are holding the queue back on purpose: the user is
         # mid-interaction. Nothing is broken and nothing needs restarting.
@@ -615,19 +719,26 @@ def dispatch_to_gui(task: Callable[[], Any], timeout: float = 60, force: bool = 
             "error": (
                 f"CADPilot could not act on the document within {_USER_HOLD_GRACE:.0f}s because "
                 f"{label}. The queued work is held back deliberately while the user interacts, "
-                "so nothing is stuck: close the dialog or menu (or release the mouse button) "
-                "and retry; the queue drains by itself. A modal dialog can also be closed for "
-                "you by the diagnose tool with dismiss=true, which is not held back."
+                "so nothing is stuck and this call was cancelled before it ran: close the "
+                "dialog or menu (or release the mouse button) and retry; the queue drains by "
+                "itself. A modal dialog can also be closed for you by the diagnose tool with "
+                "dismiss=true, which is not held back."
             ),
         }
     if _processing:
         busy_for = time.monotonic() - _processing_since
         hint = (
-            f" (GUI thread has been busy for {busy_for:.1f}s — "
+            f" waiting behind another call (GUI thread has been busy for {busy_for:.1f}s — "
             "consider execute_code_async for heavy OCCT operations)"
         )
         logger.error("GUI dispatch timed out after %ss%s", timeout, hint)
-        return {"success": False, "error": f"GUI dispatch timed out after {timeout}s{hint}"}
+        return {
+            "success": False,
+            "error": (
+                f"GUI dispatch timed out after {timeout}s{hint}. This call was cancelled "
+                "before it started, so nothing was applied."
+            ),
+        }
     if _defer_reason is not None:
         # Defensive: the deferral started in the last moments of the wait.
         label = _DEFER_LABELS.get(_defer_reason, _defer_reason)
@@ -641,12 +752,13 @@ def dispatch_to_gui(task: Callable[[], Any], timeout: float = 60, force: bool = 
             "success": False,
             "error": (
                 f"GUI dispatch timed out after {timeout}s because {label} — CADPilot must "
-                "not act on the document mid-interaction, so the queued work is held back. "
-                "Nothing is stuck: close the dialog or menu (or release the mouse button) "
-                "and retry; the queue drains by itself."
+                "not act on the document mid-interaction, so the queued work is held back "
+                "and this call was cancelled before it ran. Nothing is stuck: close the "
+                "dialog or menu (or release the mouse button) and retry; the queue drains "
+                "by itself."
             ),
         }
-    # Idle GUI thread + timeout means the waker/heartbeat chain is dead,
+    # Idle GUI thread + timeout means the waker or the heartbeat is gone,
     # not that FreeCAD is busy — the failure mode that used to wedge the
     # addon with nothing in any log to show for it.
     logger.error(

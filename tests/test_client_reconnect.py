@@ -421,3 +421,35 @@ def test_dismissal_is_never_retried(monkeypatch):
     with pytest.raises(RuntimeError, match="MAY have been applied"):
         conn.dismiss_blocking_dialog()
     assert proxy.calls == 1 and len(made) == 1
+
+
+# --- late completions ----------------------------------------------------------
+
+
+def test_late_completions_reach_the_next_dict_reply(monkeypatch):
+    """The addon hands a late completion out once, on whatever reply comes next;
+    a wrapper that unwraps a list must not swallow it."""
+    late = {"request": 41, "method": "execute_code", "outcome": "completed"}
+
+    class LateProxy:
+        def __init__(self):
+            self.handed_out = False
+
+        def _attach(self, res):
+            if not self.handed_out:
+                self.handed_out = True
+                res["late_completions"] = [late]
+            return res
+
+        def list_documents(self):
+            return self._attach({"success": True, "documents": ["Late"]})
+
+        def execute_code(self, code):
+            return self._attach({"success": True, "message": "ok"})
+
+    conn, _ = _make_conn(monkeypatch, lambda n: LateProxy())
+    assert conn.list_documents() == ["Late"]
+    first = conn.execute_code("print(1)")
+    assert first["late_completions"] == [late]
+    second = conn.execute_code("print(2)")
+    assert "late_completions" not in second, "each completion is reported once"

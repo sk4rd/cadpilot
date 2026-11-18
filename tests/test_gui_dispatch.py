@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import importlib.util
 import sys
+import threading
 import time
 import types
 from pathlib import Path
@@ -473,3 +474,78 @@ def test_long_deferral_is_logged_once(dispatch):
     _run_ticks(mod, 4)
     assert len(warnings) == 1, warnings
     assert "modal" in str(warnings[0]), warnings[0]
+
+
+# --- a call that times out while its task runs --------------------------------
+#
+# Live audit: execute_code was told "timed out" while its snippet was already
+# running; LateBox, its undo entry and its journal record appeared seconds
+# later, and nothing ever said so.
+
+
+def _call_from_another_thread(mod, task, timeout, request, method):
+    result = {}
+
+    def caller():
+        mod.dbglog.set_request_id(request)
+        mod.set_call_method(method)
+        result["reply"] = mod.dispatch_to_gui(task, timeout=timeout)
+
+    thread = threading.Thread(target=caller)
+    thread.start()
+    return thread, result
+
+
+def test_a_call_that_times_out_mid_task_says_it_may_still_complete(dispatch):
+    mod, _state = dispatch
+    release = threading.Event()
+    applied = []
+
+    def slow_task():
+        release.wait(5)
+        applied.append("LateBox")
+        return True
+
+    caller, result = _call_from_another_thread(mod, slow_task, 0.3, 41, "execute_code")
+    time.sleep(0.05)
+    gui = threading.Thread(target=mod.process_gui_tasks)  # the GUI thread starts it
+    gui.start()
+    caller.join(5)
+    reply = result["reply"]
+    assert reply["success"] is False
+    assert reply["may_still_complete"] is True
+    assert "may still complete" in reply["error"] and "before retrying" in reply["error"]
+    assert mod.take_late_completions() == [], "nothing is late until it finishes"
+
+    release.set()
+    gui.join(5)
+    assert applied == ["LateBox"]
+    late = mod.take_late_completions()
+    assert len(late) == 1, late
+    assert late[0]["request"] == 41
+    assert late[0]["method"] == "execute_code"
+    assert late[0]["outcome"] == "completed"
+    assert late[0]["finished_after_s"] >= late[0]["timed_out_after_s"]
+    assert mod.take_late_completions() == [], "each completion is handed out once"
+
+
+def test_a_call_cancelled_before_it_started_says_nothing_was_applied(dispatch):
+    mod, _state = dispatch
+    release = threading.Event()
+    ran = []
+    mod._rpc_request_queue.put(lambda: release.wait(5))  # another call holds the GUI
+    gui = threading.Thread(target=mod.process_gui_tasks)
+    gui.start()
+    time.sleep(0.05)
+
+    caller, result = _call_from_another_thread(
+        mod, lambda: ran.append("queued"), 0.2, 42, "edit_object"
+    )
+    caller.join(5)
+    release.set()
+    gui.join(5)
+    mod.process_gui_tasks()
+    assert "nothing was applied" in result["reply"]["error"], result["reply"]
+    assert "may_still_complete" not in result["reply"]
+    assert ran == [], "a cancelled task must never run"
+    assert mod.take_late_completions() == []

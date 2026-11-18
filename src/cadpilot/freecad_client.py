@@ -1,6 +1,7 @@
 import http.client
 import logging
 import os
+import threading
 import time
 import xmlrpc.client
 from typing import Any
@@ -125,6 +126,10 @@ class FreeCADConnection:
             except ValueError:
                 connect_grace = _CONNECT_GRACE_DEFAULT
         self._connect_grace = float(connect_grace)
+        # Late completions taken off a reply that a wrapper unwraps to a list
+        # (get_objects, list_documents); the next dict reply carries them.
+        self._late_completions: list[dict[str, Any]] = []
+        self._late_lock = threading.Lock()
         self.server = self._make_proxy(timeout)
 
     def _make_proxy(self, timeout: float) -> xmlrpc.client.ServerProxy:
@@ -135,6 +140,30 @@ class FreeCADConnection:
         )
 
     def _invoke(self, method: str, *args):
+        """Call an RPC method; a dict reply carries every pending late completion.
+
+        ``late_completions`` lists calls that were reported as timed out while
+        their task was already running in FreeCAD, and that then finished (the
+        addon's gui_dispatch records them). The field rides on the next dict
+        reply whichever call it was, so a caller must surface it, not drop it.
+        """
+        res = self._invoke_retrying(method, *args)
+        if not isinstance(res, dict):
+            return res
+        with self._late_lock:
+            pending = self._late_completions + list(res.pop("late_completions", None) or [])
+            self._late_completions = []
+        if pending:
+            res["late_completions"] = pending
+        return res
+
+    def _keep_late_completions(self, res) -> None:
+        """Hold back the field of a reply that a wrapper unwraps to a list."""
+        if isinstance(res, dict) and res.get("late_completions"):
+            with self._late_lock:
+                self._late_completions = res.pop("late_completions") + self._late_completions
+
+    def _invoke_retrying(self, method: str, *args):
         """Call an RPC method with connection-loss recovery.
 
         A dead connection (FreeCAD or the addon was restarted) rebuilds the
@@ -523,6 +552,7 @@ class FreeCADConnection:
 
     def get_objects(self, doc_name: str) -> list[dict[str, Any]]:
         res = self._invoke("get_objects", doc_name)
+        self._keep_late_completions(res)
         # New addon returns {"success": ..., "objects": [...]};
         # old addon returns the list directly. A failure (e.g. document not
         # found) must surface as an error, not as a misleading empty list.
@@ -536,6 +566,7 @@ class FreeCADConnection:
 
     def get_object(self, doc_name: str, obj_name: str) -> dict[str, Any]:
         res = self._invoke("get_object", doc_name, obj_name)
+        self._keep_late_completions(res)
         # New addon returns {"success": ..., "object": {...}};
         # old addon returns the dict directly.
         if isinstance(res, dict):
@@ -547,6 +578,7 @@ class FreeCADConnection:
 
     def list_documents(self) -> list[str]:
         res = self._invoke("list_documents")
+        self._keep_late_completions(res)
         # New addon returns {"success": ..., "documents": [...]};
         # old addon returns the list directly.
         if isinstance(res, dict):
