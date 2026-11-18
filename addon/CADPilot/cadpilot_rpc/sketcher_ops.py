@@ -218,6 +218,26 @@ def refuse_unit_name(name: str, where: str) -> None:
     )
 
 
+def _expression_datum(sketch, plan: dict):
+    """The value a bound constraint starts at: its expression's, when it evaluates.
+
+    sketch_spec's placeholder (1 mm) squeezes the drawing while the remaining
+    constraints go in, and the unsigned lengths then grow back on the wrong side
+    once the expression applies: live on 1.1.4 an L-profile bound to a
+    spreadsheet came out with its flange and wall mirrored across the outer face.
+    """
+    try:
+        value = sketch.evalExpression(plan["expr"])
+        value = float(getattr(value, "Value", value))
+    except Exception:
+        return plan["datum"]
+    if plan["type"] == "angle":
+        return math.radians(value)
+    if plan["type"] in ("distance", "radius", "diameter") and value <= 0:
+        return plan["datum"]
+    return value
+
+
 def _add_constraints(sketch, constraints: list, implied: list = ()) -> tuple[list, list]:
     """Add the spec's constraints, then those its composite geometry implies.
 
@@ -231,10 +251,10 @@ def _add_constraints(sketch, constraints: list, implied: list = ()) -> tuple[lis
         if plan["name"]:
             refuse_unit_name(plan["name"], f"constraints[{plan['entry']}] ({plan['type']})")
         args = plan["args"]
-        if plan["datum"] is None:
-            con = Sketcher.Constraint(*args)
-        else:
-            con = Sketcher.Constraint(*args, plan["datum"])
+        value = plan["datum"]
+        if plan["expr"] is not None:
+            value = _expression_datum(sketch, plan)
+        con = Sketcher.Constraint(*args) if value is None else Sketcher.Constraint(*args, value)
         idx = sketch.addConstraint(con)
         if plan["name"]:
             sketch.renameConstraint(idx, plan["name"])

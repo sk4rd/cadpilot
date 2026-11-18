@@ -182,6 +182,62 @@ res = c.undo_transactions("LiveTest", 1)
 after_undo = {o["Name"] for o in c.get_objects("LiveTest")}
 check("undo removes Loose sketch", res.get("success") and "Loose" not in after_undo, str(res))
 
+# --- bound lengths keep the drawing's sides -------------------------------------------
+# A placeholder datum used to squeeze each bound length to 1 mm while the rest went in,
+# and the profile came out mirrored across the outer face.
+res = feat(
+    "variables",
+    "Prof",
+    cells={
+        "A1": ["Depth", 40],
+        "A2": ["Thick", 8],
+        "A3": ["Leg", 9],
+        "A4": ["WallT", 4],
+        "A5": ["Tall", 65],
+    },
+)
+check("profile variables", res.get("success"), str(res))
+res = feat(
+    "sketch",
+    "LProfile",
+    plane="YZ",
+    geometry=[
+        {
+            "type": "polyline",
+            "closed": True,
+            "points": [[0, 0], [40, 0], [40, -8], [13, -8], [4, -17], [4, -65], [0, -65]],
+        }
+    ],
+    constraints=[
+        {"type": "coincident", "items": [[0, "start"], [-1, "start"]]},
+        {"type": "horizontal", "items": [0, 2, 5]},
+        {"type": "vertical", "items": [1, 4, 6]},
+        {"type": "distance", "items": [0], "value": "=Prof.Depth", "name": "Depth"},
+        {"type": "distance", "items": [1], "value": "=Prof.Thick", "name": "Thick"},
+        {
+            "type": "distance_x",
+            "items": [[3, "end"], [3, "start"]],
+            "value": "=Prof.Leg",
+            "name": "Leg",
+        },
+        {
+            "type": "distance_y",
+            "items": [[3, "end"], [3, "start"]],
+            "value": "=Prof.Leg",
+            "name": "Rise",
+        },
+        {"type": "distance", "items": [5], "value": "=Prof.WallT", "name": "WallT"},
+        {"type": "distance", "items": [6], "value": "=Prof.Tall", "name": "Tall"},
+    ],
+)
+check("bound L-profile solves fully", res.get("success") and res.get("dof") == 0, str(res))
+out = c.execute_code(
+    "sk = App.getDocument('LiveTest').getObject('LProfile')\n"
+    "print([round(g.StartPoint.x, 3) for g in sk.Geometry])"
+)
+xs = out.get("message", "").split("Output:")[-1].strip()
+check("bound lengths keep their sides", xs.startswith("[0.0, 40.0, 40.0, 13.0, 4.0, 4.0, 0.0]"), xs)
+
 # --- summary ------------------------------------------------------------------------
 print()
 if FAILURES:
