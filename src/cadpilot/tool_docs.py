@@ -272,8 +272,9 @@ volume before/after; `stale: true` means its tip failed, so the Body still
 shows the last good shape — fix the feature or undo the change.""",
     "sketch": """\
 sketch — atomic constrained sketch (Sketcher::SketchObject inside a PartDesign
-Body; a body named in `body` that does not exist yet is created, and without
-`body` the document's only Body is used or one is created). Geometry +
+Body; `body` is a Body's Name or its Label, one that does not exist yet is
+created with that label, and without `body` the document's only Body is used
+or one is created). Geometry +
 constraints in ONE transaction; the solver runs immediately.
 obj_name = sketch name (default "Sketch", may be omitted).
 Required in obj_properties: geometry.

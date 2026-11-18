@@ -1837,7 +1837,7 @@ def _feature_body(doc, spec, anchor, op: str):
     named = spec.get("body")
     if owner is None:
         return sketcher_ops._get_or_create_body(doc, named)
-    if named and named != owner.Name:
+    if named and named not in (owner.Name, owner.Label):
         raise ValueError(
             f"{op}: '{anchor.Name}' belongs to Body '{owner.Name}', not '{named}'. A feature is "
             f"built in the body of what it is built on; drop body or pass body='{owner.Name}'."

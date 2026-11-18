@@ -42,6 +42,27 @@ def pop_last_sketch_info() -> dict | None:
     return info
 
 
+def _find_body(doc, name: str):
+    """The Body called ``name``: by Name, else by a Label only one Body has; None if absent.
+
+    FreeCAD rewrites a Name it cannot store ("Main Body" becomes "Main_Body")
+    and keeps what was asked for as the Label, so a name that is only looked up
+    by Name finds nothing the second time it is used.
+    """
+    obj = doc.getObject(name)
+    if obj is not None:
+        if obj.TypeId != "PartDesign::Body":
+            raise ValueError(f"'{name}' is not a PartDesign::Body (TypeId={obj.TypeId}).")
+        return obj
+    labelled = [o for o in doc.Objects if o.TypeId == "PartDesign::Body" and o.Label == name]
+    if len(labelled) > 1:
+        raise ValueError(
+            f"{len(labelled)} Bodies are labelled '{name}' "
+            f"({[b.Name for b in labelled]}); pass the Name of one."
+        )
+    return labelled[0] if labelled else None
+
+
 def _get_or_create_body(doc, name: str | None):
     """Resolve the PartDesign Body to build in.
 
@@ -49,11 +70,9 @@ def _get_or_create_body(doc, name: str | None):
     Body, create one when absent, and refuse to guess when several exist.
     """
     if name:
-        body = doc.getObject(name)
+        body = _find_body(doc, name)
         if body is None:
             raise ValueError(f"Body '{name}' not found in document '{doc.Name}'.")
-        if body.TypeId != "PartDesign::Body":
-            raise ValueError(f"'{name}' is not a PartDesign::Body (TypeId={body.TypeId}).")
         return body
     bodies = [o for o in doc.Objects if o.TypeId == "PartDesign::Body"]
     if len(bodies) == 1:
@@ -737,19 +756,25 @@ def build_sketch_gui(doc, spec):
         sketch, body = _sketch_to_replace(doc, existing, spec)
     else:
         named = spec.get("body")
-        if named and doc.getObject(named) is None:
+        body = _find_body(doc, named) if named else None
+        if named and body is None:
             # A plan names the Body its first sketch goes in before anything has
-            # created it; refusing made every such plan fail at step 1.
+            # created it; refusing made every such plan fail at step 1. The
+            # label is what the next sketch finds it by when FreeCAD could not
+            # keep the name (live: two sketches into "Main Body" made two bodies).
             body = doc.addObject("PartDesign::Body", named)
+            body.Label = named
             created_body = body.Name
-        else:
-            body = _get_or_create_body(doc, named)
+        elif body is None:
+            body = _get_or_create_body(doc, None)
         sketch = body.newObject("Sketcher::SketchObject", name or "Sketch")
 
     attachment, warnings = _attach_sketch(sketch, doc, spec, body)
     if created_body:
         renamed = (
-            "" if created_body == spec.get("body") else f" (FreeCAD named it '{created_body}')"
+            ""
+            if created_body == spec.get("body")
+            else f" (FreeCAD named it '{created_body}'; '{body.Label}' is its label)"
         )
         warnings = [
             f"Body '{spec.get('body')}' did not exist, so it was created{renamed}.",
