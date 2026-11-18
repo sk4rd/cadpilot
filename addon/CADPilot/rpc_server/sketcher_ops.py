@@ -1,8 +1,9 @@
-"""Constrained-sketch construction for the RPC ``sketch`` feature op.
+"""Constrained sketches for the RPC ``sketch`` and ``sketch_edit`` feature ops.
 
-A sketch is built atomically: geometry + constraints are applied in one go,
-the solver runs, and the result is validated. Callers wrap this in a document
-transaction, so any raised error leaves the document untouched.
+A sketch is built, or edited, atomically: geometry + constraints are applied
+in one go, the solver runs, and the result is validated. Callers wrap this in
+a document transaction, so any raised error leaves the document untouched.
+Turning the spec into Sketcher arguments is ``sketch_spec``'s job (pure).
 
 Result metadata (DoF, solver diagnostics) is stashed module-level and consumed
 by ``feature_ops.describe_feature`` — builders only return the object itself.
@@ -155,7 +156,8 @@ def _add_external(sketch, doc, body, external):
     """spec external: [[obj_name, "EdgeN"|"VertexN"], ...] -> GeoIds -3, -4, ...
 
     External geometry lets a sketch reference another object's edges/vertices
-    (cross-part parametric references). The i-th entry occupies GeoId -(3+i);
+    (cross-part parametric references). The sketch's i-th external geometry
+    occupies GeoId -(3+i), so entries added later continue the numbering;
     constraints reference it like any geometry id, e.g. [-3, "start"].
     Targets outside the sketch's body are bridged via a SubShapeBinder
     (PartDesign scope rule); the binder's shape holds exactly that one
@@ -669,6 +671,23 @@ def _sketch_to_replace(doc, existing, spec):
     return existing, body
 
 
+def _sketch_info(sketch, body, dof, diag, unnamed) -> dict:
+    """The reply fields every sketch op shares."""
+    info = {
+        "object_name": sketch.Name,
+        "body": body.Name if body is not None else None,
+        "dof": int(dof) if dof is not None else None,
+        "fully_constrained": (dof == 0) if dof is not None else None,
+        "geometry_count": len(sketch.Geometry),
+        "constraint_count": len(sketch.Constraints),
+        "external_count": len(list(sketch.ExternalGeo)) - 2,
+        "diagnostics": diag or None,
+    }
+    if unnamed:
+        info["unnamed_dimensions"] = unnamed
+    return info
+
+
 def build_sketch_gui(doc, spec):
     """Build a constrained sketch atomically; returns the SketchObject.
 
@@ -697,22 +716,11 @@ def build_sketch_gui(doc, spec):
     doc.recompute()
     dof, diag = _solve(sketch, origins)
 
-    _LAST_SKETCH_INFO = {
-        "object_name": sketch.Name,
-        "body": body.Name,
-        "dof": int(dof) if dof is not None else None,
-        "fully_constrained": (dof == 0) if dof is not None else None,
-        "geometry_count": len(sketch.Geometry),
-        "constraint_count": len(sketch.Constraints),
-        "external_count": len(spec.get("external") or []),
-        "diagnostics": diag or None,
-    }
+    _LAST_SKETCH_INFO = _sketch_info(sketch, body, dof, diag, unnamed)
     if any(len(i) != 1 for i in geometry_ids):
         _LAST_SKETCH_INFO["geometry_ids"] = geometry_ids
     if existing is not None:
         _LAST_SKETCH_INFO["replaced"] = True
-    if unnamed:
-        _LAST_SKETCH_INFO["unnamed_dimensions"] = unnamed
     # Which face/plane the sketch actually landed on, with its center and
     # normal — a direction token on a stepped part picks the FARTHEST face
     # facing that way, and without this echo the wrong pick looked exactly
@@ -720,4 +728,260 @@ def build_sketch_gui(doc, spec):
     _LAST_SKETCH_INFO["plane"] = {**attachment, **_frame_echo(sketch)}
     if warnings:
         _LAST_SKETCH_INFO["warnings"] = warnings
+    return sketch
+
+
+# --- sketch_edit ----------------------------------------------------------------
+
+
+def _describe(sketch, index: int) -> str:
+    con = sketch.Constraints[index]
+    name = f" '{con.Name}'" if con.Name else ""
+    return f"Constraints[{index}] {con.Type}{name}"
+
+
+def _bound_path(sketch, index: int) -> str | None:
+    """The ExpressionEngine key of a constraint's binding, if it has one.
+
+    A named constraint is bound as '.Constraints.<name>', an unnamed one as
+    'Constraints[i]' (FreeCAD rewrites the path on rename).
+    """
+    name = sketch.Constraints[index].Name
+    for path, _expr in sketch.ExpressionEngine:
+        if path == f"Constraints[{index}]" or (name and path == f".Constraints.{name}"):
+            return path
+    return None
+
+
+def _set_value(sketch, index: int, value, where: str) -> None:
+    con = sketch.Constraints[index]
+    ctype = sketch_spec.VALUE_TYPES.get(con.Type)
+    if ctype is None:
+        raise ValueError(f"{where}: {_describe(sketch, index)} has no value to set.")
+    if not getattr(con, "Driving", True):
+        raise ValueError(
+            f"{where}: {_describe(sketch, index)} is a reference dimension; it measures, it "
+            "cannot be set."
+        )
+    try:
+        datum, expr = sketch_spec.datum(ctype, value)
+    except ValueError as e:
+        raise ValueError(f"{where}: value {e}") from e
+    try:
+        if expr is not None:
+            sketch.setExpression(f"Constraints[{index}]", expr)
+            return
+        path = _bound_path(sketch, index)
+        if path:
+            sketch.setExpression(path, None)
+        sketch.setDatum(index, datum)
+    except Exception as e:
+        raise ValueError(f"{where}: {_describe(sketch, index)}: {e}") from e
+
+
+def _refuse_open_editor(doc, sketch) -> None:
+    """Refuse to change a sketch the user has open in the sketcher."""
+    try:
+        import FreeCADGui
+
+        gui_doc = FreeCADGui.getDocument(doc.Name)
+        in_edit = gui_doc.getInEdit() if gui_doc is not None else None
+    except Exception:
+        return
+    if in_edit is not None and getattr(in_edit, "Object", None) is sketch:
+        raise ValueError(
+            f"'{sketch.Name}' is open in the sketcher; close it there and retry, so this "
+            "edit cannot collide with the one in progress."
+        )
+
+
+def _attachment_echo(sketch) -> dict:
+    support = list(getattr(sketch, "AttachmentSupport", None) or [])
+    echo = {"map_mode": str(sketch.MapMode)}
+    if support and support[0]:
+        obj, subs = support[0][0], support[0][1] if len(support[0]) > 1 else ()
+        subs = [s for s in (subs if isinstance(subs, (list, tuple)) else [subs]) if s]
+        echo["support"] = f"{obj.Name}.{subs[0]}" if subs else obj.Name
+    return {**echo, **_frame_echo(sketch)}
+
+
+def _named_constraints(sketch) -> dict:
+    exprs = {path: expr for path, expr in sketch.ExpressionEngine}
+    out = {}
+    for i, con in enumerate(sketch.Constraints):
+        if not con.Name:
+            continue
+        entry = {"index": i}
+        if con.Type in sketch_spec.VALUE_TYPES:
+            value = float(con.Value)
+            entry["value"] = round(math.degrees(value) if con.Type == "Angle" else value, 6)
+            expr = exprs.get(f".Constraints.{con.Name}") or exprs.get(f"Constraints[{i}]")
+            if expr:
+                entry["expression"] = f"={expr}"
+        out[con.Name] = entry
+    return out
+
+
+def edit_sketch_gui(doc, spec):
+    """Change an existing sketch in place — possibly one the user edited by hand.
+
+    Every name and index in ``spec`` refers to the sketch as it was BEFORE the
+    call; new geometry is numbered on from the old geometry count (see
+    sketch_spec.Renumbering). Raises on any failure, and the caller's
+    transaction then restores the sketch exactly.
+    """
+    global _LAST_SKETCH_INFO
+    _LAST_SKETCH_INFO = None
+    name = spec.get("base")
+    if not name:
+        raise ValueError("sketch_edit requires obj_name: the sketch to edit.")
+    sketch = doc.getObject(name)
+    if sketch is None:
+        raise ValueError(f"sketch '{name}' not found in document '{doc.Name}'.")
+    if sketch.TypeId != "Sketcher::SketchObject":
+        raise ValueError(f"'{name}' is a {sketch.TypeId}, not a sketch.")
+    keys = sketch_spec.EDIT_KEYS
+    unknown = sorted(set(spec) - set(keys) - {"type", "base"})
+    if unknown:
+        raise ValueError(f"sketch_edit: unknown key(s) {unknown}; it takes {', '.join(keys)}.")
+    if not any(spec.get(k) for k in keys):
+        raise ValueError(f"sketch_edit: nothing to change; pass any of {', '.join(keys)}.")
+    _refuse_open_editor(doc, sketch)
+
+    cons = list(sketch.Constraints)
+    names = {c.Name: i for i, c in enumerate(cons) if c.Name}
+    old_count = len(sketch.Geometry)
+
+    def resolve(ref, where):
+        return sketch_spec.constraint_ref(ref, names, len(cons), where)
+
+    sets = [
+        (resolve(ref, f"set[{ref!r}]"), f"set[{ref!r}]", value)
+        for ref, value in sketch_spec.ref_pairs(spec.get("set"), "set")
+    ]
+    renames = [
+        (resolve(ref, f"rename[{ref!r}]"), f"rename[{ref!r}]", new)
+        for ref, new in sketch_spec.ref_pairs(spec.get("rename"), "rename")
+    ]
+    deletes = spec.get("delete_constraints") or []
+    if not isinstance(deletes, list):
+        raise ValueError(f"delete_constraints must be a list of names or indices, got {deletes!r}")
+    del_cons = sorted({resolve(ref, f"delete_constraints[{ref!r}]") for ref in deletes})
+    del_geo = sorted(
+        set(sketch_spec.geo_ids(spec.get("delete_geometry"), old_count, "delete_geometry"))
+    )
+    with_geo = [
+        i
+        for i, c in enumerate(cons)
+        if i not in del_cons and {c.First, c.Second, c.Third} & set(del_geo)
+    ]
+    gone = set(del_cons) | set(with_geo)
+    for index, where, _ in sets + renames:
+        if index in gone:
+            raise ValueError(f"{where}: {_describe(sketch, index)} is deleted by this call.")
+
+    final_names = {i: c.Name for i, c in enumerate(cons) if c.Name and i not in gone}
+    for index, where, new in renames:
+        if new in (None, ""):
+            final_names.pop(index, None)
+            continue
+        try:
+            final_names[index] = sketch_spec.check_name(new)
+        except ValueError as e:
+            raise ValueError(f"{where}: {e}") from e
+        refuse_unit_name(final_names[index], where)
+    seen = {}
+    for index, new in final_names.items():
+        if new in seen:
+            raise ValueError(
+                f"rename: {new!r} would name both {_describe(sketch, seen[new])} and "
+                f"{_describe(sketch, index)}."
+            )
+        seen[new] = index
+
+    edited = {}
+    for index, where, value in sets:
+        _set_value(sketch, index, value, where)
+    if sets:
+        edited["set"] = [_describe(sketch, index) for index, _, _ in sets]
+    for index, where, new in renames:
+        try:
+            sketch.renameConstraint(index, new or "")
+        except Exception as e:
+            raise ValueError(f"{where}: {e}") from e
+    if renames:
+        edited["renamed"] = [_describe(sketch, index) for index, _, _ in renames]
+
+    if del_cons:
+        edited["deleted_constraints"] = [_describe(sketch, i) for i in del_cons]
+    if with_geo:
+        edited["removed_with_geometry"] = [_describe(sketch, i) for i in with_geo]
+    for index in reversed(del_cons):
+        sketch.delConstraint(index)
+    for geo_id in reversed(del_geo):
+        sketch.delGeometry(geo_id)
+    if del_geo:
+        edited["deleted_geometry"] = del_geo
+        if len(sketch.Geometry) != old_count - len(del_geo):
+            raise ValueError(
+                f"delete_geometry: FreeCAD removed {old_count - len(sketch.Geometry)} geometries "
+                f"for the {len(del_geo)} named (an ellipse takes its internal geometry along); "
+                "delete them in a call of their own, then add."
+            )
+
+    base = len(sketch.Geometry)
+    implied = []
+    if spec.get("geometry"):
+        if not isinstance(spec["geometry"], list):
+            raise ValueError("geometry must be a list of geometry items.")
+        geometry_ids, implied = _add_geometry(sketch, spec["geometry"], None)
+        edited["added_geometry"] = geometry_ids
+    renumber = sketch_spec.Renumbering(old_count, del_geo, base, len(sketch.Geometry) - base)
+    body = sketch.getParentGeoFeatureGroup()
+    if body is not None and body.TypeId != "PartDesign::Body":
+        body = None
+    if spec.get("external"):
+        if body is None:
+            raise ValueError("external geometry needs the sketch inside a PartDesign Body.")
+        _add_external(sketch, doc, body, spec["external"])
+    for geo_id, flag in sketch_spec.construction_flags(spec.get("construction")).items():
+        try:
+            target = renumber.geo(geo_id)
+        except ValueError as e:
+            raise ValueError(f"construction: {e}") from e
+        if not 0 <= target < len(sketch.Geometry):
+            raise ValueError(f"construction: {geo_id} is not a GeoId of this sketch.")
+        sketch.setConstruction(target, flag)
+
+    first_new = len(sketch.Constraints)
+    origins, unnamed = _add_constraints(
+        sketch, renumber.constraints(spec.get("constraints")), implied
+    )
+    if len(sketch.Constraints) > first_new:
+        edited["added_constraints"] = list(range(first_new, len(sketch.Constraints)))
+    for i, origin in enumerate(origins):
+        if origin is None:
+            con = sketch.Constraints[i]
+            origins[i] = {"entry": f"existing Constraints[{i}]", "type": con.Type}
+            if con.Name:
+                origins[i]["name"] = con.Name
+
+    doc.recompute()
+    dof, diag = _solve(sketch, origins)
+
+    info = _sketch_info(sketch, body, dof, diag, unnamed)
+    info["edited"] = edited
+    info["named_constraints"] = _named_constraints(sketch)
+    info["plane"] = _attachment_echo(sketch)
+    broken = [
+        o.Name
+        for o in getattr(sketch, "InListRecursive", [])
+        if "Invalid" in [str(state) for state in getattr(o, "State", [])]
+    ]
+    if broken:
+        info["warnings"] = [
+            f"the edit left {', '.join(broken)} failing to recompute (an opened profile, or a "
+            "reference that is gone); fix the sketch or roll the step back."
+        ]
+    _LAST_SKETCH_INFO = info
     return sketch

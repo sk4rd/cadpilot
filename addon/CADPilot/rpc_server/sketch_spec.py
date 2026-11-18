@@ -277,8 +277,15 @@ def constraint_args(ctype: str, items: list, kinds: dict | None = None) -> list[
     raise ValueError(f"unknown constraint type {ctype!r}; supported: {', '.join(CONSTRAINT_TYPES)}")
 
 
-# Sketcher constraint types that carry a datum
-_DATUM_TYPES = frozenset({"Distance", "DistanceX", "DistanceY", "Radius", "Diameter", "Angle"})
+# Sketcher constraint types that carry a datum -> the spec type of that value
+VALUE_TYPES = {
+    "Distance": "distance",
+    "DistanceX": "distance_x",
+    "DistanceY": "distance_y",
+    "Radius": "radius",
+    "Diameter": "diameter",
+    "Angle": "angle",
+}
 
 
 _UNITS = {
@@ -420,7 +427,7 @@ def plan_constraints(
                 "expand to; split the entry or drop the name."
             )
         for args in all_args:
-            dimensional = args[0] in _DATUM_TYPES
+            dimensional = args[0] in VALUE_TYPES
             planned.append(
                 {
                     "args": args,
@@ -666,3 +673,131 @@ def expand_geometry(geometry: list, base: int = 0) -> tuple[list[dict], list[lis
         ids.append([start + k for k in range(len(parts))])
         implied.extend(_implied(gtype, i, *(_offset_args(a, start) for a in local)))
     return prims, ids, implied
+
+
+# --- sketch_edit ---------------------------------------------------------------
+
+EDIT_KEYS = (
+    "set",
+    "rename",
+    "delete_constraints",
+    "delete_geometry",
+    "construction",
+    "geometry",
+    "external",
+    "constraints",
+)
+
+
+def ref_pairs(value: Any, key: str) -> list[tuple[Any, Any]]:
+    """``{ref: x}`` or ``[[ref, x], ...]`` -> [(ref, x)]; a ref is a name or an index."""
+    if value is None:
+        return []
+    if isinstance(value, dict):
+        return list(value.items())
+    if isinstance(value, list) and all(isinstance(p, (list, tuple)) and len(p) == 2 for p in value):
+        return [tuple(p) for p in value]
+    raise ValueError(f"{key} must be {{name: ...}} or [[name_or_index, ...], ...], got {value!r}")
+
+
+def constraint_ref(ref: Any, names: dict, count: int, where: str) -> int:
+    """A constraint by name, or by index (an int, or digits as a dict key)."""
+    if isinstance(ref, str) and ref in names:
+        return names[ref]
+    if (isinstance(ref, int) and not isinstance(ref, bool)) or (
+        isinstance(ref, str) and ref.isdigit()
+    ):
+        index = int(ref)
+        if 0 <= index < count:
+            return index
+        raise ValueError(f"{where}: constraint index {index} is out of range (0..{count - 1})")
+    known = ", ".join(sorted(names)) or "none"
+    raise ValueError(f"{where}: no constraint named {ref!r} (named: {known})")
+
+
+def geo_ids(value: Any, count: int, where: str) -> list[int]:
+    """A list of existing internal GeoIds (0..count-1)."""
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise ValueError(f"{where} must be a list of GeoIds, got {value!r}")
+    out = []
+    for g in value:
+        if isinstance(g, bool) or not isinstance(g, int) or not 0 <= g < count:
+            raise ValueError(f"{where}: {g!r} is not a GeoId of this sketch (0..{count - 1})")
+        out.append(g)
+    return out
+
+
+def construction_flags(value: Any, where: str = "construction") -> dict[int, bool]:
+    """``[g, ...]`` (make construction) or ``{g: bool}`` -> {GeoId: flag}."""
+    if value is None:
+        return {}
+    if isinstance(value, list):
+        pairs = [(g, True) for g in value]
+    elif isinstance(value, dict):
+        pairs = list(value.items())
+    else:
+        raise ValueError(f"{where} must be [geo_id, ...] or {{geo_id: true|false}}, got {value!r}")
+    out = {}
+    for g, flag in pairs:
+        try:
+            out[int(g)] = bool(flag)
+        except (TypeError, ValueError):
+            raise ValueError(f"{where}: {g!r} is not a GeoId") from None
+    return out
+
+
+class Renumbering:
+    """Map GeoIds written against the sketch BEFORE an edit to the ids after it.
+
+    Every index in one sketch_edit call refers to the sketch as the caller last
+    saw it. Deleting geometry renumbers everything after it, and new geometry
+    is numbered on from the old count, so both are shifted here.
+    """
+
+    def __init__(self, old_count: int, deleted: list[int], new_base: int, new_count: int = 0):
+        self.old_count = old_count
+        self.deleted = sorted(set(deleted))
+        self.new_base = new_base
+        self.new_count = new_count
+
+    def geo(self, g: int) -> int:
+        if g < 0:
+            return g
+        if g >= self.old_count + self.new_count:
+            added = (
+                f", and this call adds {self.old_count}..{self.old_count + self.new_count - 1}"
+                if self.new_count
+                else ""
+            )
+            raise ValueError(
+                f"GeoId {g} does not exist; before this call the sketch had geometry "
+                f"0..{self.old_count - 1}{added}"
+            )
+        if g >= self.old_count:
+            return self.new_base + (g - self.old_count)
+        if g in self.deleted:
+            raise ValueError(f"GeoId {g} is deleted by this call")
+        return g - sum(1 for d in self.deleted if d < g)
+
+    def item(self, item: Any) -> Any:
+        if isinstance(item, bool):
+            return item
+        if isinstance(item, int):
+            return self.geo(item)
+        if isinstance(item, (list, tuple)) and len(item) in (1, 2) and isinstance(item[0], int):
+            return [self.geo(item[0]), *item[1:]]
+        return item
+
+    def constraints(self, constraints: list | None) -> list:
+        out = []
+        for i, c in enumerate(constraints or []):
+            if not isinstance(c, dict) or not isinstance(c.get("items"), list):
+                out.append(c)
+                continue
+            try:
+                out.append({**c, "items": [self.item(x) for x in c["items"]]})
+            except ValueError as e:
+                raise ValueError(f"constraints[{i}] ({c.get('type')}): {e}") from e
+        return out

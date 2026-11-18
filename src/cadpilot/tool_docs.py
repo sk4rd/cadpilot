@@ -444,6 +444,43 @@ Example (parametric plate: variables -> sketch -> pad):
     ([-1, "center"] refers to the sketch origin.)
     {"operation": "pad", "doc_name": "D", "obj_name": "Profile",
      "obj_properties": {"length": "=Params.thick"}}""",
+    "sketch_edit": """\
+sketch_edit — change an existing sketch in place, including one the user has
+edited by hand (obj_name = the sketch). One transaction: on any failure the
+sketch is restored exactly. Pads and pockets built on it recompute.
+Every name and index refers to the sketch AS IT WAS BEFORE this call (what the
+last reply or the user's sketch showed); new geometry is numbered on from the
+old geometry count, and new external geometry on from the existing externals.
+obj_properties (any of):
+- set: {"Width": 70, "Rake": "30 deg", "Depth": "=Params.depth"} — a
+  dimension's value or expression by constraint name (or index); a number
+  replaces a binding, "=..." binds one.
+- rename: {"Constraint7": "Width", "OldName": ""} — by name or index; ""
+  clears the name.
+- delete_constraints: ["Width", 3] — by name or index.
+- delete_geometry: [4, 5] — GeoIds; FreeCAD also drops every constraint on
+  them, and the reply lists those under removed_with_geometry.
+- construction: [2] (make construction) or {"2": false} (make normal).
+- geometry, external, constraints: added, in the same format as sketch;
+  constraints reference existing geometry by its index and new geometry by
+  old_count + its position.
+The reply reports dof, fully_constrained and diagnostics like sketch, plus
+`edited` (what changed), `named_constraints` (name -> index, value,
+expression — indices shift after deletes) and `plane` (the support and the
+sketch's world frame). A downstream feature the edit breaks is a warning.
+A sketch open in FreeCAD's sketcher is refused; the user closes it first.
+Use this instead of a second sketch call; edit_object refuses raw writes to a
+sketch's Geometry/Constraints.
+
+Example (widen a named dimension, add a centred hole, drop a chamfer line):
+    {"operation": "sketch_edit", "doc_name": "D", "obj_name": "Profile",
+     "obj_properties": {
+       "set": {"Width": "=Params.width"},
+       "delete_geometry": [4],
+       "geometry": [{"type": "circle", "center": [30, 15], "radius": 4}],
+       "constraints": [
+         {"type": "radius", "items": [5], "value": "=Params.hole_r",
+          "name": "HoleR"}]}}""",
     "pad": """\
 pad — extrude a closed sketch profile (obj_name = profile sketch).
 Optional in obj_properties: length (default 10), pad_type, length2, up_to_face,

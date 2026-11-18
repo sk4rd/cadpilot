@@ -429,6 +429,7 @@ CAD_FEATURE_OPERATIONS = (
     "color",
     "variables",
     "sketch",
+    "sketch_edit",
     "pad",
     "pocket",
     "revolution",
@@ -684,10 +685,13 @@ def cad_operation(
                     else f"Failed to set appearance: {res.get('error')}"
                 )
             else:
+                creates = operation != "sketch_edit"
                 summary = (
-                    f"{operation} '{res['object_name']}' created successfully"
+                    f"{operation} '{res['object_name']}' "
+                    f"{'created' if creates else 'edited'} successfully"
                     if success
-                    else f"Failed to create {operation}: {res.get('error')}"
+                    else f"Failed to {'create' if creates else 'apply'} {operation}: "
+                    f"{res.get('error')}"
                 )
             params_summary = f"on '{obj_name}' {list(params.keys())}"
             default_desc = f"{operation} on '{obj_name}'"

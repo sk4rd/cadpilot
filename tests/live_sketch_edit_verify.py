@@ -625,6 +625,186 @@ def m2_an_existing_sketch_name_is_refused_or_replaced():
     )
 
 
+def _plate(doc):
+    """A spreadsheet-driven 30x20 plate, padded 10: Base (lines 0..3), Pad."""
+    newdoc(doc)
+    return _stepped_block(doc)
+
+
+def m2_sketch_edit_sets_renames_and_deletes_by_name():
+    doc = "SkEdit"
+    pad = _plate(doc)
+    res = cad("sketch_edit", doc, "Base", set={"Width": 40, "Depth": "=Params.width / 2"})
+    s = inspect(doc, "Base")
+    check(
+        "M2 set by name: a number replaces the binding, '=...' binds one",
+        ok(res)
+        and "edited successfully" in err(res)
+        and next(k for k in s["cons"] if k["name"] == "Width")["value"] == 40.0
+        and s["expr"] == {".Constraints.Depth": "Params.width / 2"}
+        and res.get("dof") == 0,
+        f"{res} {s['expr']}",
+    )
+    vol = c.measure_geometry(doc, pad).get("volume_mm3")
+    check("M2 the pad follows the edit (40 x 15 x 10)", math.isclose(vol, 6000, rel_tol=1e-6), vol)
+    res = cad("sketch_edit", doc, "Base", rename={"Width": "PlateW"}, set={"Width": "35 mm"})
+    named = res.get("named_constraints", {})
+    check(
+        "M2 rename and set in one call both use the pre-edit name",
+        ok(res) and named.get("PlateW", {}).get("value") == 35.0 and "Width" not in named,
+        str(res),
+    )
+    res = cad("sketch_edit", doc, "Base", set={"Nope": 3})
+    check(
+        "M2 an unknown name lists the names there are",
+        not ok(res) and "no constraint named 'Nope' (named: Depth, PlateW)" in err(res),
+        err(res),
+    )
+    res = cad("sketch_edit", doc, "Base", set={"Rake": 3}, rename={"PlateW": "Depth"})
+    check("M2 a refused edit is refused as a whole", not ok(res), err(res))
+
+
+def m2_sketch_edit_adds_and_deletes_geometry_with_pre_edit_numbering():
+    doc = "SkEditGeo"
+    _plate(doc)
+    cad(
+        "sketch_edit",
+        doc,
+        "Base",
+        geometry=[{"type": "circle", "center": [10, 10], "radius": 2}, LINE([0, 25], [30, 25])],
+        construction=[5],
+    )
+    res = cad(
+        "sketch_edit",
+        doc,
+        "Base",
+        delete_geometry=[4],
+        geometry=[{"type": "circle", "center": [20, 10], "radius": 3}],
+        constraints=[
+            {"type": "radius", "items": [6], "value": 3, "name": "HoleR"},
+            {"type": "horizontal", "items": [5]},
+            {
+                "type": "distance_y",
+                "items": [[0, "start"], [5, "start"]],
+                "value": 25,
+                "name": "Rail",
+            },
+        ],
+    )
+    s = inspect(doc, "Base")
+    check(
+        "M2 indices in one call are pre-edit: 5 -> 4, the new circle 6 -> 5",
+        ok(res)
+        and [g["t"] for g in s["geo"]] == ["LineSegment"] * 5 + ["Circle"]
+        and s["geo"][4]["constr"] is True
+        and res.get("edited", {}).get("added_geometry") == [[5]]
+        and res.get("named_constraints", {}).get("HoleR", {}).get("index") is not None,
+        f"{res} {s['geo']}",
+    )
+    res = cad("sketch_edit", doc, "Base", delete_geometry=[4])
+    check(
+        "M2 deleting geometry lists the constraints that went with it",
+        ok(res)
+        and any("'Rail'" in x for x in res.get("edited", {}).get("removed_with_geometry", [])),
+        str(res.get("edited")),
+    )
+    res = cad("sketch_edit", doc, "Base", delete_constraints=["HoleR"], construction={"4": True})
+    check(
+        "M2 delete a constraint by name and toggle construction",
+        ok(res)
+        and "HoleR" not in res.get("named_constraints", {})
+        and inspect(doc, "Base")["geo"][4]["constr"],
+        str(res),
+    )
+
+
+def m2_sketch_edit_rolls_back_a_failed_edit():
+    doc = "SkEditFail"
+    _plate(doc)
+    before = inspect(doc, "Base")
+    res = cad(
+        "sketch_edit",
+        doc,
+        "Base",
+        set={"Width": 50},
+        geometry=[LINE([0, 30], [10, 30])],
+        constraints=[
+            {"type": "horizontal", "items": [4]},
+            {"type": "distance_x", "items": [0], "value": 12, "name": "Clash"},
+        ],
+    )
+    after = inspect(doc, "Base")
+    check(
+        "M2 a conflicting edit fails naming the entry it added and the one it hit",
+        not ok(res)
+        and "constraints[1] (distance_x 'Clash')" in err(res)
+        and "existing Constraints[1] (DistanceX 'Width')" in err(res),
+        err(res),
+    )
+    check("M2 the failed edit leaves the sketch exactly as it was", before == after, f"{after}")
+    res = cad("sketch_edit", doc, "Base", set={"Width": 44})
+    c.undo_transactions(doc, 1)
+    check(
+        "M2 a committed edit is one undo step",
+        ok(res) and inspect(doc, "Base")["cons"] == before["cons"],
+        str(inspect(doc, "Base")["cons"]),
+    )
+
+
+def m2_sketch_edit_works_on_a_hand_edited_sketch():
+    doc = "SkEditHand"
+    _plate(doc)
+    py(
+        f"""
+import FreeCAD, Part, Sketcher
+d = FreeCAD.getDocument("{doc}")
+s = d.getObject("Base")
+d.openTransaction("by hand")
+s.delConstraint(5)
+g = s.addGeometry(Part.Circle(FreeCAD.Vector(8, 8, 0), FreeCAD.Vector(0, 0, 1), 2))
+s.renameConstraint(s.addConstraint(Sketcher.Constraint("Diameter", g, 4.0)), "Bore")
+d.commitTransaction()
+d.recompute()
+""",
+        doc,
+    )
+    res = cad("sketch_edit", doc, "Base", set={"Bore": "=Params.depth / 4", "Width": 32})
+    named = res.get("named_constraints", {})
+    check(
+        "M2 set by name finds constraints the user added and renumbered",
+        ok(res)
+        and named.get("Bore", {}).get("value") == 5.0
+        and named.get("Width", {}).get("value") == 32.0,
+        str(res),
+    )
+
+
+def m2_sketch_edit_refuses_a_sketch_open_in_the_editor():
+    doc = "SkEditOpen"
+    _plate(doc)
+    py(f"import FreeCADGui\nFreeCADGui.getDocument('{doc}').setEdit('Base')", doc)
+    try:
+        res = cad("sketch_edit", doc, "Base", set={"Width": 31})
+        check(
+            "M2 a sketch open in the sketcher is refused",
+            "open in the sketcher" in err(res),
+            err(res),
+        )
+    finally:
+        py(f"import FreeCADGui\nFreeCADGui.getDocument('{doc}').resetEdit()", doc)
+
+
+def m2_sketch_edit_warns_about_broken_dependents():
+    doc = "SkEditBreak"
+    pad = _plate(doc)
+    res = cad("sketch_edit", doc, "Base", delete_geometry=[3])
+    check(
+        "M2 an edit that opens the profile warns that the pad broke",
+        ok(res) and f"left {pad} failing to recompute" in err(res),
+        str(res),
+    )
+
+
 CHECKS = [
     m1_diagnostics_name_the_spec_entry,
     m7_lists_expand_into_one_constraint_per_item,
@@ -638,6 +818,12 @@ CHECKS = [
     m5_a_centred_face_sketch_says_it_is_fixed,
     m7_every_reply_echoes_the_world_frame,
     m2_an_existing_sketch_name_is_refused_or_replaced,
+    m2_sketch_edit_sets_renames_and_deletes_by_name,
+    m2_sketch_edit_adds_and_deletes_geometry_with_pre_edit_numbering,
+    m2_sketch_edit_rolls_back_a_failed_edit,
+    m2_sketch_edit_works_on_a_hand_edited_sketch,
+    m2_sketch_edit_refuses_a_sketch_open_in_the_editor,
+    m2_sketch_edit_warns_about_broken_dependents,
 ]
 
 if __name__ == "__main__":

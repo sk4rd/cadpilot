@@ -227,3 +227,16 @@ def test_create_and_edit_object_carry_the_description(fake_freecad, isolated_hom
     edit = next(c for c in fake_freecad.calls if c[0] == "edit_object")
     assert edit[1][2]["description"] == "thicker plate"
     assert edit[1][2]["Properties"] == {"Length": 20}
+
+
+def test_sketch_edit_names_its_sketch_and_says_edited(fake_freecad, isolated_home):
+    fake_freecad.result_overrides["create_feature"] = {"success": True, "object_name": "Profile"}
+    resp = cad_operation(
+        fake_freecad, "sketch_edit", "Doc", obj_name="Profile", obj_properties={"set": {"W": 5}}
+    )
+    assert "sketch_edit 'Profile' edited successfully" in _text(resp)
+    _, args, _ = fake_freecad.calls[0]
+    assert args[1] == {"type": "sketch_edit", "base": "Profile", "set": {"W": 5}}
+    assert "requires obj_name" in _text(
+        cad_operation(fake_freecad, "sketch_edit", "Doc", obj_properties={"set": {"W": 5}})
+    )

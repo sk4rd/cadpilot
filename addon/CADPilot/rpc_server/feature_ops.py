@@ -32,6 +32,7 @@ FEATURE_TYPES = (
     "color",
     "variables",
     "sketch",
+    "sketch_edit",
     "pad",
     "pocket",
     "revolution",
@@ -1748,6 +1749,10 @@ def _build_sketch(doc, spec):
     return sketcher_ops.build_sketch_gui(doc, spec)
 
 
+def _build_sketch_edit(doc, spec):
+    return sketcher_ops.edit_sketch_gui(doc, spec)
+
+
 def _require_closed_profile(sketch, op):
     wires = getattr(sketch.Shape, "Wires", [])
     if not any(w.isClosed() for w in wires):
@@ -2856,7 +2861,7 @@ def describe_feature(feat, spec) -> dict:
                 f"'{feat.Name}'."
             ),
         }
-    if op != "sketch":
+    if op not in ("sketch", "sketch_edit"):
         out = {"warnings": warnings} if warnings else {}
         if resolved:
             # Which faces the selector resolved to (center + normal): a
@@ -2889,6 +2894,7 @@ _BUILDERS = {
     "color": _build_color,
     "variables": _build_variables,
     "sketch": _build_sketch,
+    "sketch_edit": _build_sketch_edit,
     "pad": _build_pad,
     "pocket": _build_pocket,
     "revolution": _build_revolution,

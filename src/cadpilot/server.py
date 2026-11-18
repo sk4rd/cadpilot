@@ -233,6 +233,7 @@ def cad(
         "color",
         "variables",
         "sketch",
+        "sketch_edit",
         "pad",
         "pocket",
         "revolution",

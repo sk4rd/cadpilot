@@ -414,3 +414,54 @@ def test_offset_value_takes_numbers_units_and_expressions():
     assert ss.offset_value("=Params.lift") == (0.0, "Params.lift")
     with pytest.raises(ValueError, match="needs an expression"):
         ss.offset_value("= ")
+
+
+def test_constraint_ref_by_name_or_index():
+    names = {"Width": 3, "Rake": 5}
+    assert ss.constraint_ref("Width", names, 6, "set") == 3
+    assert ss.constraint_ref(4, names, 6, "set") == 4
+    assert ss.constraint_ref("4", names, 6, "set") == 4
+    with pytest.raises(
+        ValueError, match=r"set\['Wdth'\]: no constraint named 'Wdth' \(named: Rake, Width\)"
+    ):
+        ss.constraint_ref("Wdth", names, 6, "set['Wdth']")
+    with pytest.raises(ValueError, match=r"index 6 is out of range \(0..5\)"):
+        ss.constraint_ref(6, names, 6, "delete_constraints")
+
+
+def test_ref_pairs_and_construction_flags():
+    assert ss.ref_pairs({"Width": 5}, "set") == [("Width", 5)]
+    assert ss.ref_pairs([[2, 5], ["Rake", "30 deg"]], "set") == [(2, 5), ("Rake", "30 deg")]
+    with pytest.raises(ValueError, match="set must be"):
+        ss.ref_pairs([1, 2], "set")
+    assert ss.construction_flags([1, 2]) == {1: True, 2: True}
+    assert ss.construction_flags({"3": False}) == {3: False}
+
+
+def test_renumbering_after_deletes_and_for_new_geometry():
+    """Indices in one call refer to the sketch BEFORE it: geometry 0..5 existed,
+    2 and 4 are deleted, so 3 -> 2 and 5 -> 3, and new geometry written as 6, 7
+    (numbered on from the old count) lands at 4, 5."""
+    r = ss.Renumbering(old_count=6, deleted=[4, 2], new_base=4, new_count=2)
+    assert [r.geo(g) for g in (0, 1, 3, 5, 6, 7, -1, -3)] == [0, 1, 2, 3, 4, 5, -1, -3]
+    assert r.constraints(
+        [
+            {"type": "coincident", "items": [[5, "end"], [6, 1]]},
+            {"type": "equal", "items": [3, [7]]},
+        ]
+    ) == [
+        {"type": "coincident", "items": [[3, "end"], [4, 1]]},
+        {"type": "equal", "items": [2, [5]]},
+    ]
+    with pytest.raises(ValueError, match=r"constraints\[0\] \(horizontal\): GeoId 4 is deleted"):
+        r.constraints([{"type": "horizontal", "items": [4]}])
+    with pytest.raises(ValueError, match=r"GeoId 8 does not exist; before this call .* adds 6..7"):
+        r.geo(8)
+
+
+def test_geo_ids_must_exist():
+    assert ss.geo_ids([0, 2], 3, "delete_geometry") == [0, 2]
+    with pytest.raises(
+        ValueError, match=r"delete_geometry: 3 is not a GeoId of this sketch \(0..2\)"
+    ):
+        ss.geo_ids([3], 3, "delete_geometry")

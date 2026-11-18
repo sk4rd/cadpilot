@@ -19,6 +19,12 @@ Asset Creation Strategy for CADPilot
    - plane: "XY"/"XZ"/"YZ" (+offset, which may be "=Params.x"), {"datum":
      name} on a datum plane, or {"face": [obj, "+Z"]} on a solid face. Prefer
      the planes: a face attachment breaks when upstream geometry changes.
+   - name every dimensional constraint and bind its value to the parameters
+     spreadsheet ("name": "Width", "value": "=Params.width"), so the user
+     can find and edit it.
+   - change an existing sketch (yours or one the user edited by hand) with
+     cad(operation="sketch_edit"): set a dimension by name, add or delete
+     geometry and constraints. Never build a second sketch to change one.
    - external: [[obj, "EdgeN"|"VertexN"], ...] adds external geometry (GeoIds
      from -3 in list order); constraints may reference it, e.g.
      {"type": "coincident", "items": [[0, "start"], [-3, "start"]]} — this is

@@ -64,7 +64,7 @@ Every tool definition is injected into the model's context when the client lists
 * object level: `create_object`, `edit_object`, `delete_object`, `batch`
 * part features: `boolean` (several tools at once), `fillet`, `chamfer`, `loft`, `sweep`, `mirror`, `pattern`, `move`
 * appearance: `color` (shape color, transparency, line and display settings; one object, a list, or the whole document). It builds no geometry, so it is deliberately not `edit_object` with a ViewObject dict: a dedicated op can validate the color forms, read the result back off the view provider and report every object it painted.
-* Sketcher and PartDesign: `variables`, `sketch`, `pad`, `pocket`, `revolution`, `groove`, `thickness`, `draft`, `datum_plane`, `hull`
+* Sketcher and PartDesign: `variables`, `sketch`, `sketch_edit`, `pad`, `pocket`, `revolution`, `groove`, `thickness`, `draft`, `datum_plane`, `hull`
 
 ### 4.2 Docstring budget
 
@@ -138,7 +138,9 @@ The `snapshot` verb covers the other direction: work the user did entirely outsi
 
 ## 6. Sketches and parametric features
 
-A sketch is built in one atomic transaction: the geometry (whose list order defines the GeoIds used by the constraints) and the constraints are committed together and solved immediately. The reply reports the degrees of freedom, whether the sketch is fully constrained, and any solver warnings. A conflicting or malformed specification is rolled back and returns the solver's diagnostics, such as which constraints conflict.
+A sketch is built in one atomic transaction: the geometry (whose list order defines the GeoIds used by the constraints) and the constraints are committed together and solved immediately. The reply reports the degrees of freedom, whether the sketch is fully constrained, and any solver warnings. A conflicting or malformed specification is rolled back and returns the solver's diagnostics, naming each offending constraint by the specification entry it came from (FreeCAD numbers them from 1 in those lists, the constraint list itself from 0).
+
+A sketch has to stay editable by the person at the window, so dimensions are meant to be named and bound to the parameters spreadsheet, and an existing sketch is changed in place with `sketch_edit` rather than rebuilt: it sets a dimension by name, renames, deletes and adds geometry and constraints, and works on a sketch the user has changed by hand, because every name and index refers to the sketch as it is when the call arrives. It is one transaction, so a failed edit leaves the sketch exactly as it was. A second `sketch` call with an existing name is refused instead of silently creating a copy, and `edit_object` refuses raw writes to a sketch's geometry and constraint lists.
 
 Further details:
 
