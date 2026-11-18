@@ -15,6 +15,13 @@ ROOT=${3:-${TMPDIR:-/tmp}/cadpilot-live-$PORT}
 ADDON=$(cd "$(dirname "$0")/../addon/CADPilot" && pwd)
 case $cmd in
 start)
+  # A port that already answers is another FreeCAD (one this script started and
+  # could not stop, or yours): the new one could not bind it, and the tests
+  # would run against the old one while "up" was reported for the new.
+  if (exec 3<>"/dev/tcp/127.0.0.1/$PORT") 2>/dev/null; then
+    echo "port $PORT is already in use; stop that FreeCAD first or pick another port" >&2
+    exit 1
+  fi
   data="$ROOT/home/.local/share/FreeCAD/v1-1"
   mkdir -p "$data/Mod" "$ROOT/home/.config" "$ROOT/tmp"
   ln -sfn "$ADDON" "$data/Mod/CADPilot"
@@ -34,8 +41,16 @@ start)
 stop)
   if [ -f "$ROOT/pid" ]; then
     pid=$(cat "$ROOT/pid")
-    pkill -TERM -P "$pid" 2>/dev/null || true
-    kill "$pid" 2>/dev/null || true
+    kids=$(pgrep -P "$pid" || true)
+    kill $kids "$pid" 2>/dev/null || true
+    # FreeCAD can take a few seconds to go, and one that will not must not be
+    # left holding the port for the next start
+    for _ in $(seq 1 20); do
+      alive=$(ps -o pid= -p $kids "$pid" 2>/dev/null || true)
+      [ -z "$alive" ] && break
+      sleep 0.5
+    done
+    [ -n "${alive:-}" ] && kill -KILL $alive 2>/dev/null || true
     rm -f "$ROOT/pid"
   fi
   ;;
