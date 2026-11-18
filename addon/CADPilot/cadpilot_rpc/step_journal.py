@@ -869,21 +869,27 @@ def insert_before_plan(records: list[StepRecord], rec: StepRecord) -> int:
     creates what it was missing, and recording that fix BEHIND the failure left
     the journal saying the sketch ran before the Body it needs, which no replay
     could reproduce.
+
+    Never ahead of a step the undo stack already holds, though: a journal written
+    while failed steps did not count as pending can have done steps behind one,
+    and a record put before those would disagree with the stack.
     """
     first = next((i for i, r in enumerate(records) if r.state in _PENDING), None)
     if first is None:
         records.append(rec)
         return 0
-    records.insert(first, rec)
-    return sum(1 for r in records[first + 1 :] if r.state in _PENDING)
+    held = [i for i, r in enumerate(records) if r.state == STATE_DONE and r.transaction]
+    at = max(first, held[-1] + 1) if held else first
+    records.insert(at, rec)
+    return sum(1 for r in records[at + 1 :] if r.state in _PENDING)
 
 
 def plan_shift_note(records: list[StepRecord], rec: StepRecord, moved: int) -> str:
     """What the caller must know after insert_before_plan moved planned steps on."""
     if not moved:
         return ""
-    pending = [i + 1 for i, r in enumerate(records) if r.state in _PENDING]
     where = next(i + 1 for i, r in enumerate(records) if r is rec)
+    pending = [i + 1 for i, r in enumerate(records) if r.state in _PENDING and i >= where]
     span = f"{pending[0]}-{pending[-1]}" if len(pending) > 1 else str(pending[0])
     return (
         f"step {where} ({rec.label or rec.operation}) was recorded before the {moved} planned "

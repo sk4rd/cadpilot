@@ -703,6 +703,26 @@ def test_a_session_step_records_its_journal_step_and_undo_entry(fake_freecad, is
     assert step.transaction == "CADPilot: #1 create_object Box"
 
 
+def test_a_session_step_never_takes_a_pending_step_for_its_own(fake_freecad, isolated_home):
+    """An add-on that answers with the journal's LAST record names the failed
+    planned sketch behind the sketch just made: same operation, no undo entry.
+    The session stored that, and its rollback "succeeded" with nothing undone."""
+    journal = _Journal(fake_freecad)
+    sess = _start_session(fake_freecad)
+    journal.commit("sketch", "S")
+    journal.records.append(
+        {"index": 2, "state": "failed", "operation": "sketch", "label": "S", "transaction": ""}
+    )
+    cad_operation(
+        fake_freecad,
+        "sketch",
+        "Doc",
+        obj_name="S",
+        obj_properties={"geometry": [{"type": "circle", "center": [0, 0], "radius": 1}]},
+    )
+    assert sess.steps[0].journal_index is None
+
+
 def test_session_rollback_goes_through_the_journal_by_transaction_name(fake_freecad, isolated_home):
     journal = _Journal(fake_freecad)
     sess = _start_session(fake_freecad)

@@ -702,6 +702,10 @@ def _journal_record(
     last = res.get("last_record") if isinstance(res, dict) and res.get("success") else None
     if not isinstance(last, dict) or last.get("operation") != operation:
         return None
+    # An older add-on answers with the journal's LAST record, which with a plan
+    # pending is a planned or failed step of the same operation, not this one.
+    if last.get("state", "done") != "done":
+        return None
     return last
 
 

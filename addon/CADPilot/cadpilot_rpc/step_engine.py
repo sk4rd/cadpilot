@@ -544,10 +544,36 @@ def record_commit(
         moved = sj.insert_before_plan(records, rec)
         write_journal(doc, records)
         _note_plan_shift(records, rec, moved)
+        _remember_recorded(doc, rec)
         return rec
     except Exception as e:
         FreeCAD.Console.PrintWarning(f"CADPilot: step journal write failed: {e}\n")
         return None
+
+
+# The step each document recorded last, as (index, operation, timestamp). With a
+# plan pending the newest step is not the last record: it goes in before the
+# planned and failed ones.
+_LAST_RECORDED: dict[str, tuple[int, str, str]] = {}
+
+
+def _remember_recorded(doc, rec: sj.StepRecord) -> None:
+    _LAST_RECORDED[doc.Name] = (rec.index, rec.operation, rec.timestamp)
+
+
+def last_recorded(doc, records: list[sj.StepRecord]) -> sj.StepRecord | None:
+    """The record of the step this document committed last; None when unknown.
+
+    Answering with ``records[-1]`` handed a session the FAILED planned sketch
+    behind the sketch it had just made (same operation, no transaction), and
+    its rollback then "succeeded" with nothing undone.
+    """
+    index, operation, timestamp = _LAST_RECORDED.get(doc.Name, (0, "", ""))
+    rec = next((r for r in records if r.index == index), None)
+    if rec is not None and (rec.operation, rec.timestamp) == (operation, timestamp):
+        return rec
+    # not recorded by this add-on instance (a reload, an older journal)
+    return next((r for r in reversed(records) if r.state == sj.STATE_DONE), None)
 
 
 def object_names(doc) -> list[str]:
@@ -667,6 +693,7 @@ def append_execute_code(
             moved = 0
         write_journal(doc, records)  # reindexes: list position == step number
         _note_plan_shift(records, rec, moved)
+        _remember_recorded(doc, rec)
     except Exception as e:
         FreeCAD.Console.PrintWarning(f"CADPilot: step journal write failed: {e}\n")
 
@@ -1101,7 +1128,7 @@ def _apply_op(doc, spec: dict[str, Any]) -> dict[str, Any]:
         # Nothing to do here: apply_op attaches the changes to every reply.
         # The last record is what a session step needs to know which journal
         # step (and which undo entry) the call it just made became.
-        last = records[-1] if records else None
+        last = last_recorded(doc, records)
         return {
             "success": True,
             "document": doc.Name,

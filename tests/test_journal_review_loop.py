@@ -456,6 +456,30 @@ def test_a_step_recorded_after_a_failure_goes_before_it():
     assert "steps 3-4" in sj.plan_shift_note(recs, body, 2)
 
 
+def test_a_new_step_never_goes_ahead_of_one_the_undo_stack_holds():
+    """A journal from before failed steps counted as pending can have a done step
+    behind a failed one. The next commit is newer than it on the undo stack, so
+    it goes after it, and the note names only the steps that moved."""
+    recs = [
+        sj.StepRecord(index=1, state=sj.STATE_DONE, operation="variables", transaction="t1"),
+        sj.StepRecord(index=2, state=sj.STATE_FAILED, operation="sketch"),
+        sj.StepRecord(index=3, state=sj.STATE_DONE, operation="create_object", transaction="t3"),
+        sj.StepRecord(index=4, state=sj.STATE_PLANNED, operation="pad"),
+    ]
+    new = sj.StepRecord(index=0, state=sj.STATE_DONE, operation="edit_object", transaction="t5")
+    assert sj.insert_before_plan(recs, new) == 1
+    sj.reindex(recs)
+    assert [r.operation for r in recs] == [
+        "variables",
+        "sketch",
+        "create_object",
+        "edit_object",
+        "pad",
+    ]
+    note = sj.plan_shift_note(recs, new, 1)
+    assert "step 4" in note and "now steps 5:" in note
+
+
 def test_a_stale_step_claims_no_undo():
     recs = _chain()
     plan = sj.plan_rollback(recs, 2, skip={4})
