@@ -63,6 +63,77 @@ def _is_direction_token(item: str) -> bool:
     return item.startswith(("+", "-")) or item.lower() in sketcher_ops._FACE_WORDS
 
 
+#: Edges a geometric selector resolved to, for the reply (read by describe_feature).
+_EDGE_SELECTION: list | None = None
+
+_EDGE_FILTERS = ("face", "parallel", "type", "radius", "at")
+_EDGE_TYPES = {"line": "Part::GeomLine", "circle": "Part::GeomCircle"}
+
+
+def _edge_matches(edge, sel, shape_box) -> bool:
+    curve = edge.Curve.TypeId
+    if "type" in sel and curve != _EDGE_TYPES[sel["type"]]:
+        return False
+    if "radius" in sel and (
+        curve != "Part::GeomCircle" or abs(edge.Curve.Radius - float(sel["radius"])) > 1e-4
+    ):
+        return False
+    if "parallel" in sel:
+        if curve != "Part::GeomLine":
+            return False
+        run = edge.Vertexes[-1].Point - edge.Vertexes[0].Point
+        if run.Length < 1e-9 or run.cross(_axis_vec(sel["parallel"])).Length > 1e-6 * run.Length:
+            return False
+    if "at" in sel:
+        token = sketcher_ops._FACE_WORDS.get(str(sel["at"]).lower(), str(sel["at"]).upper())
+        if token not in ("+X", "-X", "+Y", "-Y", "+Z", "-Z"):
+            raise ValueError(f"edges.at must be a direction like '+Z' or 'top', got {sel['at']!r}")
+        axis = "XYZ"[("X", "Y", "Z").index(token[1])]
+        extreme = getattr(shape_box, f"{axis}Max" if token[0] == "+" else f"{axis}Min")
+        low, high = getattr(edge.BoundBox, f"{axis}Min"), getattr(edge.BoundBox, f"{axis}Max")
+        if abs(low - extreme) > 1e-5 or abs(high - extreme) > 1e-5:
+            return False
+    return True
+
+
+def _select_edges(obj, selector) -> list[str]:
+    """Geometric edge selectors, resolved now against the current shape.
+
+    A fillet/chamfer otherwise needs the edges' generated names, which meant
+    paging through get_topology (live: 282 edges for one chamfer). Each dict is
+    an AND of filters, a list of dicts their union:
+    face (a face's boundary: '+Y' or 'FaceN'), parallel ('X'/'Y'/'Z' or a
+    vector; straight edges), type ('line'/'circle'), radius, at ('+Z': lying
+    at the part's extreme in that direction).
+    """
+    global _EDGE_SELECTION
+    shape = obj.Shape
+    box = shape.BoundBox
+    names: list[str] = []
+    for sel in selector if isinstance(selector, list) else [selector]:
+        unknown = sorted(set(sel) - set(_EDGE_FILTERS))
+        if unknown or not sel:
+            raise ValueError(
+                f"edge selector {sel!r}: unknown key(s) {unknown}; use {', '.join(_EDGE_FILTERS)}."
+            )
+        if "type" in sel and sel["type"] not in _EDGE_TYPES:
+            raise ValueError(f"edges.type must be 'line' or 'circle', got {sel['type']!r}")
+        pool = list(enumerate(shape.Edges, start=1))
+        if "face" in sel:
+            face = shape.getElement(_resolve_elements(obj, [sel["face"]], "Face")[0])
+            pool = [(i, e) for i, e in pool if any(e.isSame(b) for b in face.Edges)]
+        hits = [f"Edge{i}" for i, e in pool if _edge_matches(e, sel, box)]
+        if not hits:
+            raise ValueError(f"edge selector {sel!r} matched no edge of '{obj.Name}'.")
+        names.extend(h for h in hits if h not in names)
+    _EDGE_SELECTION = []
+    for name in names:
+        with contextlib.suppress(Exception):
+            center = shape.getElement(name).CenterOfMass
+            _EDGE_SELECTION.append({"edge": name, "center": [round(float(v), 4) for v in center]})
+    return names
+
+
 def _resolve_elements(obj, selector, kind):
     """Selector -> sub-element names. kind: 'Edge' or 'Face'.
 
@@ -72,6 +143,11 @@ def _resolve_elements(obj, selector, kind):
     get_topology round-trip first (live workflow feedback). 'all' and explicit
     index/name lists work exactly as before.
     """
+    if kind == "Edge" and (
+        isinstance(selector, dict)
+        or (isinstance(selector, list) and selector and all(isinstance(i, dict) for i in selector))
+    ):
+        return _select_edges(obj, selector)
     elements = getattr(obj.Shape, "Edges" if kind == "Edge" else "Faces")
     all_names = [f"{kind}{i + 1}" for i in range(len(elements))]
     if selector == "all":
@@ -2638,6 +2714,7 @@ def describe_feature_reply(feat, spec) -> dict:
 
 def describe_feature(feat, spec) -> dict:
     """Extra result fields for the RPC response (sketch, hull, cut no-ops)."""
+    global _EDGE_SELECTION
     op = spec.get("type")
     if op == "hull":
         sh = feat.Shape
@@ -2666,24 +2743,33 @@ def describe_feature(feat, spec) -> dict:
         return out
     if op in ("fillet", "chamfer"):
         info = pop_last_feature_info() or {}
+        out = {}
         if info.get("dressed"):
             # A Body was named: name the feature that was dressed, or "which
             # feature is the Body's Tip" stays a guess.
-            return {
+            out = {
                 "dressed_object": info["dressed"],
                 "note": f"the {op} was built on '{info['dressed']}', the Tip of Body "
                 f"'{info['body']}' (a PartDesign dress-up lives inside its Body and "
                 "becomes its new Tip).",
             }
-        if info.get("hidden_base"):
-            return {
+        elif info.get("hidden_base"):
+            out = {
                 "hidden_base": info["hidden_base"],
                 "note": f"the {op} replaced '{info['hidden_base']}' in the display: the "
                 "base object is the same solid with sharper edges, so its Visibility was "
                 "turned off to avoid two overlapping solids. Its data is untouched; set "
                 "Visibility back on if you need to see it.",
             }
-        return {}
+        if _EDGE_SELECTION:
+            # A geometric selector picks edges by rule: the reply must show
+            # which ones, or a wrong pick reads as success.
+            out["resolved_edges"] = {
+                "count": len(_EDGE_SELECTION),
+                "edges": _EDGE_SELECTION[:_COLOR_REPORT_MAX],
+            }
+        _EDGE_SELECTION = None
+        return out
     warnings: list[str] = []
     resolved = (
         pop_last_feature_info()
@@ -3063,9 +3149,10 @@ def create_feature_gui(doc, spec):
         raise ValueError(problem)
     # Notes are per-build: a replay (step_engine) also calls this, and a note it
     # leaves behind must never be reported as the NEXT caller's outcome.
-    global _AUTO_DIRECTION_NOTE, _LAST_FEATURE_INFO
+    global _AUTO_DIRECTION_NOTE, _LAST_FEATURE_INFO, _EDGE_SELECTION
     _AUTO_DIRECTION_NOTE = ""
     _LAST_FEATURE_INFO = None
+    _EDGE_SELECTION = None
     # Read the Shape of what this feature is built on FIRST: a lazy predecessor
     # makes the new feature compute to nothing, silently (see the helper).
     _settle_shape_caches(doc, spec)

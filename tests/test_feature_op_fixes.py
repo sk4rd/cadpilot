@@ -422,3 +422,13 @@ def test_a_rejected_alias_names_the_unit_symbol_rule(monkeypatch):
     assert "alias_rejection_reason" in ast.unparse(
         _func(ast.parse((_ADDON / "property_mapper.py").read_text()), "set_spreadsheet_cells")
     )
+
+
+def test_fillet_edges_can_be_picked_by_geometry():
+    """A chamfer needed paging through 282 generated edge names."""
+    assert "_select_edges(obj, selector)" in _src("_resolve_elements")
+    match = _src("_edge_matches")
+    for rule in ("'type'", "'radius'", "'parallel'", "'at'"):
+        assert rule in match
+    assert "face.Edges" in _src("_select_edges")
+    assert "resolved_edges" in _src("describe_feature"), "the picked edges must be echoed"

@@ -98,8 +98,15 @@ fillet — parametric fillet (obj_name = base object).
 Required in obj_properties: edges (selector), radius. Optional: name.
 radius accepts an "=expression" inside a Body (a Part-level fillet stores one
 size per edge and cannot be bound).
-Selectors accept "all", an index list [0,2], or a name list ["Edge1"] —
-use get_topology to find indices.
+Selectors accept "all", an index list [0,2], a name list ["Edge1"], or a
+geometric selector resolved against the current shape — a dict of filters that
+must all hold, or a list of such dicts (their union):
+  {"face": "+Y"}                       every edge bounding that face
+  {"parallel": "X", "at": "+Z"}        straight edges along X at the part's top
+  {"type": "circle", "radius": 3, "at": "+Z"}   the top rims of the r3 holes
+  filters: face ("+Y"/"FaceN"), parallel ("X"/"Y"/"Z" or [x, y, z]),
+  type ("line"/"circle"), radius, at (a direction: lying at the part's extreme)
+The reply's resolved_edges lists what a geometric selector picked.
 A base inside a PartDesign Body yields a PartDesign::Fillet inside that Body
 (it follows the Body's Placement and becomes its Tip); a bare Part-level base
 yields a Part::Fillet at the document root, and that base object's Visibility
