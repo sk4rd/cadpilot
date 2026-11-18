@@ -185,3 +185,62 @@ def plan_constraints(constraints: list | None) -> list[dict]:
             }
         )
     return planned
+
+
+def origin_of(plan: dict) -> dict:
+    """What a planned constraint reports when the solver names it."""
+    out = {"entry": f"constraints[{plan['entry']}]", "type": plan["type"]}
+    if plan.get("name"):
+        out["name"] = plan["name"]
+    return out
+
+
+# FreeCAD's solver lists -> reply keys
+DIAGNOSTIC_KEYS = {
+    "ConflictingConstraints": "conflicting",
+    "RedundantConstraints": "redundant",
+    "PartiallyRedundantConstraints": "partially_redundant",
+    "MalformedConstraints": "malformed",
+}
+
+SOLVE_RESULTS = {
+    -1: "the solver did not converge",
+    -2: "redundant constraints",
+    -3: "conflicting constraints",
+    -5: "malformed constraints",
+}
+
+
+def map_diagnostics(raw: dict, origins: list) -> dict:
+    """FreeCAD's solver lists -> one entry per constraint, naming where it came from.
+
+    The lists number constraints from 1, the way FreeCAD's own messages do,
+    while ``Constraints`` is indexed from 0: ``ConflictingConstraints == [2, 3]``
+    means ``Constraints[1]`` and ``Constraints[2]``. ``origins[i]`` describes
+    live constraint ``i`` (see :func:`origin_of`); a constraint the caller did
+    not add in this call gets an entry with only its index.
+    """
+    out = {}
+    for key, numbers in raw.items():
+        entries = []
+        for n in numbers:
+            index = int(n) - 1
+            origin = origins[index] if 0 <= index < len(origins) else None
+            entries.append({"constraint": index, **(origin or {})})
+        if entries:
+            out[DIAGNOSTIC_KEYS.get(key, key)] = entries
+    return out
+
+
+def describe_entry(entry: dict) -> str:
+    """One diagnostics entry as text: ``constraints[3] (distance 'Width')``."""
+    where = entry.get("entry") or f"Constraints[{entry['constraint']}]"
+    name = f" '{entry['name']}'" if entry.get("name") else ""
+    kind = entry.get("type")
+    return f"{where} ({kind}{name})" if kind else f"{where}{name}"
+
+
+def diagnostics_text(mapped: dict) -> str:
+    return "; ".join(
+        f"{key}: {', '.join(describe_entry(e) for e in entries)}" for key, entries in mapped.items()
+    )

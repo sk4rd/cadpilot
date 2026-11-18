@@ -61,3 +61,31 @@ def test_value_rules():
         _plan({"type": "radius", "items": [0]})
     with pytest.raises(ValueError, match=r"constraints\[0\] \(horizontal\).*takes no 'value'"):
         _plan({"type": "horizontal", "items": [0], "value": 3})
+
+
+def test_solver_diagnostics_are_one_based_and_name_the_spec_entry():
+    """FreeCAD's ConflictingConstraints == [2, 3] for a horizontal line with
+    two lengths means Constraints[1] and Constraints[2] (live-verified on
+    1.1.4); read as spec indices it blamed the horizontal and missed one."""
+    plans = _plan(
+        {"type": "horizontal", "items": [0]},
+        {"type": "distance", "items": [0], "value": 10, "name": "Len"},
+        {"type": "distance", "items": [0], "value": 20},
+    )
+    origins = [ss.origin_of(p) for p in plans]
+    mapped = ss.map_diagnostics({"ConflictingConstraints": [2, 3]}, origins)
+    assert mapped == {
+        "conflicting": [
+            {"constraint": 1, "entry": "constraints[1]", "type": "distance", "name": "Len"},
+            {"constraint": 2, "entry": "constraints[2]", "type": "distance"},
+        ]
+    }
+    assert ss.diagnostics_text(mapped) == (
+        "conflicting: constraints[1] (distance 'Len'), constraints[2] (distance)"
+    )
+
+
+def test_diagnostics_for_constraints_not_added_by_the_call_keep_their_index():
+    mapped = ss.map_diagnostics({"RedundantConstraints": [1]}, [None])
+    assert mapped == {"redundant": [{"constraint": 0}]}
+    assert ss.diagnostics_text(mapped) == "redundant: Constraints[0]"

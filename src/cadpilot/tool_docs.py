@@ -353,7 +353,11 @@ Optional: plane, offset, body, construction, external, constraints.
 - Sketch coordinates are 2D [x, y] in mm in the plane's local frame.
 - Result: fully constrained sketches report fully_constrained: true;
   under-constrained ones succeed with a warning; conflicting/failed sketches
-  are rolled back with solver diagnostics.
+  are rolled back with solver diagnostics. Diagnostics name each offending
+  constraint by its index in the sketch and the spec entry it came from:
+  {"conflicting": [{"constraint": 9, "entry": "constraints[9]",
+  "type": "distance", "name": "Width"}, ...]} (also redundant,
+  partially_redundant, malformed).
 
 Example (parametric plate: variables -> sketch -> pad):
     {"operation": "variables", "doc_name": "D", "obj_name": "Spreadsheet",

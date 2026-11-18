@@ -225,7 +225,9 @@ def _check_external_point_refs(spec):
 # --- constraints ----------------------------------------------------------------
 
 
-def _add_constraints(sketch, constraints: list):
+def _add_constraints(sketch, constraints: list) -> list[dict]:
+    """Add the spec's constraints; returns their origins, indexed like Constraints."""
+    origins = [None] * len(sketch.Constraints)
     for plan in sketch_spec.plan_constraints(constraints):
         args = plan["args"]
         if plan["datum"] is None:
@@ -242,6 +244,8 @@ def _add_constraints(sketch, constraints: list):
                 raise ValueError(
                     f"constraints[{plan['entry']}] ({plan['type']}): expression binding failed: {e}"
                 ) from e
+        origins.append(sketch_spec.origin_of(plan))
+    return origins
 
 
 # --- attachment -----------------------------------------------------------------
@@ -533,18 +537,28 @@ def _attach_sketch(sketch, doc, spec):
 
 
 def _solver_diagnostics(sketch) -> dict:
-    """Whatever solver diagnostics this FreeCAD version exposes (defensive)."""
+    """FreeCAD's raw solver lists (1-based), whatever this version exposes."""
     diag = {}
-    for attr in (
-        "ConflictingConstraints",
-        "RedundantConstraints",
-        "MalformedConstraints",
-        "PartiallyRedundantConstraints",
-    ):
+    for attr in sketch_spec.DIAGNOSTIC_KEYS:
         value = getattr(sketch, attr, None)
         if value:
             diag[attr] = [int(i) for i in value]
     return diag
+
+
+def _solve(sketch, origins) -> tuple:
+    """Solve; raise with the offending spec entries named. Returns (dof, diagnostics)."""
+    rc = sketch.solve()
+    dof = getattr(sketch, "DoF", None)
+    diag = sketch_spec.map_diagnostics(_solver_diagnostics(sketch), origins)
+    if rc != 0 or diag.get("conflicting"):
+        reason = sketch_spec.SOLVE_RESULTS.get(rc, "solver error")
+        detail = sketch_spec.diagnostics_text(diag) or f"state={list(map(str, sketch.State))}"
+        raise RuntimeError(
+            f"sketch solve failed (rc={rc}, {reason}); DoF={dof}; {detail}. "
+            "Remove or change those constraints and retry."
+        )
+    return dof, diag
 
 
 # --- entry point ------------------------------------------------------------------
@@ -571,18 +585,9 @@ def build_sketch_gui(doc, spec):
     _add_geometry(sketch, geometry, spec.get("construction"))
     _add_external(sketch, doc, body, spec.get("external"))
     _check_external_point_refs(spec)
-    _add_constraints(sketch, spec.get("constraints"))
+    origins = _add_constraints(sketch, spec.get("constraints"))
     doc.recompute()
-
-    rc = sketch.solve()
-    dof = getattr(sketch, "DoF", None)
-    diag = _solver_diagnostics(sketch)
-    if rc != 0 or (diag.get("ConflictingConstraints")):
-        raise RuntimeError(
-            f"sketch solve failed (rc={rc}); DoF={dof}; state={list(map(str, sketch.State))}; "
-            f"diagnostics={diag}; constraints={len(spec.get('constraints') or [])}. "
-            "Remove conflicting/redundant constraints and retry."
-        )
+    dof, diag = _solve(sketch, origins)
 
     _LAST_SKETCH_INFO = {
         "object_name": sketch.Name,
