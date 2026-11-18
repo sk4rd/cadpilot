@@ -82,6 +82,12 @@ class Step:
     objects_after: list[str] = field(default_factory=list)  # state fingerprint
     atomic: bool = True  # False → no matching transaction; rollback past it is unsafe
     timestamp: str = field(default_factory=_now)
+    # The addon journal's record of this step: its exact undo-entry name and
+    # its index when it was recorded. Session rollback goes through the journal
+    # by these, because counting its own steps popped the wrong transaction
+    # once the panel or step_control had moved the undo stack.
+    journal_index: int | None = None
+    transaction: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -97,6 +103,8 @@ class Step:
             objects_after=list(data.get("objects_after", [])),
             atomic=bool(data.get("atomic", True)),
             timestamp=data.get("timestamp", ""),
+            journal_index=data.get("journal_index"),
+            transaction=data.get("transaction", ""),
         )
 
 
@@ -117,6 +125,9 @@ class ModelingSession:
     # reported success). None = unknown (session resumed from an older file),
     # reported as "unverified" rather than guessed.
     initial_objects: list[str] | None = None
+    # How many records the addon journal held when the session began: the
+    # journal steps after it are the session's, whoever ran them.
+    journal_start: int | None = None
     created_at: str = field(default_factory=_now)
     updated_at: str = field(default_factory=_now)
 
@@ -134,6 +145,8 @@ class ModelingSession:
         result_summary: str = "",
         objects_after: list[str] | None = None,
         atomic: bool = True,
+        journal_index: int | None = None,
+        transaction: str = "",
     ) -> Step:
         with _session_lock:
             # A new committed transaction invalidates FreeCAD's redo stack too.
@@ -146,6 +159,8 @@ class ModelingSession:
                 result_summary=result_summary,
                 objects_after=sorted(objects_after or []),
                 atomic=atomic,
+                journal_index=journal_index,
+                transaction=transaction,
             )
             self.steps.append(step)
             self.updated_at = _now()
@@ -205,6 +220,7 @@ class ModelingSession:
             "notes": self.notes,
             "redo_buffer": [s.to_dict() for s in self.redo_buffer],
             "initial_objects": self.initial_objects,
+            "journal_start": self.journal_start,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
         }
@@ -221,6 +237,7 @@ class ModelingSession:
             notes=list(data.get("notes", [])),
             redo_buffer=[Step.from_dict(s) for s in data.get("redo_buffer", [])],
             initial_objects=None if initial is None else sorted(initial),
+            journal_start=data.get("journal_start"),
             created_at=data.get("created_at", ""),
             updated_at=data.get("updated_at", ""),
         )

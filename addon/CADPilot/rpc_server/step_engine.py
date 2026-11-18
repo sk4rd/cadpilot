@@ -1237,6 +1237,7 @@ def _status(
                 "accepted": r.accepted,
                 "executable": r.executable,
                 "result": r.result,
+                "transaction": r.transaction,
             }
             for r in records
         ]

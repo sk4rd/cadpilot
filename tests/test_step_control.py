@@ -181,7 +181,7 @@ def test_session_status_reports_journal_drift(fake_freecad, isolated_home):
     payload = json.loads(_text(session_status_operation(fake_freecad)))
 
     assert payload["journal"]["drift"] is True
-    assert any("undo stack" in r for r in payload["journal_risks"])
+    assert any("no longer in the model" in r for r in payload["journal_risks"])
 
 
 def test_session_status_does_not_false_positive_on_count_mismatch(fake_freecad, isolated_home):

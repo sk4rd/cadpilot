@@ -591,6 +591,53 @@ check(
 )
 changes(D)
 
+# --- B: a session rollback goes through the journal ----------------------------
+D = "LJ_Sess"
+fresh(D)
+
+
+def session(action, **kw):
+    text = "\n".join(x.text for x in ops.session_action_operation(c, action, doc_name=D, **kw))
+    try:
+        return json.loads(text)
+    except ValueError:
+        return {"success": False, "error": text}
+
+
+session("start", name="live session")
+cad("create_object", D, "Base", obj_type="Part::Box")
+cad("create_object", D, "Post", obj_type="Part::Cylinder")
+steps = session("get_steps")["steps"]
+check(
+    "B every session step knows its journal step and undo entry",
+    all(s["journal_index"] and s["transaction"].startswith("CADPilot: #") for s in steps),
+    str(steps),
+)
+ops.step_plan_operation(
+    c, D, [{"operation": "create_object", "obj_type": "Part::Sphere", "obj_name": "Knob"}]
+)
+control(D, "run_next")  # a step the session never saw
+user(D, "d.openTransaction('wider'); d.getObject('Base').Width = 25; d.commitTransaction()")
+res = session("rollback", to_step=1)
+objects = py(
+    "import FreeCAD\nprint(sorted(o.Name for o in FreeCAD.getDocument('LJ_Sess').Objects))", D
+)
+width = py("import FreeCAD\nprint(FreeCAD.getDocument('LJ_Sess').getObject('Base').Width.Value)", D)
+check(
+    "B rolling back to session step 1 removes the session's and step_control's later steps",
+    res.get("success") and objects == "['Base']",
+    f"{objects} {res}",
+)
+check("B ... and keeps the user's own edit", width == "25.0", width)
+status = session("status")
+check(
+    "B session status counts the journal's steps and stays small",
+    status.get("journal", {}).get("session_steps") == 1 and len(json.dumps(status)) < 2500,
+    str(status.get("journal")),
+)
+changes(D)
+session("complete")
+
 # --- C: opening a saved file is not a burst of manual edits -------------------
 D = "LJ_Open"
 fresh(D)
