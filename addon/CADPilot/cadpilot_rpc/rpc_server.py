@@ -67,6 +67,8 @@ from cadpilot_rpc.serialize import serialize_object
 from cadpilot_rpc.settings import load_settings, resolve_port
 from cadpilot_rpc.view_manager import save_active_screenshot
 
+gui_dispatch.on_task_death("step", step_engine.abandon_dead_task)
+
 rpc_server_thread = None
 rpc_server_instance = None
 _stop_thread = None  # drains shutdown off the GUI thread; see stop_rpc_server

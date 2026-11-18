@@ -14,7 +14,10 @@ Robustness and performance guarantees:
    RPC thread; the GUI thread processes the task immediately rather than
    waiting for the next 500 ms heartbeat tick. The heartbeat is one persistent
    QTimer started and stopped with the server, kept as a fallback for a lost
-   wake and for a queue that was held back by the guards below.
+   wake and for a queue that was held back by the guards below. Both only ASK
+   for a drain: the queue itself is drained from a timer of its own, which is
+   what lets a task that died in C++ be told apart from one that is still
+   running (see ``_drain_tick``).
 3. Mouse-button guard: ``process_gui_tasks`` skips the current tick while
    mouse buttons are held so MCP tasks cannot interrupt 3D navigation drags,
    and re-checks the guard BETWEEN queued tasks so a press that begins
@@ -54,6 +57,11 @@ _rpc_request_queue: "queue.Queue[Any]" = queue.Queue()
 _force_queue: "queue.Queue[Any]" = queue.Queue()
 _processing = False  # re-entrancy guard: True while process_gui_tasks is draining
 _processing_since: float = 0.0  # wall-clock time when _processing became True
+_current_task: Any = None  # the task the drain is inside, for the reply of one that died
+# Set when a task died in C++ (see _recover_dead_drain): FreeCAD's interpreter is
+# damaged from then on, and get_gui_state says so until FreeCAD is restarted.
+_damage: "dict | None" = None
+_death_hooks: "dict[str, Callable[[], Any]]" = {}
 
 # Phantom-input detection for the mouse-button guard — only needed where the
 # OS cannot report the physical button state (i.e. off Windows; on win32 the
@@ -123,6 +131,11 @@ _call = threading.local()
 
 def set_call_method(method: str | None) -> None:
     _call.method = method
+
+
+def on_task_death(name: str, hook: Callable[[], Any]) -> None:
+    """Register cleanup to run when a task died in C++ (keyed, so a reload replaces it)."""
+    _death_hooks[name] = hook
 
 
 def take_late_completions() -> list[dict]:
@@ -309,6 +322,7 @@ def backpressure() -> dict:
         "processing": bool(_processing),
         "processing_s": round(time.monotonic() - _processing_since, 1) if _processing else 0.0,
         "queue_depth": _queue_depth(),
+        **({"damaged": dict(_damage)} if _damage else {}),
     }
 
 
@@ -422,7 +436,7 @@ class _WakeSignal(QtCore.QObject):
         self._sig.emit()
 
     def _on_wake(self) -> None:
-        process_gui_tasks()
+        _tick()
 
 
 _waker: "_WakeSignal | None" = None
@@ -434,32 +448,46 @@ _HEARTBEAT_MS = 500
 # without re-arming, so the heartbeat died for good and queued work nobody
 # woke never ran.
 _heartbeat: "QtCore.QTimer | None" = None
+# After a task died in C++ the GUI thread keeps the interpreter lock while it
+# idles, so every other Python thread (each RPC request) only moves when the
+# GUI thread runs Python: measured, a call took 1-3.5 s at the 500 ms heartbeat
+# and 50-150 ms at this one.
+_DAMAGED_HEARTBEAT_MS = 10
+# The queue is drained from this timer's slot and nowhere else while the waker
+# runs: 0 ms and repeating, started by a tick that finds work and stopped by the
+# slot once the queue is empty or held back.
+_drain_timer: "QtCore.QTimer | None" = None
 
 
 def init_waker() -> None:
     """Create the wake-signal bridge and start the heartbeat (GUI thread)."""
-    global _waker, _heartbeat
+    global _waker, _heartbeat, _drain_timer
     _waker = _WakeSignal()
+    if _drain_timer is None:
+        _drain_timer = QtCore.QTimer()
+        _drain_timer.setInterval(0)
+        _drain_timer.timeout.connect(_drain_tick)
     if _heartbeat is None:
         _heartbeat = QtCore.QTimer()
-        _heartbeat.setInterval(_HEARTBEAT_MS)
-        _heartbeat.timeout.connect(process_gui_tasks)
+        _heartbeat.setInterval(_DAMAGED_HEARTBEAT_MS if _damage else _HEARTBEAT_MS)
+        _heartbeat.timeout.connect(_tick)
     _heartbeat.start()
 
 
 def cleanup_waker() -> None:
-    """Stop the heartbeat and release the wake-signal bridge on server stop."""
-    global _waker, _heartbeat
-    timer, _heartbeat = _heartbeat, None
+    """Stop the timers and release the wake-signal bridge on server stop."""
+    global _waker, _heartbeat, _drain_timer
+    timers = [t for t in (_heartbeat, _drain_timer) if t is not None]
+    _heartbeat = _drain_timer = None
     _waker = None
-    if timer is None:
-        return
-    if threading.current_thread() is threading.main_thread():
-        timer.stop()
-    else:
-        # A QTimer can only be stopped from its own thread; the queued task
-        # also keeps the timer alive until it has been stopped there.
-        _rpc_request_queue.put(timer.stop)
+    for timer in timers:
+        if threading.current_thread() is threading.main_thread():
+            timer.stop()
+        else:
+            # A QTimer can only be stopped from its own thread; the queued task
+            # also keeps the timer alive until it has been stopped there. With
+            # the drain timer gone, the heartbeat's own tick drains the queue.
+            _rpc_request_queue.put(timer.stop)
 
 
 def _flush_gui_events(delay_ms: int = 20) -> None:
@@ -477,44 +505,132 @@ def _flush_gui_events(delay_ms: int = 20) -> None:
         app.processEvents(flags, delay_ms)
 
 
-def _drain_on_stack() -> bool:
-    """True when this tick runs inside a drain, i.e. a task is pumping events."""
-    frame = sys._getframe(2)
-    while frame is not None:
-        code = frame.f_code
-        if code.co_name == "process_gui_tasks" and code.co_filename.endswith("gui_dispatch.py"):
-            return True
-        frame = frame.f_back
-    return False
+_DEATH_ERROR = (
+    "The call died inside FreeCAD: a C++ exception escaped through the Python code that was "
+    "running it (FreeCAD's report view and log name it, as 'Unhandled ... caught in "
+    "GUIApplication::notify').",
+    "FreeCAD's Python interpreter is damaged by this and stays so until FreeCAD is restarted: "
+    "CADPilot keeps answering, more slowly. Save the document now (save_document), ask the "
+    "user to restart FreeCAD, and do not repeat the call as it was: the same input fails the "
+    "same way.",
+)
 
 
 def _recover_dead_drain() -> None:
-    """Clear the busy flag of a drain that is no longer running.
+    """Answer for a drain that is no longer running, and let the queue run again.
 
     FreeCAD can throw a C++ exception straight through the Python stack (seen on
     1.1.4: ``Units.Quantity("1 SpigotR")`` raised "Unit mismatch in plus
     operation", reported only as "Unhandled Base::Exception caught in
-    GUIApplication::notify"). No ``finally`` runs, so ``_processing`` stayed True
-    with nothing on the stack, every later tick returned at the re-entrancy
-    guard, and each call timed out "behind another call" until FreeCAD was
-    restarted.
+    GUIApplication::notify"). No ``except`` or ``finally`` runs, so
+    ``_processing`` stayed True with nothing running, the dead call's caller
+    waited out its whole timeout, and each later call timed out "behind another
+    call" until FreeCAD was restarted.
+
+    The dead frames stay linked into the GUI thread's frame chain for good, and
+    walking that chain can crash FreeCAD, so nothing here looks at the stack:
+    the drain timer's own re-entry is the evidence (see ``_drain_tick``).
     """
-    global _processing
-    logger.error(
-        "a GUI task ended without returning (a C++ exception escaped Python after %.1fs); "
-        "its caller got no reply. Clearing the busy flag so the queue runs again",
-        time.monotonic() - _processing_since,
-    )
+    global _processing, _current_task, _damage
+    ran_for = time.monotonic() - _processing_since
+    task, _current_task = _current_task, None
     _processing = False
     app = QtWidgets.QApplication.instance()
     if app is not None and app.overrideCursor() is not None:
         app.restoreOverrideCursor()
     with contextlib.suppress(Exception):
         FreeCADGui.getMainWindow().statusBar().clearMessage()
+    dbglog.clear_request_id()
+    cleaned = []
+    for name, hook in list(_death_hooks.items()):
+        try:
+            cleaned.append(hook())
+        except Exception as e:
+            logger.warning(
+                "cleanup after a dead task (%s) raised %s: %s", name, type(e).__name__, e
+            )
+    method = getattr(task, "method", None) or "unknown"
+    _damage = {
+        "at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        "method": method,
+        "request": getattr(task, "request", None),
+        "note": "a C++ exception escaped through Python; restart FreeCAD",
+    }
+    logger.error(
+        "a GUI task (%s) ended without returning after %.1fs: a C++ exception escaped "
+        "Python. Its caller is told so and the queue runs again; FreeCAD's interpreter "
+        "is damaged until it is restarted",
+        method,
+        ran_for,
+    )
+    report = getattr(task, "died", None)
+    if callable(report):
+        what, advice = _DEATH_ERROR
+        report(" ".join([what, *(str(c) for c in cleaned if c), advice]))
+    if _heartbeat is not None:
+        _heartbeat.setInterval(_DAMAGED_HEARTBEAT_MS)
+
+
+def _run_forced_tasks() -> None:
+    """Run the forced queue: before, and regardless of, every guard."""
+    while True:
+        try:
+            forced = _force_queue.get_nowait()
+        except queue.Empty:
+            return
+        try:
+            forced()
+        except Exception as e:
+            logger.error(
+                "unhandled exception in forced GUI task: %s: %s",
+                type(e).__name__,
+                e,
+                exc_info=True,
+            )
+
+
+def _tick() -> None:
+    """A wake signal or heartbeat tick: the guard probe, forced tasks, a request to drain.
+
+    It may be delivered inside a running task (anything that pumps events), so
+    it never drains the queue itself: the drain timer does.
+    """
+    timer = _drain_timer
+    if timer is None:
+        process_gui_tasks()  # the waker is stopping: nothing else would drain
+        return
+    _probe_guard_state()
+    _run_forced_tasks()
+    if _rpc_request_queue.empty():
+        if not _processing:
+            _clear_defer()
+        return
+    if not timer.isActive():
+        timer.start()
+
+
+def _drain_tick() -> None:
+    """The drain timer's slot: where the queue is drained while the waker runs.
+
+    Qt never delivers a timer's timeout while an earlier delivery of the same
+    timer is still being handled (``QTimerInfoList::activateTimers`` on Unix and
+    macOS, ``QEventDispatcherWin32`` on Windows; measured on 1.1.4: no re-entry
+    across a nested event loop in which another 0 ms timer fired 48649 times).
+    A task that pumps events therefore cannot bring this slot round again, so
+    reaching it with the busy flag set means the drain that set it is gone. A
+    C++ exception took it: ``GUIApplication::notify`` caught that, which ended
+    the delivery, and the timer, never stopped, fired again at once.
+    """
+    timer = _drain_timer
+    if _processing:
+        _recover_dead_drain()
+    process_gui_tasks()
+    if timer is not None:
+        timer.stop()  # empty, or held back by a guard: the next tick asks again
 
 
 def process_gui_tasks() -> None:
-    """Drain queued GUI-thread callables (wake signal and heartbeat tick).
+    """One full tick: the guard probe, forced tasks, then the queue.
 
     Skips the normal queue when any mouse button is held (e.g., 3D navigation
     drag) or when already executing a task (re-entrancy guard). The guard
@@ -522,7 +638,7 @@ def process_gui_tasks() -> None:
     triggering a nested ``process_gui_tasks`` call that corrupts FreeCAD state.
     Forced tasks and the guard-state probe run before both guards.
     """
-    global _processing, _processing_since
+    global _processing, _processing_since, _current_task
     # Refresh the guard state on EVERY tick, empty queue and nested ticks
     # included: it is the RPC thread's only safe view of whether a dialog/popup
     # is in the way, and a modal opened by the running task is only visible
@@ -534,24 +650,9 @@ def process_gui_tasks() -> None:
     # A modal opened inside a running task is that task's own nested exec()
     # loop, which is what delivers this tick, and reject() is what lets the
     # task continue.
-    while True:
-        try:
-            forced = _force_queue.get_nowait()
-        except queue.Empty:
-            break
-        try:
-            forced()
-        except Exception as e:
-            logger.error(
-                "unhandled exception in forced GUI task: %s: %s",
-                type(e).__name__,
-                e,
-                exc_info=True,
-            )
+    _run_forced_tasks()
     if _processing:
-        if _drain_on_stack():
-            return  # re-entrant call from processEvents inside a task; skip
-        _recover_dead_drain()
+        return  # re-entrant call from processEvents inside a task; skip
 
     try:
         if _rpc_request_queue.empty():
@@ -605,6 +706,7 @@ def process_gui_tasks() -> None:
                         _note_defer("modal")
                         return
                 task = _rpc_request_queue.get()
+                _current_task = task
                 try:
                     task()
                 except Exception as e:
@@ -614,6 +716,7 @@ def process_gui_tasks() -> None:
                         e,
                         exc_info=True,
                     )
+                _current_task = None
                 ran_one = True
             _clear_defer()  # drained: any earlier deferral is over
         finally:
@@ -706,7 +809,18 @@ def dispatch_to_gui(
         finally:
             dbglog.clear_request_id()
 
+    def _died(reason: str) -> None:
+        with handoff:
+            late = cancelled.is_set()
+            if not late:
+                response_queue.put({"success": False, "task_died": True, "error": reason})
+        if late:
+            _record_late_completion(inherited_request, method, queued_at, timeout, reason)
+
     _wrapped.cancelled = cancelled
+    _wrapped.died = _died
+    _wrapped.method = method
+    _wrapped.request = inherited_request
     queued_at = time.monotonic()
     (_force_queue if force else _rpc_request_queue).put(_wrapped)
     waker = _waker  # read once: a concurrent stop may clear the global

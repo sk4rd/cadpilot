@@ -368,6 +368,23 @@ def flush_deferred_syncs() -> None:
                 observer.sync_sketch(doc, obj)
 
 
+def abandon_dead_task() -> str:
+    """Clean up after a step whose task died in C++; says what was rolled back.
+
+    None of the step's own cleanup ran (gui_dispatch._recover_dead_drain): its
+    transaction is still open, so the next step would commit the half-built
+    objects under the dead step's name, and the observer is still muted.
+    """
+    global _ENGINE_ACTIVE
+    _ENGINE_ACTIVE = 0
+    active = FreeCAD.getActiveTransaction()
+    # Only our own: the user may be inside a sketch edit of theirs.
+    if not active or not str(active[0]).startswith(TX_PREFIX):
+        return ""
+    FreeCAD.closeActiveTransaction(True, int(active[1]))
+    return "The changes it had made were rolled back."
+
+
 def engine_quiet() -> _EngineQuiet:
     """Mute the manual-edit observer for machine-driven document writes.
 

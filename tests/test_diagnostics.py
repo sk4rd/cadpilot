@@ -567,3 +567,22 @@ def test_diagnose_with_freecad_down_still_reports_and_skips_the_dismissal(monkey
     )
     assert "REPORT" in text, "the report must survive an unreachable FreeCAD"
     assert "Dismiss: skipped (no connection available to act on)." in text
+
+
+def test_a_damaged_interpreter_is_reported_with_what_to_do():
+    """After a GUI task died in a C++ exception the add-on keeps answering, so
+    nothing else tells a caller that FreeCAD needs a restart."""
+    state = {
+        "available": True,
+        "defer_reason": None,
+        "processing": False,
+        "queue_depth": 0,
+        "damaged": {"at": "2026-11-18T23:02:52", "method": "create_feature", "request": 7},
+    }
+    note = diag.gui_state_note(state)
+    assert "DAMAGED since 2026-11-18T23:02:52" in note and "create_feature" in note
+    assert "restart FreeCAD" in note and "save_document" in note
+    assert "DAMAGED" in diag._verdict({"reachable": True}, [], [], [], None, state)
+    # a held-back queue is still named first
+    both = diag.gui_state_note({**state, "defer_reason": "button", "deferred_s": 3.0})
+    assert both.index("mouse button") < both.index("DAMAGED")

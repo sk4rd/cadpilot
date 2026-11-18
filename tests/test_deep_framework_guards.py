@@ -359,9 +359,12 @@ def test_modal_blocker_is_reported_and_dismissible_without_a_gui():
     dispatch = _tree("gui_dispatch.py")
     probe = _func(dispatch, "backpressure")
     assert "_guard_state" in _names(probe), "an idle queue must still name the blocker"
-    drain = _func(dispatch, "process_gui_tasks")
-    assert "_probe_guard_state" in _names(drain), "the guard state is refreshed on the GUI tick"
-    assert "_force_queue" in _names(drain), "a dismissal must run despite the guards"
+    # Both the tick the wake signal and heartbeat deliver and the drain itself.
+    for name in ("_tick", "process_gui_tasks"):
+        tick = _func(dispatch, name)
+        assert "_probe_guard_state" in _names(tick), "the guard state is refreshed on the GUI tick"
+        assert "_run_forced_tasks" in _names(tick), "a dismissal must run despite the guards"
+    assert "_force_queue" in _names(_func(dispatch, "_run_forced_tasks"))
     dismiss = _func(dispatch, "dismiss_blocking_dialog")
     assert "force" in {
         kw.arg

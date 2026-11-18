@@ -106,24 +106,41 @@ def dispatch(monkeypatch):
     qtcore.QEventLoop = types.SimpleNamespace(ExcludeUserInputEvents=1, ExcludeSocketNotifiers=2)
 
     class _FakeTimer:
+        """A QTimer as far as the dispatcher relies on it.
+
+        Qt never delivers a timer's timeout inside its own handler, and that
+        guard belongs to the registration: a restart makes a new one.
+        """
+
         singleShot = staticmethod(lambda _ms, cb: state.timer_callbacks.append(cb))
 
         def __init__(self, *_args):
             self.timeout = _FakeSignal()
             self.active = False
+            self.interval = None
+            self.delivering = False
 
-        def setInterval(self, _ms):
-            pass
+        def setInterval(self, ms):
+            self.interval = ms
+
+        def isActive(self):
+            return self.active
 
         def start(self):
             self.active = True
+            self.delivering = False
 
         def stop(self):
             self.active = False
 
         def fire(self):
-            if self.active:
+            if not self.active or self.delivering:
+                return
+            self.delivering = True
+            try:
                 self.timeout.emit()
+            finally:
+                self.delivering = False
 
     qtcore.QTimer = _FakeTimer
     qtcore.QThread = types.SimpleNamespace(msleep=lambda _ms: None)
@@ -173,6 +190,15 @@ def dispatch(monkeypatch):
 def _run_ticks(mod, n):
     for _ in range(n):
         mod.process_gui_tasks()
+
+
+def _spin(mod):
+    """The event loop: deliver the 0 ms drain timer until it stops itself."""
+    for _ in range(50):
+        if not mod._drain_timer.active:
+            return
+        mod._drain_timer.fire()
+    raise AssertionError("the drain timer never stopped")
 
 
 def test_no_button_runs_immediately(dispatch):
@@ -325,29 +351,82 @@ def test_heartbeat_survives_a_task_that_outlasts_its_tick(dispatch):
 
     mod._rpc_request_queue.put(long_task)
     heartbeat.fire()
+    _spin(mod)
     assert ran == ["long"]
 
     mod._rpc_request_queue.put(lambda: ran.append("unwoken"))
     heartbeat.fire()
+    _spin(mod)
     assert ran == ["long", "unwoken"], "the heartbeat must still drain the queue"
 
+    drain = mod._drain_timer
     mod.cleanup_waker()
     assert not heartbeat.active, "stopping the server stops the heartbeat"
+    assert not drain.active
 
 
-def test_a_drain_that_died_in_cpp_does_not_wedge_the_queue(dispatch):
-    """Live: Units.Quantity("1 SpigotR") threw a C++ exception straight through
-    the Python stack inside a task. The drain's finally never ran, _processing
-    stayed True with nothing running, and every later call timed out "waiting
-    behind another call" until FreeCAD restarted."""
+def test_a_tick_inside_a_running_task_leaves_the_drain_timer_alone(dispatch):
+    """The drain timer's own handler is what proves a drain is alive, so a tick
+    that lands while a task pumps events must not restart it: the restarted
+    timer could fire inside the task and be taken for a drain that died."""
     mod, _state = dispatch
-    mod._processing = True  # what the unwound drain left behind
-    mod._processing_since = time.monotonic() - 300
-    ran = []
-    mod._rpc_request_queue.put(lambda: ran.append("next call"))
-    mod.process_gui_tasks()
-    assert ran == ["next call"]
+    mod.init_waker()
+    heartbeat, drain = mod._heartbeat, mod._drain_timer
+    order = []
+
+    def pumping_task():
+        mod._rpc_request_queue.put(lambda: order.append("second"))
+        heartbeat.fire()  # a tick delivered while this task pumps events
+        drain.fire()  # Qt holds this back; it would deliver a restarted timer
+        order.append("first")
+
+    mod._rpc_request_queue.put(pumping_task)
+    heartbeat.fire()
+    _spin(mod)
+    assert order == ["first", "second"]
+    assert mod._damage is None
+
+
+def test_a_task_that_died_in_cpp_is_answered_and_the_queue_runs_again(dispatch):
+    """Live: Units.Quantity("1 SpigotR") threw a C++ exception straight through
+    the Python stack inside a task. No finally ran, _processing stayed True with
+    nothing running, the caller waited out its timeout, and every later call
+    timed out "waiting behind another call" until FreeCAD restarted."""
+    mod, _state = dispatch
+    mod.init_waker()
+    heartbeat, drain = mod._heartbeat, mod._drain_timer
+    mod.on_task_death("step", lambda: "The changes it had made were rolled back.")
+    never = threading.Event()
+    reply = {}
+    caller = threading.Thread(
+        target=lambda: reply.update(res=mod.dispatch_to_gui(never.wait, timeout=30))
+    )
+    caller.start()
+    while mod._rpc_request_queue.empty():
+        time.sleep(0.01)
+    heartbeat.fire()
+    # The delivery that dies: its frames never return, as after the C++ unwind.
+    threading.Thread(target=drain.fire, daemon=True).start()
+    while mod._current_task is None:
+        time.sleep(0.01)
+    assert mod._processing is True
+
+    # GUIApplication::notify caught the exception, so Qt's delivery is over and
+    # the timer, never stopped, fires again.
+    drain.delivering = False
+    mod._rpc_request_queue.put(lambda: reply.update(next="ran"))
+    drain.fire()
+    caller.join(5)
+
+    res = reply["res"]
+    assert res["success"] is False and res["task_died"] is True
+    assert "C++ exception" in res["error"] and "rolled back" in res["error"]
+    assert "restart FreeCAD" in res["error"]
+    assert reply["next"] == "ran", "the queue runs again"
     assert mod._processing is False
+    assert heartbeat.interval == mod._DAMAGED_HEARTBEAT_MS
+    assert mod.backpressure()["damaged"]["note"]
+    never.set()
 
 
 def _give_the_stub_an_application(mod):

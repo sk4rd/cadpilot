@@ -556,6 +556,21 @@ def gui_state_note(state: dict | None) -> str:
     """
     if not state or not state.get("available"):
         return ""
+    held = _held_back_note(state)
+    damaged = state.get("damaged")
+    if not isinstance(damaged, dict):
+        return held
+    # Not a back-pressure case, so it is said whatever else holds the queue.
+    damage = (
+        f"FreeCAD's Python interpreter is DAMAGED since {damaged.get('at')}: a C++ exception "
+        f"escaped through Python during {damaged.get('method')}, and the call was answered with "
+        "that error. CADPilot keeps working, more slowly, until FreeCAD is restarted.\n"
+        "  SOLUTION: save the open documents (save_document) and ask the user to restart FreeCAD."
+    )
+    return f"{held}\n{damage}" if held else damage
+
+
+def _held_back_note(state: dict) -> str:
     reason = state.get("defer_reason")
     queue = state.get("queue_depth")
     if reason == "modal":
