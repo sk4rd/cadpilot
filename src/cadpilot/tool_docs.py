@@ -796,9 +796,9 @@ Housekeeping:
                 the log: it never touches the document, the undo stack or any
                 object's visibility
   status        one compact row per step (index/state/operation/label/
-                result, no params) + meta (plan description).
-                params.full=true returns the full records incl. params, which
-                params.limit/offset page
+                result, and `error` on a failed step; no params) + meta
+                (plan description). params.full=true returns the full
+                records incl. params; params.limit/offset page either form
 
 Every mutating action's reply carries a compact `journal` snapshot (counts,
 drift flag, per-step index/state/label/error/accepted, and `stale` for a done

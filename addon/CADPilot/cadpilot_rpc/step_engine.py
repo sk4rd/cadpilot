@@ -1340,6 +1340,15 @@ def _status(
     # its whole snippet in params — ran to tens of KB, which the caller pays for
     # as context just to learn "which step is next".
     p = dict((spec or {}).get("params") or {})
+    offset = max(0, int(p.get("offset") or 0))
+    limit = int(p.get("limit") or 0)
+    page = (
+        records[offset : offset + limit] if limit > 0 else (records[offset:] if offset else records)
+    )
+    if limit > 0:
+        out["offset"] = offset
+        out["limit"] = limit
+        out["has_more"] = offset + len(page) < len(records)
     if p.get("summary"):
         out["summary"] = True
         out["steps"] = [
@@ -1352,19 +1361,12 @@ def _status(
                 "executable": r.executable,
                 "result": r.result,
                 "transaction": r.transaction,
+                # why a failed step failed: the one thing a caller reads status for
+                **({"error": r.error} if r.error else {}),
             }
-            for r in records
+            for r in page
         ]
         return out
-    offset = max(0, int(p.get("offset") or 0))
-    limit = int(p.get("limit") or 0)
-    page = (
-        records[offset : offset + limit] if limit > 0 else (records[offset:] if offset else records)
-    )
-    if limit > 0:
-        out["offset"] = offset
-        out["limit"] = limit
-        out["has_more"] = offset + len(page) < len(records)
     out["records"] = [r.to_dict() for r in page]
     return out
 
