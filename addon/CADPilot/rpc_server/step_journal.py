@@ -2055,3 +2055,176 @@ def describe_sketch_edit(old: dict[str, Any], new: dict[str, Any]) -> str:
         bits.append("construction lines changed")
     text = ", ".join(bits) or "constraints rearranged"
     return text + (f" ({', '.join(names)})" if names else "")
+
+
+# --- what a rollback will do (the dry run) -----------------------------------------
+
+
+def _touched_objects(rec: StepRecord) -> set[str]:
+    """Objects a step changed without creating them, as far as its params say."""
+    params = rec.params or {}
+    if rec.operation not in ("edit_object", "move", "color", "batch", "set_anchors"):
+        return set()
+    names = {str(params.get("moved_object") or params.get("obj_name") or "")}
+    for sub in params.get("ops") or []:
+        if isinstance(sub, dict) and sub_operation(sub) in ("edit_object", "move", "color"):
+            names.add(str(sub.get("moved_object") or sub.get("obj_name") or ""))
+    return {n for n in names if n}
+
+
+# Ops whose whole effect is the objects they create: undoing one is removing
+# those objects (the engine re-points a Body's Tip afterwards).
+_CREATING_OPS = frozenset(
+    {
+        "create_object",
+        "sketch",
+        "pad",
+        "pocket",
+        "revolution",
+        "groove",
+        "fillet",
+        "chamfer",
+        "thickness",
+        "draft",
+        "loft",
+        "sweep",
+        "boolean",
+        "mirror",
+        "pattern",
+        "datum_plane",
+        "hull",
+    }
+)
+
+
+def _only_creates(rec: StepRecord, created: set[str]) -> bool:
+    params = rec.params or {}
+    if rec.operation == "variables":
+        return str(params.get("obj_name") or "") in created
+    if rec.operation == "batch":
+        return all(
+            isinstance(sub, dict) and sub_operation(sub) in _CREATING_OPS
+            for sub in params.get("ops") or []
+        )
+    return rec.operation in _CREATING_OPS
+
+
+def plan_restore(
+    records: list[StepRecord],
+    to_index: int,
+    span: int,
+    present: list[str],
+    stale: set[int] | frozenset[int] = frozenset(),
+) -> dict[str, Any]:
+    """How ``rollback_to(to_index)`` puts the model back, decided before acting.
+
+    ``span`` is how many of the journal's newest transactions the undo stack
+    can pop (``undo_trust_span``), ``stale`` the steps the user already took
+    out. Native undo pops ``span``; whatever it cannot reach is fixed from the
+    FIRST step that is actually wrong, never from step 1:
+
+    * objects created by steps after the target that the undo cannot reach
+      are removed directly (``leftover``);
+    * a journal object the target state needs that is gone (deleted by the
+      user, or kept away by a step the undo cannot reach), an object such a
+      step edited, and a stale step at or before the target make its creating
+      step the first wrong one: from there the journal rebuilds (``remove``
+      what those steps built, re-run them up to the target).
+
+    ``mode``: ``native`` (the undo is enough), ``removed`` (the steps the
+    undo cannot reach only created objects, and removing them is exact),
+    ``rebuild``, or ``partial`` when what is left cannot be restored exactly
+    (a step that edited objects in ways the journal cannot see, or a step in
+    the rebuild range that cannot be re-run).
+    """
+    live = set(present)
+    after = [
+        r for r in records if r.state == STATE_DONE and r.index > to_index and r.index not in stale
+    ]
+    with_tx = [r for r in after if r.transaction]
+    popped = {r.index for r in with_tx[len(with_tx) - span :]} if span else set()
+    unreached = [r for r in after if r.index not in popped and (r.transaction or r.mutated)]
+    diffs = {rec.index: (created, removed) for rec, created, removed in _record_diffs(records)}
+    built = set(created_since(records, 0))
+    leftover = sorted({n for r in unreached for n in diffs.get(r.index, (set(), set()))[0]} & live)
+    expected = set(objects_after_index(records, to_index)) & built
+    # Objects steps after the target removed come back only with their undo.
+    restored_by_undo = {n for i in popped for n in diffs.get(i, (set(), set()))[1]}
+    missing = sorted(n for n in expected if n not in live and n not in restored_by_undo)
+    touched = sorted({n for r in unreached for n in _touched_objects(r)} & built - set(leftover))
+    wrong: list[int] = []
+    reasons: list[str] = []
+    for name in missing + touched:
+        owner = creator_of(records, name)
+        if owner is not None and owner.index <= to_index:
+            wrong.append(owner.index)
+    wrong += [i for i in stale if i <= to_index]
+    if unreached:
+        reasons.append(f"the undo stack cannot reach step(s) {[r.index for r in unreached]}")
+    if missing:
+        reasons.append(f"object(s) {missing} that step {to_index} should have are gone")
+    if touched:
+        reasons.append(f"object(s) {touched} were edited by step(s) the undo cannot reach")
+    rebuild_from = min(wrong) if wrong else None
+    rerun = [
+        r.index
+        for r in records
+        if rebuild_from is not None
+        and rebuild_from <= r.index <= to_index
+        and r.state in (STATE_DONE, STATE_FAILED)
+    ]
+    blocked = unrecoverable_steps(records, to_index)
+    blocked = [i for i in blocked if rebuild_from is not None and i >= rebuild_from]
+    if rebuild_from is None:
+        exact = all(_only_creates(r, diffs.get(r.index, (set(), set()))[0]) for r in unreached)
+        mode = "native" if not unreached else ("removed" if exact else "partial")
+        remove = leftover
+    elif blocked:
+        mode = "partial"
+        remove = leftover
+        reasons.append(f"step(s) {blocked} cannot be re-run, so the model cannot be rebuilt")
+    else:
+        mode = "rebuild"
+        remove = sorted((set(created_since(records, rebuild_from - 1)) & live) | set(leftover))
+    return {
+        "mode": mode,
+        "undo": span,
+        "rebuild_from": rebuild_from if mode == "rebuild" else None,
+        "rerun": rerun if mode == "rebuild" else [],
+        "remove": remove,
+        "undone_objects": sorted(
+            {n for i in popped for n in diffs.get(i, (set(), set()))[0]} & live
+        ),
+        "leftover": leftover,
+        "missing": missing,
+        "unreached": [r.index for r in unreached],
+        "reasons": reasons,
+    }
+
+
+def restore_summary(plan: dict[str, Any], user_dependents: list[str]) -> str:
+    """The dry run in words, for the panel's confirm dialog and the reply."""
+    lines = []
+    if plan.get("undo"):
+        lines.append(f"Undo {plan['undo']} transaction(s) natively.")
+    if plan["mode"] == "rebuild":
+        steps = plan["rerun"]
+        span = f"{steps[0]}..{steps[-1]}" if len(steps) > 1 else str(steps[0]) if steps else "-"
+        lines.append(
+            f"Then rebuild from step {plan['rebuild_from']}: remove "
+            f"{len(plan['remove'])} object(s) and re-run step(s) {span}."
+        )
+    elif plan["remove"]:
+        lines.append(
+            f"Then remove {len(plan['remove'])} object(s) directly: {', '.join(plan['remove'])}."
+        )
+    if plan["mode"] == "partial":
+        lines.append("Property changes those steps made cannot be restored.")
+    if user_dependents:
+        lines.append(
+            f"Your own object(s) {', '.join(user_dependents)} depend on what goes away and "
+            "would break."
+        )
+    if not lines:
+        lines.append("Nothing to undo.")
+    return " ".join(lines)

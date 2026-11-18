@@ -1068,7 +1068,13 @@ def _apply_op(doc, spec: dict[str, Any]) -> dict[str, Any]:
     if operation == "run_to":
         return _run_steps(doc, records, limit=None, upto=int(spec.get("index") or 0))
     if operation == "rollback_to":
-        return _rollback(doc, records, int(spec.get("index") or 0), bool(spec.get("force")))
+        return _rollback(
+            doc,
+            records,
+            int(spec.get("index") or 0),
+            bool(spec.get("force")),
+            bool((spec.get("params") or {}).get("dry_run") or spec.get("dry_run")),
+        )
     if operation == "reexecute":
         return _reexecute(
             doc,
@@ -1124,6 +1130,7 @@ def _apply_op(doc, spec: dict[str, Any]) -> dict[str, Any]:
             int(spec.get("index") or 0),
             bool(spec.get("force")),
             str((spec.get("params") or {}).get("reason") or ""),
+            bool((spec.get("params") or {}).get("dry_run") or spec.get("dry_run")),
         )
     if operation == "update":
         params = dict(spec.get("params") or {})
@@ -1428,15 +1435,81 @@ def _remove_objects_locked(doc, names: list[str]) -> list[str]:
     return removed
 
 
-def _rollback(doc, records, to_index: int, force: bool) -> dict[str, Any]:
+def _is_container(obj) -> bool:
+    # A Body or group lists its members in Group: removing a member shrinks
+    # it, nothing breaks, so it is no dependent.
+    with contextlib.suppress(Exception):
+        return bool(obj.hasExtension("App::GroupExtension"))
+    return False
+
+
+def user_dependents(doc, names: list[str], built: set[str]) -> list[str]:
+    """Objects the journal did not build that depend on any of ``names``.
+
+    Removing or undoing their base leaves them broken (a user's chamfer left
+    outside its Body with Base=None, Invalid), so a rollback or reject that
+    would do it must say so and wait for force.
+    """
+    targets = set(names)
+    out: set[str] = set()
+    for name in names:
+        obj = doc.getObject(name)
+        if obj is None:
+            continue
+        for dep in getattr(obj, "InListRecursive", None) or []:
+            if dep.Name in targets or dep.Name in built or _is_container(dep):
+                continue
+            out.add(dep.Name)
+    return sorted(out)
+
+
+def rollback_plan(doc, records: list[sj.StepRecord], to_index: int) -> dict[str, Any]:
+    """The dry run of ``rollback_to(to_index)``: how, and what goes away.
+
+    ``mode`` (native / rebuild / partial), the transactions undone, the step
+    a rebuild starts from and the steps it re-runs, the objects removed, and
+    ``user_dependents``: the user's own objects that would break. The panel's
+    confirm dialog shows ``summary``; the RPC returns all of it for
+    ``params.dry_run``.
+    """
+    stale = stale_steps(doc, records)
+    stale_ids = {s["index"] for s in stale}
+    gone = {i for i in stale_ids if i > to_index}
+    plan = sj.plan_rollback(records, to_index, gone)
+    span, why = _undo_trust(doc, records, to_index, plan["undo_count"], gone)
+    restore = sj.plan_restore(records, to_index, span, _object_names(doc), stale_ids)
+    built = set(sj.created_since(records, 0))
+    deps = user_dependents(doc, restore["remove"] + restore["undone_objects"], built)
+    if why:
+        restore["reasons"].insert(0, why)
+    return {
+        **restore,
+        "undo_count": plan["undo_count"],
+        "blocking": plan["blocking"],
+        "accepted": plan["accepted"],
+        "stale": stale,
+        "user_dependents": deps,
+        "summary": sj.restore_summary(restore, deps),
+    }
+
+
+def _dependents_refusal(deps: list[str], what: str) -> str:
+    return (
+        f"{what} would break the user's own object(s) {deps}: they depend on objects it "
+        "removes. Pass force=true to go ahead anyway, or let the user move or delete them "
+        "first"
+    )
+
+
+def _rollback(doc, records, to_index: int, force: bool, dry_run: bool = False) -> dict[str, Any]:
     if to_index < 0 or to_index > len(records):
         return {"success": False, "error": f"step {to_index} out of range 0-{len(records)}"}
-    stale = stale_steps(doc, records)
-    refusal = _stale_refusal(stale, to_index, f"rolling back to step {to_index}")
+    plan = rollback_plan(doc, records, to_index)
+    if dry_run:
+        return {"success": True, "dry_run": True, **plan}
+    refusal = _stale_refusal(plan["stale"], to_index, f"rolling back to step {to_index}")
     if refusal and not force:
-        return {"success": False, "error": refusal, "stale": stale}
-    gone = {s["index"] for s in stale if s["index"] > to_index}
-    plan = sj.plan_rollback(records, to_index, gone)
+        return {"success": False, "error": refusal, "stale": plan["stale"]}
     if plan["blocking"] and not force:
         return {
             "success": False,
@@ -1453,148 +1526,206 @@ def _rollback(doc, records, to_index: int, force: bool) -> dict[str, Any]:
                 "pass force=true to roll back across them"
             ),
         }
-    span, undo_why = _undo_trust(doc, records, to_index, plan["undo_count"], gone)
-    res = undo_n(doc, span)
+    if plan["user_dependents"] and not force:
+        return {
+            "success": False,
+            "error": _dependents_refusal(
+                plan["user_dependents"], f"rolling back to step {to_index}"
+            ),
+            "dry_run": plan,
+        }
+    # rollback_plan checked the span name by name (_undo_trust): the entries
+    # popped here are exactly the journal's own, newest first.
+    res = undo_n(doc, plan["undo"])
     # doc.undo() does NOT rewind the journal — the property is document-level and
     # FreeCAD only tracks undo for objects. This reconciliation is what makes
     # the log match the model again, so it runs on every rollback, not just as a
     # fallback.
     records = read_journal(doc)
-    warnings: list[str] = []
-    restored = "native"
-    removed: list[str] = []
-    # The count alone cannot certify the undo: the stack is shared with the GUI,
-    # and a manual edit interleaved on it pops under this rollback's name while
-    # the journal's own transaction stays applied. The object sets tell the
-    # truth, so verify them before promising "native".
+    stale_ids = {s["index"] for s in plan["stale"]}
     present = set(_object_names(doc))
+    # Verify what the undo did instead of trusting the count: whatever the
+    # rolled-back steps created must be gone (or be among the leftovers the
+    # plan removes), whatever the target needs must be present (or be rebuilt).
     leftover = sorted(set(sj.created_since(records, to_index)) & present)
-    expected = set(sj.objects_after_index(records, to_index))
-    journal_built = set(sj.created_since(records, 0))
-    missing = sorted(n for n in expected if n not in present and n in journal_built)
-    # Steps the undo stack cannot reach. Even when some transactions did come
-    # off, these keep their changes, which is the "rollback reported success but
-    # the objects are still there" bug.
-    stranded = sj.steps_without_undo(records, to_index)
-
-    triggers: list[str] = []
-    if undo_why:
-        # A capped stack is the common cause (MaxUndoSize), and the text names
-        # it: the old wording blamed a reopen or an off-journal edit for a stack
-        # whose surviving entries matched the journal exactly.
-        triggers.append(undo_why)
-    elif res["count"] < span:
-        triggers.append(
-            f"the undo stack held only {res['count']}/{plan['undo_count']} of the "
-            "journal's transactions"
-        )
-    if stranded:
-        triggers.append(f"step(s) {stranded} own no undo entry")
-    if leftover:
-        # Only guess at an off-journal edit when the stack was otherwise
-        # complete: with a short span the cap already explains the leftovers,
-        # and the old wording blamed the user for FreeCAD's own eviction.
-        cause = "" if undo_why else " (off-journal edits on the undo stack?)"
-        triggers.append(f"object(s) {leftover} from the rolled-back steps are still present{cause}")
-    if missing:
-        triggers.append(f"object(s) {missing} that step {to_index} should have are gone")
-
-    if triggers:
-        reason = "; ".join(triggers)
-        if not sj.unrecoverable_steps(records, to_index):
-            # Everything up to the target can be re-created from the journal, so
-            # rebuild: clear what the journal built, then run 1..to_index again.
-            # This is a true restore, unlike a partial undo.
-            removed = _remove_objects(doc, sj.created_since(records, 0))
-            records = read_journal(doc)
-            # Failed records belong in the re-run too: their transaction aborted,
-            # so re-running them is safe, and skipping them would run a later
-            # step against a missing dependency.
-            for rec in records:
-                if rec.state in (sj.STATE_DONE, sj.STATE_FAILED):
-                    rec.state = sj.STATE_PLANNED
-                    rec.transaction = ""
-                    rec.error = ""
-            write_journal(doc, records)
-            run = _run_steps(doc, records, limit=None, upto=to_index)
-            records = read_journal(doc)
-            restored = "rebuild"
-            warnings.append(
-                f"{reason}. The model was rebuilt from the journal instead: "
-                f"{len(removed)} object(s) removed and steps 1..{to_index} re-run."
-            )
-            stranded = []
-            if not run.get("success"):
-                return {
-                    "success": False,
-                    "error": f"the rebuild stopped early: {run.get('error') or 'unknown error'}",
-                    "undone": res["count"],
-                    "restored": restored,
-                    "removed": removed,
-                    "stranded": stranded,
-                    "done": sj.done_count(records),
-                    "count": len(records),
-                    "warnings": warnings,
-                }
+    built = set(sj.created_since(records, 0))
+    expected = set(sj.objects_after_index(records, to_index)) & built
+    missing = sorted(n for n in expected if n not in present)
+    remove = sorted(set(plan["remove"]) | set(leftover))
+    rebuild_from = plan["rebuild_from"]
+    surprise = sorted(set(missing) - set(plan["missing"]) - set(plan["remove"]))
+    for name in surprise:
+        owner = sj.creator_of(records, name)
+        if owner is not None and owner.index <= to_index:
+            rebuild_from = min(rebuild_from or owner.index, owner.index)
+    mode = plan["mode"]
+    if rebuild_from is not None and mode != "rebuild":
+        if sj.unrecoverable_steps(records, to_index):
+            mode = "partial"
+            rebuild_from = None
         else:
-            # Those steps can be neither undone nor re-run (their operation or
-            # code was never recorded), so remove the objects they introduced.
-            # Property changes they made cannot be restored.
-            removal = sj.created_since(records, to_index)
-            removed = _remove_objects(doc, removal)
-            records = read_journal(doc)
-            restored = "partial"
-            warnings.append(
-                f"{reason}. Their objects were removed ({len(removed)} object(s)), but "
-                "property changes they made (placements, dimensions) cannot be restored. "
-                "Replay the journal, or rebuild from scratch, if you need an exact state."
-            )
-            still = sorted(set(removal) & set(_object_names(doc)))
-            if still:
-                warnings.append(
-                    f"object(s) {still} could not be removed and are still in the document"
-                )
-
-    # How many DONE records the rollback affected — NOT done_count - to_index,
-    # which assumes 1..to_index are all done and so under-rewinds (leaving
-    # records marked done whose transactions were already undone) whenever a
-    # FAILED or PLANNED record sits in between.
-    extra = sj.done_after_index(records, to_index)
-    replanned: list[int] = []
-    if extra > 0:
-        sj.rewind(records, extra)
-    # A failed record was never applied, so it must go back to planned too —
-    # otherwise the cursor steps over it and runs the rest of the plan against a
-    # dependency that was never created (see sj.replan_failed). The rebuild path
-    # above has always done this; the native path did not.
-    replanned = sj.replan_failed(records, to_index)
-    if extra > 0 or replanned:
-        with contextlib.suppress(Exception):
-            write_journal(doc, records)
+            mode = "rebuild"
+    if rebuild_from is not None:
+        remove = sorted(set(remove) | (set(sj.created_since(records, rebuild_from - 1)) & present))
+    if res["count"] < plan["undo"]:
+        plan["reasons"].append(
+            f"the undo stack held only {res['count']}/{plan['undo']} of the journal's transactions"
+        )
+    late_deps = sorted(set(user_dependents(doc, remove, built)) - set(plan["user_dependents"]))
+    if late_deps and not force:
+        _rewind_after(doc, records, to_index)
+        return {
+            "success": False,
+            "error": (
+                f"the undo took {res['count']} transaction(s), but finishing the rollback "
+                + _dependents_refusal(late_deps, "")[1:]
+            ),
+            "undone": res["count"],
+        }
+    removed = _remove_objects(doc, remove)
+    records = read_journal(doc)
+    notes: list[str] = []
+    warnings: list[str] = []
+    reason = "; ".join(plan["reasons"])
+    if mode == "rebuild":
+        for rec in records:
+            if rebuild_from <= rec.index <= to_index and rec.state in (
+                sj.STATE_DONE,
+                sj.STATE_FAILED,
+            ):
+                # Failed records belong in the re-run too: their transaction
+                # aborted, so re-running them is safe, and skipping them would
+                # run a later step against a missing dependency.
+                rec.state = sj.STATE_PLANNED
+                rec.transaction = ""
+                rec.error = ""
+                rec.stale = ""
+        write_journal(doc, records)
+        run = _run_steps(doc, records, limit=None, upto=to_index)
+        records = read_journal(doc)
+        notes.append(
+            f"{reason}. Rebuilt from step {rebuild_from}: {len(removed)} object(s) removed "
+            f"and steps {rebuild_from}..{to_index} re-run."
+        )
+        if not run.get("success"):
+            _rewind_after(doc, records, to_index)
+            return {
+                "success": False,
+                "error": f"the rebuild stopped early: {run.get('error') or 'unknown error'}",
+                "undone": res["count"],
+                "restored": mode,
+                "rebuild_from": rebuild_from,
+                "removed": removed,
+                "done": sj.done_count(read_journal(doc)),
+                "count": len(records),
+                "notes": notes,
+            }
+    elif mode == "removed":
+        notes.append(
+            f"{reason}. Those steps only created objects, so removing them restores step "
+            f"{to_index} exactly: {', '.join(removed) or 'nothing left to remove'}."
+        )
+    elif removed or mode == "partial":
+        warnings.append(
+            f"{reason}. Their objects were removed directly ({len(removed)} object(s)), but "
+            "property changes they made (placements, dimensions) cannot be restored. "
+            "Replay the journal if you need an exact state."
+        )
+    still = sorted(set(remove) & set(_object_names(doc)) - set(removed))
+    if still:
+        warnings.append(f"object(s) {still} could not be removed and are still in the document")
+    if plan["user_dependents"]:
+        warnings.append(
+            f"forced: the user's own object(s) {plan['user_dependents']} depended on what was "
+            "removed and may now be broken"
+        )
+    replanned = _rewind_after(doc, records, to_index)
     return {
         "success": True,
         "undone": res["count"],
-        "restored": restored,
+        "restored": mode,
+        "rebuild_from": rebuild_from,
         "removed": removed,
-        "stranded": stranded,
+        "stranded": [] if mode == "rebuild" else plan["unreached"],
         "replanned": replanned,
+        "skipped_stale": sorted(i for i in stale_ids if i > to_index),
         "done": sj.done_count(records),
         "count": len(records),
+        "notes": notes,
         "warnings": warnings,
     }
 
 
-def _reject(doc, records, index: int, force: bool, reason: str) -> dict[str, Any]:
-    """Undo and forget everything from ``index`` onward (see sj.plan_reject).
+def _rewind_after(doc, records, to_index: int) -> list[int]:
+    """Put every record after ``to_index`` back to planned; returns the failed ones.
 
-    Reject is the deliberate act of destruction, so — unlike rollback/replay —
-    it does not stop at accepted steps; it only refuses to cross non-atomic
-    ones without force, where undo itself is unreliable.
+    Counts the DONE records the rollback affected — NOT done_count - to_index,
+    which assumes 1..to_index are all done and so under-rewinds whenever a
+    FAILED or PLANNED record sits in between. A failed record was never
+    applied, so it goes back to planned too (see sj.replan_failed): otherwise
+    the cursor steps over it and runs the rest of the plan against a
+    dependency that was never created.
     """
+    extra = sj.done_after_index(records, to_index)
+    if extra > 0:
+        sj.rewind(records, extra)
+    replanned = sj.replan_failed(records, to_index)
+    if extra > 0 or replanned:
+        with contextlib.suppress(Exception):
+            write_journal(doc, records)
+    return replanned
+
+
+def reject_plan(doc, records: list[sj.StepRecord], index: int) -> dict[str, Any] | None:
+    """The dry run of ``reject(index)``: what is undone, removed, and who breaks."""
     gone = {s["index"] for s in stale_steps(doc, records) if s["index"] >= index}
     plan = sj.plan_reject(records, index, gone)
     if plan is None:
+        return None
+    span, why = _undo_trust(doc, records, index - 1, plan["undo_count"], gone)
+    present = set(_object_names(doc))
+    doomed = sorted(set(sj.created_since(records, index - 1)) & present)
+    deps = user_dependents(doc, doomed, set(sj.created_since(records, 0)))
+    removed_directly = len(doomed) if span < plan["undo_count"] else 0
+    summary = (
+        f"Undo {span} transaction(s) and forget {len(plan['drop'])} step(s); "
+        f"{len(doomed)} object(s) go away"
+        + (f", {removed_directly} of them removed directly" if removed_directly else "")
+        + "."
+        + (f" Your own object(s) {', '.join(deps)} depend on them and would break." if deps else "")
+    )
+    return {
+        **plan,
+        "undo": span,
+        "undo_why": why,
+        "gone": sorted(gone),
+        "remove": doomed,
+        "user_dependents": deps,
+        "summary": summary,
+    }
+
+
+def _reject(
+    doc, records, index: int, force: bool, reason: str, dry_run: bool = False
+) -> dict[str, Any]:
+    """Undo and forget everything from ``index`` onward (see sj.plan_reject).
+
+    Reject is the deliberate act of destruction, so — unlike rollback/replay —
+    it does not stop at accepted steps; it refuses to cross non-atomic ones
+    without force, where undo itself is unreliable, and to break the user's
+    own objects that depend on what it removes.
+    """
+    plan = reject_plan(doc, records, index)
+    if plan is None:
         return {"success": False, "error": f"no step {index}"}
+    if dry_run:
+        return {"success": True, "dry_run": True, **plan}
+    if plan["user_dependents"] and not force:
+        return {
+            "success": False,
+            "error": _dependents_refusal(plan["user_dependents"], f"rejecting step {index}"),
+            "dry_run": plan,
+        }
     if plan["blocking"] and not force:
         return {
             "success": False,
@@ -1603,7 +1734,7 @@ def _reject(doc, records, index: int, force: bool, reason: str) -> dict[str, Any
                 f"{sj.blocking_text(records, plan['blocking'])}; pass force=true"
             ),
         }
-    span, undo_why = _undo_trust(doc, records, index - 1, plan["undo_count"], gone)
+    span, undo_why = plan["undo"], plan["undo_why"]
     res = undo_n(doc, span)
     records = read_journal(doc)
     warnings: list[str] = []
@@ -1674,85 +1805,35 @@ def _reexecute(
         return {"success": False, "error": f"no step {index}"}
     if not rec.executable:
         return {"success": False, "error": f"step {index} ('{rec.operation}') is not re-executable"}
-    stale = stale_steps(doc, records)
-    refusal = _stale_refusal(stale, index - 1, f"re-running step {index}")
-    if refusal and not force:
-        return {"success": False, "error": refusal, "stale": stale}
-    gone = {s["index"] for s in stale if s["index"] >= index}
-    plan = sj.plan_rollback(records, index - 1, gone)
-    if plan["blocking"] and not force:
-        # force is honored here like _rollback and _reject honor it, and the
-        # message names it: the panel only offers a force retry when the error
-        # text says "force=true", so this dead end left the user with no way
-        # forward at all. The verification below still refuses if the undo
-        # cannot be trusted, and points at rollback_to.
+    # A re-run needs the model exactly at step index-1: the rollback's own
+    # verification (and its rebuild from the first wrong step) provides it,
+    # including when the user's edits sit on the undo stack. A partial restore
+    # is no base, so it is refused before anything is touched.
+    plan = rollback_plan(doc, records, index - 1)
+    if plan["mode"] == "partial":
         return {
             "success": False,
             "error": (
-                f"cannot re-run step {index}: non-atomic step(s) {plan['blocking']} sit in the "
-                "way; pass force=true to re-run anyway, or run rollback_to first"
+                f"cannot re-run step {index}: {'; '.join(plan['reasons'])}, and step(s) before "
+                "it cannot be re-run to rebuild the model; replay the journal or reject the step"
             ),
         }
-    if plan["accepted"] and not force:
-        return {
-            "success": False,
-            "error": (
-                f"re-running step {index} rolls back across accepted step(s) "
-                f"{plan['accepted']}; pass force=true"
-            ),
-        }
-    # Re-running a step is only sound on a clean base: if the undo came up
-    # short, popped the wrong transactions (off-journal edits on the stack), or
-    # was skipped as untrustworthy, re-running would duplicate objects under
-    # deduplicated names instead of failing. Verify the stack and object sets
-    # first and point at rollback_to, which can rebuild, instead.
-    #
-    # A span the stack cannot fully cover is a REFUSAL, not a partial undo:
-    # popping the reachable part and then bailing out would leave the document
-    # rolled back AND un-rerun, which is further from what the caller asked for
-    # than not touching it at all.
-    _span, undo_why = _undo_trust(doc, records, index - 1, plan["undo_count"], gone)
-    if undo_why:
-        return {
-            "success": False,
-            "error": (
-                f"cannot re-run step {index}: {undo_why}; "
-                "run rollback_to first, it can rebuild the model"
-            ),
-        }
-    res = undo_n(doc, plan["undo_count"])
+    after = sj.done_after_index(records, index)
+    back = _rollback(doc, records, index - 1, force)
+    if not back.get("success"):
+        error = str(back.get("error") or "")
+        if error.startswith(f"rolling back to step {index - 1}"):
+            error = f"re-running step {index}" + error[len(f"rolling back to step {index - 1}") :]
+        return {**back, "error": error or f"cannot re-run step {index}"}
     records = read_journal(doc)
-    if res["count"] < plan["undo_count"]:
-        return {
-            "success": False,
-            "error": (
-                f"only {res['count']}/{plan['undo_count']} transactions could be undone "
-                "(the FreeCAD undo stack was shorter than the journal); "
-                "run rollback_to first, it can rebuild the model"
-            ),
-        }
-    present = set(_object_names(doc))
-    leftover = sorted(set(sj.created_since(records, index - 1)) & present)
-    if leftover:
-        return {
-            "success": False,
-            "error": (
-                f"undo did not restore step {index - 1} cleanly: object(s) {leftover} from "
-                "later steps are still present (off-journal edits on the undo stack?); "
-                "run rollback_to first, it can rebuild the model"
-            ),
-        }
     rec = next((r for r in records if r.index == index), None)
     if rec is None:
         return {"success": False, "error": f"step {index} disappeared during rollback"}
-    extra = sj.done_after_index(records, index - 1)
-    if extra > 0:
-        sj.rewind(records, extra)
     rec.state = sj.STATE_PLANNED
-    # Its transaction was just undone (or rewound by the line above), so the
-    # record owns no undo entry until the re-run commits one: a stale name would
-    # sit in the journal as a transaction the stack cannot supply, which breaks
-    # the rollback trust check at that position.
+    # Its transaction was just undone, so the record owns no undo entry until
+    # the re-run commits one: a stale name would sit in the journal as a
+    # transaction the stack cannot supply, which breaks the rollback trust
+    # check at that position.
     rec.transaction = ""
     # Merged, not swapped: the step's params carry the user's synced edits,
     # and a caller passing {"obj_properties": {"reversed": true}} used to drop
@@ -1772,16 +1853,20 @@ def _reexecute(
         "count": len(records),
         "done": sj.done_count(records),
         "replaced": replaced,
+        "restored": back.get("restored"),
+        "removed": back.get("removed"),
+        "notes": back.get("notes") or [],
+        "warnings": back.get("warnings") or [],
     }
-    if extra > 0:
+    if after > 0:
         # A re-run happens on a clean base, so the steps after it are undone and
         # returned to `planned`. That is by design, but it used to happen
         # silently: the reply carried a done-count and nothing else, so a caller
         # watched its later model disappear (live: "the model was down to the
-        # first step").
-        out["rewound"] = extra
+        # first step"). The step itself is not one of them.
+        out["rewound"] = after
         note = (
-            f"re-running step {index} rolled the {extra} step(s) after it back to "
+            f"re-running step {index} rolled the {after} step(s) after it back to "
             "planned: their work is undone and they must be released again "
             "(step_control run_all or run_to)."
         )

@@ -153,6 +153,24 @@ def _op_label(spec: dict) -> str:
     return label
 
 
+def _doc_title(doc) -> str:
+    label = str(getattr(doc, "Label", "") or doc.Name)
+    return f"'{label}'" if label == doc.Name else f"'{label}' ({doc.Name})"
+
+
+def _plan_notes(plan: dict) -> str:
+    """What a rollback's dry run needs the user to know beyond its summary."""
+    notes = ""
+    if plan.get("accepted"):
+        notes += f"\nStep(s) {plan['accepted']} are accepted (reviewed)."
+    stale = [s for s in plan.get("stale") or [] if s["index"] in (plan.get("rerun") or [])]
+    if stale:
+        notes += "\nThis re-creates step(s) " + ", ".join(
+            f"{s['index']} ({s['reason']})" for s in stale
+        )
+    return notes
+
+
 def _row_text(rec) -> str:
     """Delegate: the display rules live in ``step_journal`` (pure, tested)."""
     return sj.row_text(rec)
@@ -787,9 +805,11 @@ QLabel#PanelStatus {{ color: {c["dim"]}; padding: 5px 8px 4px 8px; }}
             self._in_apply = False
         if res.get("success"):
             self._log(label, "ok")
-            # A rollback that rebuilt or only partially restored the model
-            # "succeeded" — the panel user clicked the button and got their
-            # answer, so without this the degradation notes stay invisible.
+            # A rebuild is a success and reads as one (dim); a partial restore
+            # or a forced break is a warning (red). Either way the panel user
+            # sees what the engine did, not just that it "succeeded".
+            for text in res.get("notes") or []:
+                self._log(text, "info")
             for text in res.get("warnings") or []:
                 self._log(text, "error")
         elif warn:
@@ -821,8 +841,13 @@ QLabel#PanelStatus {{ color: {c["dim"]}; padding: 5px 8px 4px 8px; }}
         doc = FreeCAD.ActiveDocument
         if not index or doc is None:
             return
-        plan = sj.plan_rollback(step_engine.read_journal(doc), index - 1)
-        if plan["undo_count"] == 0 and not (plan["blocking"] or plan["accepted"]):
+        plan = step_engine.rollback_plan(doc, step_engine.read_journal(doc), index - 1)
+        if (
+            plan["undo_count"] == 0
+            and not (plan["blocking"] or plan["accepted"])
+            and plan["mode"] == "native"
+            and not plan["remove"]
+        ):
             # undo_count counts only transaction-bearing records, so a range
             # holding a MUTATED non-atomic record (a legacy record, or steps
             # behind a snapshot) reads as "nothing to undo" here while the
@@ -831,12 +856,8 @@ QLabel#PanelStatus {{ color: {c["dim"]}; padding: 5px 8px 4px 8px; }}
             # through to _apply_maybe_force, which offers the force retry.
             self._warn(f"Nothing has been executed before step {index}.")
             return
-        text = (
-            f"Roll back to just before step {index}? "
-            f"This undoes {plan['undo_count']} transaction(s)."
-        )
-        if plan["accepted"]:
-            text += f"\nStep(s) {plan['accepted']} are accepted (reviewed)."
+        text = f"Roll back {_doc_title(doc)} to just before step {index}?\n\n{plan['summary']}"
+        text += _plan_notes(plan)
         if not self._confirm(text):
             return
         self._apply_maybe_force({"operation": "rollback_to", "index": index - 1})
@@ -852,13 +873,12 @@ QLabel#PanelStatus {{ color: {c["dim"]}; padding: 5px 8px 4px 8px; }}
         doc = FreeCAD.ActiveDocument
         if rec is None or doc is None:
             return
-        plan = sj.plan_reject(step_engine.read_journal(doc), rec.index)
+        plan = step_engine.reject_plan(doc, step_engine.read_journal(doc), rec.index)
         if plan is None:
             return
         text = (
-            f"Reject step {rec.index} and everything after it? "
-            f"{plan['undo_count']} transaction(s) will be undone and "
-            f"{len(plan['drop'])} step(s) forgotten."
+            f"Reject step {rec.index} of {_doc_title(doc)} and everything after it?\n\n"
+            f"{plan['summary']}"
         )
         if plan["accepted"]:
             text += f"\nThat includes accepted step(s) {plan['accepted']}."
@@ -868,6 +888,8 @@ QLabel#PanelStatus {{ color: {c["dim"]}; padding: 5px 8px 4px 8px; }}
                 f"\nStep(s) {sj.blocking_text(self._records, plan['blocking'])} "
                 "carry no transaction, so undo may revert the wrong change."
             )
+            force = True
+        if plan["user_dependents"]:
             force = True
         if not self._confirm(text):
             return
@@ -883,14 +905,15 @@ QLabel#PanelStatus {{ color: {c["dim"]}; padding: 5px 8px 4px 8px; }}
         doc = FreeCAD.ActiveDocument
         if doc is None:
             return
-        plan = sj.plan_rollback(step_engine.read_journal(doc), 0)
+        plan = step_engine.rollback_plan(doc, step_engine.read_journal(doc), 0)
         if plan["undo_count"] == 0 and not (plan["blocking"] or plan["accepted"]):
             self._warn("Nothing has been executed yet.")
             return
-        if not self._confirm(
-            f"Replay the journal from scratch? "
-            f"This undoes {plan['undo_count']} transaction(s) and re-runs every step."
-        ):
+        text = (
+            f"Replay the journal of {_doc_title(doc)} from scratch?\n\n{plan['summary']} "
+            "Then every step is re-run."
+        )
+        if not self._confirm(text + _plan_notes(plan)):
             return
         self._apply_maybe_force({"operation": "replay", "index": 0})
 

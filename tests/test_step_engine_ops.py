@@ -108,7 +108,13 @@ def test_removal_sets_come_from_record_diffs():
     the journal — the user's own work."""
     attrs = {n.attr for n in ast.walk(_ENGINE) if isinstance(n, ast.Attribute)}
     assert "extra_objects" not in attrs, "the whole-snapshot variant is the data-loss bug"
-    for fname in ("_rollback", "_reject", "_reexecute"):
+    reexecute = next(
+        n for n in ast.walk(_ENGINE) if isinstance(n, ast.FunctionDef) and n.name == "_reexecute"
+    )
+    assert "_rollback" in {n.id for n in ast.walk(reexecute) if isinstance(n, ast.Name)}, (
+        "_reexecute rolls back through _rollback, which owns the removal sets"
+    )
+    for fname in ("_rollback", "_reject"):
         func = next(
             n for n in ast.walk(_ENGINE) if isinstance(n, ast.FunctionDef) and n.name == fname
         )
@@ -314,12 +320,12 @@ def test_rollback_guards_undo_with_stack_check_and_replay_rewrites_doc_refs():
     rebuild path (the only one left after a reopen) cannot even start — the
     DeskFan.FCStd/ex-MideaDeskFan bug."""
     func = next(
-        n for n in ast.walk(_ENGINE) if isinstance(n, ast.FunctionDef) and n.name == "_rollback"
+        n for n in ast.walk(_ENGINE) if isinstance(n, ast.FunctionDef) and n.name == "rollback_plan"
     )
     assert any(
         isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id == "_undo_trust"
         for n in ast.walk(func)
-    ), "_rollback must verify how much of the undo stack holds the journal's transactions"
+    ), "rollback's plan must verify how much of the undo stack holds the journal's transactions"
     exec_one = next(
         n for n in ast.walk(_ENGINE) if isinstance(n, ast.FunctionDef) and n.name == "_execute_one"
     )

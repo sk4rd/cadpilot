@@ -91,6 +91,57 @@ def user(doc, body):
     raise RuntimeError(f"the simulated GUI edit {token} never ran")
 
 
+SHOTS = os.environ.get("CADPILOT_LIVE_SHOTS") or tempfile.mkdtemp(prefix="lj-shots-")
+
+
+def panel(doc, action, select=None, answer="No", shot=None):
+    """Press a Steps-panel button as the user would; answer the dialog it opens.
+
+    Returns the text of every dialog the button opened and the panel's last
+    log lines. ``shot`` saves the dialog (and the panel next to it) as PNGs.
+    """
+    shot_path = os.path.join(SHOTS, shot) if shot else ""
+    user(
+        doc,
+        f"""
+        import json, FreeCADGui
+        from PySide import QtCore, QtWidgets
+        from rpc_server import step_panel
+        FreeCAD.setActiveDocument({doc!r})
+        pn = step_panel.ensure_panel()
+        pn.setVisible(True)
+        pn._digest = None
+        pn.refresh()
+        tree = pn.tree
+        for i in range(tree.topLevelItemCount()):
+            if tree.topLevelItem(i).text(0) == str({select!r}):
+                tree.setCurrentItem(tree.topLevelItem(i))
+        seen = []
+        def answer():
+            w = QtWidgets.QApplication.activeModalWidget()
+            if w is None:
+                QtCore.QTimer.singleShot(50, answer)
+                return
+            seen.append(w.text() if hasattr(w, "text") else type(w).__name__)
+            if {shot_path!r}:
+                w.grab().save({shot_path!r})
+            for b in w.buttons():
+                if b.text().replace("&", "") == {answer!r}:
+                    b.click()
+                    return
+            w.reject()
+        QtCore.QTimer.singleShot(100, answer)
+        getattr(pn, {action!r}).trigger()
+        if {shot_path!r}:
+            pn.grab().save({shot_path!r}.replace(".png", "-panel.png"))
+        FreeCAD._cadpilot_live_panel = json.dumps(
+            {{"dialogs": seen, "log": [e["text"] for e in pn._entries[-6:]]}}
+        )
+        """,
+    )
+    return json.loads(py("import FreeCAD\nprint(FreeCAD._cadpilot_live_panel)", doc))
+
+
 def changes(doc):
     """The "User changes since your last call" block Claude's next reply leads with."""
     c.begin_tool_call()
@@ -109,11 +160,18 @@ def step_params(doc, op, nth=0):
     return recs[nth]["params"].get("obj_properties") or {}
 
 
-def cad(op, doc, name=None, desc="", **props):
+def cad(op, doc, name=None, desc="", obj_type=None, **props):
     text = "\n".join(
         x.text
         for x in ops.cad_operation(
-            c, op, doc, obj_name=name, obj_properties=props, description=desc, auto_audit=False
+            c,
+            op,
+            doc,
+            obj_type=obj_type,
+            obj_name=name,
+            obj_properties=props,
+            description=desc,
+            auto_audit=False,
         )
     )
     try:
@@ -412,6 +470,126 @@ check(
     res.get("success") and "Pocket" in objects,
     f"{res} {objects}",
 )
+
+# --- J: rollback and reject never break the user's own feature silently -------
+D = "LJ_Own"
+plate(D)
+user(
+    D,
+    """
+    body = d.getObject('Body'); pk = d.getObject('Pocket')
+    edges = [f'Edge{i + 1}' for i, e in enumerate(pk.Shape.Edges)
+             if abs(e.BoundBox.ZMin - 8) < 1e-6 and abs(e.BoundBox.ZMax - 8) < 1e-6
+             and e.Curve.TypeId == 'Part::GeomLine']
+    d.openTransaction('Chamfer')
+    ch = body.newObject('PartDesign::Chamfer', 'UserChamfer')
+    ch.Base = (pk, edges)
+    ch.Size = 1
+    d.commitTransaction(); d.recompute()
+    """,
+)
+text = changes(D)
+check(
+    "J Claude is told about the user's chamfer",
+    "added UserChamfer (PartDesign::Chamfer)" in text,
+    text,
+)
+cad("edit_object", D, "Vars", desc="rename vars", Label="Params")
+before = py(
+    "import FreeCAD\nprint(sorted(o.Name for o in FreeCAD.getDocument('LJ_Own').Objects))", D
+)
+dry = control(D, "rollback_to", index=3, params={"dry_run": True})
+check(
+    "J the dry run names the user's object it would break",
+    dry.get("dry_run")
+    and dry.get("user_dependents") == ["UserChamfer"]
+    and "UserChamfer" in dry.get("summary", ""),
+    str({k: dry.get(k) for k in ("mode", "remove", "user_dependents", "summary", "error")}),
+)
+res = control(D, "rollback_to", index=3)
+check(
+    "J a rollback under the user's feature refuses without force",
+    not res.get("success") and "UserChamfer" in str(res.get("error")),
+    str(res),
+)
+res = control(D, "reject", index=4)
+check(
+    "J a reject under it refuses too",
+    not res.get("success") and "UserChamfer" in str(res.get("error")),
+    str(res),
+)
+out = panel(D, "act_reject", select=4, answer="No", shot="reject-dialog.png")
+check(
+    "J the panel's reject dialog names the document, the dry run and the user's object",
+    out["dialogs"] and "'LJ_Own'" in out["dialogs"][0] and "UserChamfer" in out["dialogs"][0],
+    str(out),
+)
+out = panel(D, "act_rollback", select=5, answer="No", shot="rollback-dialog.png")
+check(
+    "J the rollback dialog shows the dry run instead of a transaction count",
+    out["dialogs"] and "transaction(s)" in out["dialogs"][0] and "UserChamfer" in out["dialogs"][0],
+    str(out),
+)
+after = py(
+    "import FreeCAD\nprint(sorted(o.Name for o in FreeCAD.getDocument('LJ_Own').Objects))", D
+)
+valid = py(
+    "import FreeCAD\nprint(FreeCAD.getDocument('LJ_Own').getObject('UserChamfer').isValid())", D
+)
+check(
+    "J nothing was removed and the chamfer is intact",
+    before == after and valid == "True",
+    f"{before} {after} {valid}",
+)
+changes(D)
+
+# --- K: a rebuild starts at the first wrong step, not at step 1 ----------------
+D = "LJ_Rebuild"
+fresh(D)
+cad("variables", D, "Vars", cells={"A1": ["w", 10]})
+cad("create_object", D, "Box", obj_type="Part::Box", Length=10)
+cad("create_object", D, "Cyl", obj_type="Part::Cylinder")
+cad("edit_object", D, "Box", Length=30)
+user(
+    D,
+    "d.getObject('Vars').Label2 = 'kept'\n"
+    "d.openTransaction('mine'); d.addObject('Part::Sphere', 'Mine'); d.commitTransaction()",
+)
+res = control(D, "rollback_to", index=3)
+state = py(
+    "import FreeCAD\nd = FreeCAD.getDocument('LJ_Rebuild')\n"
+    "print(d.getObject('Vars').Label2, d.getObject('Box').Length.Value, "
+    "sorted(o.Name for o in d.Objects))",
+    D,
+)
+check(
+    "K the edit the undo could not reach is rebuilt from the Box's own step",
+    res.get("success") and res.get("restored") == "rebuild" and res.get("rebuild_from") == 2,
+    str({k: res.get(k) for k in ("success", "restored", "rebuild_from", "removed", "error")}),
+)
+check(
+    "K steps before it and the user's own object are untouched",
+    state == "kept 10.0 ['Box', 'Cyl', 'Mine', 'Vars']",
+    state,
+)
+
+# --- E2: a re-run with the user's own edit on top of the undo stack ------------
+D = "LJ_Rerun"
+fresh(D)
+cad("create_object", D, "Lid", obj_type="Part::Box", Length=30, Width=20, Height=4)
+user(D, "d.openTransaction('wider'); d.getObject('Lid').Width = 25; d.commitTransaction()")
+res = control(D, "reexecute", index=1, params={"obj_properties": {"Height": 8}})
+dims = py(
+    "import FreeCAD\nb = FreeCAD.getDocument('LJ_Rerun').getObject('Lid')\n"
+    "print(b.Length.Value, b.Width.Value, b.Height.Value)",
+    D,
+)
+check(
+    "E2 a re-run rebuilds past the user's edit and keeps it",
+    res.get("success") and dims == "30.0 25.0 8.0",
+    f"{dims} {res.get('error')} {res.get('restored')}",
+)
+changes(D)
 
 # --- C: opening a saved file is not a burst of manual edits -------------------
 D = "LJ_Open"

@@ -573,12 +573,16 @@ Review loop (the point of the panel: plan, release, review, fix):
 Housekeeping:
   rollback_to   put the model back at step `index` (0 = before every recorded
                 step); records stay and go back to planned. The undo result is
-                VERIFIED, not assumed: when the undo stack cannot reach the
-                target (or manual edits sit interleaved on it) the journal
-                REBUILDS instead — removes what the journal built, re-runs
-                steps 1..index — and reports `restored: native | rebuild |
-                partial` plus `warnings`; objects that predate the journal
-                are never removed
+                VERIFIED, not assumed: what the undo stack cannot reach is
+                removed directly when those steps only created objects, and
+                otherwise REBUILT from the first wrong step (never from step
+                1); the reply says `restored: native | removed | rebuild |
+                partial`, `rebuild_from`, `removed`, `notes` and `warnings`.
+                params.dry_run=true returns that plan without acting (also for
+                reject). Objects that predate the journal are never removed,
+                and when the user's own objects depend on what would go away
+                (`user_dependents`) rollback and reject refuse without
+                force=true
   insert        add steps (params.steps) after `index`; the planned tail is
                 insert/append-only — to change history, reject and re-plan
   clear_plan    drop not-yet-executed steps (never touches the model)

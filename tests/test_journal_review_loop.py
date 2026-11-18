@@ -419,3 +419,60 @@ def test_creator_of_names_the_step_that_built_an_object():
     assert sj.creator_of(_chain(), "Pocket").index == 4
     assert sj.creator_of(_chain(), "Body").index == 2
     assert sj.creator_of(_chain(), "UserChamfer") is None
+
+
+# --- what a rollback will do ---------------------------------------------------
+
+
+def _plate_chain():
+    recs = _chain()
+    recs.append(
+        _done(
+            5,
+            "edit_object",
+            ["Body", "Pad", "Pocket", "Profile", "Vars"],
+            ["Body", "Pad", "Pocket", "Profile", "Vars"],
+            params={"obj_name": "Pad"},
+        )
+    )
+    return recs
+
+
+ALL = ["Body", "Pad", "Pocket", "Profile", "Vars"]
+
+
+def test_a_clean_stack_rolls_back_natively():
+    plan = sj.plan_restore(_plate_chain(), 3, 2, ALL)
+    assert plan["mode"] == "native" and plan["undo"] == 2
+    assert plan["remove"] == [] and plan["undone_objects"] == ["Pocket"]
+
+
+def test_a_short_stack_rebuilds_from_the_first_wrong_step_not_from_one():
+    # Only the edit's transaction can be undone; the pocket (step 4) cannot,
+    # so its Pocket is a leftover and nothing before it needs re-running.
+    plan = sj.plan_restore(_chain(), 3, 0, ALL)
+    assert plan["mode"] == "removed" and plan["remove"] == ["Pocket"] and plan["unreached"] == [4]
+    edited = _plate_chain()
+    edited[4].params = {"code": "..."}
+    edited[4].operation = "execute_code"
+    assert sj.plan_restore(edited, 4, 0, ALL)["mode"] == "partial"
+    # An edit the undo cannot reach changed the Pad: rebuild from the pad.
+    plan = sj.plan_restore(_plate_chain(), 4, 0, ALL)
+    assert plan["mode"] == "rebuild" and plan["rebuild_from"] == 3 and plan["rerun"] == [3, 4]
+    assert plan["remove"] == ["Pad", "Pocket"]
+
+
+def test_an_object_the_user_deleted_is_rebuilt_from_its_own_step():
+    present = ["Body", "Pad", "Profile", "Vars", "Pocket"]
+    present.remove("Pad")
+    plan = sj.plan_restore(_chain(), 4, 0, present, stale={3})
+    assert plan["mode"] == "rebuild" and plan["rebuild_from"] == 3
+    assert "Body" not in plan["remove"] and "Vars" not in plan["remove"]
+
+
+def test_the_dry_run_reads_as_what_will_happen():
+    plan = sj.plan_restore(_plate_chain(), 4, 0, ALL)
+    text = sj.restore_summary(plan, ["UserChamfer"])
+    assert text.startswith("Then rebuild from step 3: remove 2 object(s) and re-run step(s) 3..4.")
+    assert "UserChamfer" in text
+    assert sj.restore_summary(sj.plan_restore(_chain(), 4, 0, ALL), []) == "Nothing to undo."

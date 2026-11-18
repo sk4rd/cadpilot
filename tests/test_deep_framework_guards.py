@@ -264,10 +264,12 @@ def test_a_capped_undo_stack_is_not_a_reopened_document():
         "the short-stack message must name FreeCAD's undo cap, not blame a reopen"
     )
     # The span, not a yes/no: rollback must pop exactly what the stack holds.
-    rollback = _func(ENGINE, "_rollback")
-    assert "span" in _names(rollback) and "_undo_trust" in _names(rollback), (
-        "_rollback must undo the span the stack really holds"
+    # The dry run (rollback_plan) decides it, and _rollback acts on that plan.
+    plan = _func(ENGINE, "rollback_plan")
+    assert "span" in _names(plan) and "_undo_trust" in _names(plan), (
+        "rollback_plan must undo the span the stack really holds"
     )
+    assert "rollback_plan" in _names(_func(ENGINE, "_rollback"))
 
 
 def test_every_transaction_activates_its_own_document():
@@ -466,7 +468,9 @@ def test_native_rollback_replans_failed_records():
     then Next skipped the failed pocket and pattern and ran the move and batch
     steps on a part missing both)."""
     rollback = ast.unparse(_func(ENGINE, "_rollback"))
-    assert "replan_failed" in rollback, "a rollback must re-plan failed records"
+    assert "_rewind_after" in rollback and "replan_failed" in ast.unparse(
+        _func(ENGINE, "_rewind_after")
+    ), "a rollback must re-plan failed records"
     assert "replanned" in rollback, "and report which ones it re-planned"
     # The rebuild branch keeps its own reset (it also clears object state), and
     # the failed state must be part of that set too.
@@ -517,8 +521,11 @@ def test_reexecute_honors_force_and_names_the_way_out():
     rollback and reject paths honor it), and its message said neither
     "force=true" nor "rollback_to" — the panel only offers a force retry when
     the error text contains "force=true", so "Save & re-run" ended in a dead end
-    with no recovery offered."""
-    body = ast.unparse(_func(_tree("step_engine.py"), "_reexecute"))
+    with no recovery offered. A re-run now rolls back through _rollback (which
+    can rebuild), so its refusals are the rollback's."""
+    engine = _tree("step_engine.py")
+    assert "_rollback(doc, records, index - 1, force)" in ast.unparse(_func(engine, "_reexecute"))
+    body = ast.unparse(_func(engine, "_rollback"))
     assert "plan['blocking']" in body and "not force" in body, "force must be honored here"
     assert "force=true" in body, "the refusal must name the way out"
 
