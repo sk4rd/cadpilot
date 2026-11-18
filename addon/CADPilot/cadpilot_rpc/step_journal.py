@@ -829,6 +829,9 @@ def build_record(
     )
 
 
+_PENDING = (STATE_PLANNED, STATE_FAILED)
+
+
 def planned_tail_start(records: list[StepRecord]) -> int:
     """Index of the first record in the trailing run of ``planned`` records."""
     n = len(records)
@@ -860,25 +863,31 @@ def insert_before_plan(records: list[StepRecord], rec: StepRecord) -> int:
     stack does: rollback trusts the stack only when the two agree. Dropping the
     plan instead threw away every planned step without telling anyone (live: a
     snippet that only called sketch.solve() wiped a 9-step plan).
+
+    A FAILED step is still pending (``next_runnable`` retries it), so the new step
+    goes before it too: the usual fix for a failed step is a cad() call that
+    creates what it was missing, and recording that fix BEHIND the failure left
+    the journal saying the sketch ran before the Body it needs, which no replay
+    could reproduce.
     """
-    first = next((i for i, r in enumerate(records) if r.state == STATE_PLANNED), None)
+    first = next((i for i, r in enumerate(records) if r.state in _PENDING), None)
     if first is None:
         records.append(rec)
         return 0
     records.insert(first, rec)
-    return sum(1 for r in records[first + 1 :] if r.state == STATE_PLANNED)
+    return sum(1 for r in records[first + 1 :] if r.state in _PENDING)
 
 
 def plan_shift_note(records: list[StepRecord], rec: StepRecord, moved: int) -> str:
     """What the caller must know after insert_before_plan moved planned steps on."""
     if not moved:
         return ""
-    planned = [i + 1 for i, r in enumerate(records) if r.state == STATE_PLANNED]
+    pending = [i + 1 for i, r in enumerate(records) if r.state in _PENDING]
     where = next(i + 1 for i, r in enumerate(records) if r is rec)
-    span = f"{planned[0]}-{planned[-1]}" if len(planned) > 1 else str(planned[0])
+    span = f"{pending[0]}-{pending[-1]}" if len(pending) > 1 else str(pending[0])
     return (
         f"step {where} ({rec.label or rec.operation}) was recorded before the {moved} planned "
-        f"step(s), which kept their order and are now steps {span}: use the new numbers."
+        f"or failed step(s), which kept their order and are now steps {span}: use the new numbers."
     )
 
 
@@ -1211,13 +1220,15 @@ def stale_steps(
 
 
 def drop_step(records: list[StepRecord], index: int) -> StepRecord | None:
-    """Forget one done step without touching the model; None = no such done step.
+    """Forget one step without touching the model; None = no such step to drop.
 
-    For the user's undo or deletion of a step's work: the model already lost
-    it, so the journal follows instead of re-creating it on the next rollback.
+    For the user's undo or deletion of a done step's work: the model already lost
+    it, so the journal follows instead of re-creating it on the next rollback. A
+    planned or failed step has no work in the model, so dropping it only takes it
+    off the list.
     """
     rec = next((r for r in records if r.index == index), None)
-    if rec is None or rec.state != STATE_DONE:
+    if rec is None or rec.state not in (STATE_DONE, *_PENDING):
         return None
     records.remove(rec)
     reindex(records)

@@ -1119,10 +1119,11 @@ def _apply_op(doc, spec: dict[str, Any]) -> dict[str, Any]:
     if operation == "drop":
         index = int(spec.get("index") or 0)
         stale = {s["index"]: s for s in stale_steps(doc, records)}
-        rec = next((r for r in records if r.index == index and r.state == sj.STATE_DONE), None)
-        if rec is None:
-            return {"success": False, "error": f"no done step {index} to drop"}
-        if index not in stale and not spec.get("force"):
+        rec = next((r for r in records if r.index == index), None)
+        if rec is None or rec.state not in (sj.STATE_DONE, sj.STATE_PLANNED, sj.STATE_FAILED):
+            return {"success": False, "error": f"no step {index} to drop"}
+        pending = rec.state != sj.STATE_DONE
+        if not pending and index not in stale and not spec.get("force"):
             return {
                 "success": False,
                 "error": (
@@ -1138,7 +1139,9 @@ def _apply_op(doc, spec: dict[str, Any]) -> dict[str, Any]:
             "success": True,
             "dropped": index,
             "label": rec.label,
-            "reason": stale.get(index, {}).get("reason", "forced"),
+            "reason": f"it was {rec.state}, so nothing in the model changes"
+            if pending
+            else stale.get(index, {}).get("reason", "forced"),
             "count": len(records),
         }
     if operation == "accept":

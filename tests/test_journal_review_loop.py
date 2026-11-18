@@ -424,9 +424,36 @@ def test_dropping_accepts_the_users_change():
         (2, "sketch"),
         (3, "pocket"),
     ]
-    planned = sj.StepRecord(index=4, state=sj.STATE_PLANNED, operation="fillet")
-    recs.append(planned)
-    assert sj.drop_step(recs, 4) is None
+    assert sj.drop_step(recs, 9) is None
+
+
+def test_dropping_a_planned_or_failed_step_takes_it_off_the_list():
+    recs = _chain()
+    recs.append(sj.StepRecord(index=5, state=sj.STATE_FAILED, operation="fillet"))
+    recs.append(sj.StepRecord(index=6, state=sj.STATE_PLANNED, operation="chamfer"))
+    assert sj.drop_step(recs, 5).operation == "fillet"
+    assert sj.drop_step(recs, 5).operation == "chamfer"
+    assert [r.operation for r in recs][-1] == "pocket"
+
+
+def test_a_step_recorded_after_a_failure_goes_before_it():
+    """The fix for a failed step (the Body it needed) must replay before it."""
+    recs = [
+        sj.StepRecord(index=1, state=sj.STATE_DONE, operation="variables"),
+        sj.StepRecord(index=2, state=sj.STATE_FAILED, operation="sketch"),
+        sj.StepRecord(index=3, state=sj.STATE_PLANNED, operation="pad"),
+    ]
+    body = sj.StepRecord(index=0, state=sj.STATE_DONE, operation="create_object")
+    assert sj.insert_before_plan(recs, body) == 2
+    sj.reindex(recs)
+    assert [(r.operation, r.state) for r in recs] == [
+        ("variables", "done"),
+        ("create_object", "done"),
+        ("sketch", "failed"),
+        ("pad", "planned"),
+    ]
+    assert sj.next_runnable(recs).operation == "sketch"
+    assert "steps 3-4" in sj.plan_shift_note(recs, body, 2)
 
 
 def test_a_stale_step_claims_no_undo():

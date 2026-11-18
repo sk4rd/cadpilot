@@ -697,9 +697,10 @@ the CADPilot Steps panel; `description` becomes the panel's plan title, and a
 per-step `description` becomes its row label — write both for the human
 watching the panel (see operation_help("step_labels") for how to word them).
 Nothing touches the model until a step is released — by
-the user clicking Next in the panel, or via step_control. A new cad() call
-discards whatever part of the plan has not run yet, because it was planned
-against a document state that no longer exists.
+the user clicking Next in the panel, or via step_control. A cad() call made
+while a plan is pending runs at once and is recorded before the planned and
+failed steps, which keep their order (the reply gives their new numbers); a
+new step_plan replaces the planned steps.
 
 Batch steps work too: {"operation": "batch", "ops": [...]} runs the ops in one
 transaction as one step.
@@ -740,7 +741,8 @@ Review loop (the point of the panel: plan, release, review, fix):
                 accepts that (a rollback or replay would re-create it).
                 Refused for a step that is still in the model unless
                 force=true. `status` lists such steps under `stale`, and
-                `drift` is true while any exist
+                `drift` is true while any exist. A planned or failed step
+                has no work in the model, so drop just takes it off the list
   update        edit a PLANNED/FAILED step without running it: params
                 deep-merge (send only what changes; a null value removes
                 the key; the reply's `replaced` lists the keys whose values
