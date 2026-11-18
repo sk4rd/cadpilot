@@ -117,6 +117,12 @@ class FakeFreeCADConnection:
             },
         )
 
+    def open_document(self, path):
+        self._record("open_document", path)
+        name = path.rsplit("/", 1)[-1].removesuffix(".FCStd")
+        self.documents.append(name)
+        return self._result("open_document", {"success": True, "document_name": name, "file": path})
+
     def create_document(self, name, screenshot=None):
         self._record("create_document", name, screenshot=screenshot)
         self.documents.append(name)

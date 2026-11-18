@@ -147,6 +147,27 @@ check(
     f"{entry} volume={volume}",
 )
 
+# --- save to a new folder, close, open again --------------------------------------
+target = os.path.join(os.environ.get("TMPDIR", "/tmp"), "cadpilot-live", "nested", "Workflow.FCStd")
+reply = text(ops.save_document_operation(c, DOC, target))
+check(
+    "save_document saves to a new folder",
+    "Saved document" in reply and os.path.isfile(target),
+    reply,
+)
+c.execute_code(f"import FreeCAD; FreeCAD.closeDocument('{DOC}')")
+reply = text(ops.open_document_operation(c, target))
+# a reopened file is named after the file, not after the document it was saved from
+out = c.execute_code("print(round(App.getDocument('Workflow').getObject('Body').Shape.Volume, 3))")
+volume = out.get("message", "").split("Output:")[-1].strip()
+check(
+    "open_document brings it back",
+    "Opened" in reply and volume == "3000.0",
+    f"{reply} volume={volume}",
+)
+reply = text(ops.open_document_operation(c, target))
+check("opening it again switches to it", "already open" in reply, reply)
+
 print()
 if FAILURES:
     print(f"{len(FAILURES)} FAILURE(S):")

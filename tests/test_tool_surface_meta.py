@@ -36,6 +36,8 @@ _MUTATING = {
     # the same tool as the report because the blocker is what the report names.
     "diagnose",
     "create_document",
+    "open_document",
+    "save_document",
     "cad",
     "execute_code",
     "execute_code_async",

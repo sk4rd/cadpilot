@@ -42,8 +42,10 @@ from .operations import (
     late_completions_text,
     list_documents_operation,
     measure_geometry_operation,
+    open_document_operation,
     operation_help_operation,
     recall_patterns_operation,
+    save_document_operation,
     save_pattern_operation,
     session_action_operation,
     set_anchors_operation,
@@ -246,6 +248,29 @@ def create_document(
         get_freecad_connection(),
         name,
     )
+
+
+@mcp.tool(annotations=_mutating("Open Document", destructive=False))
+@_reports_user_changes
+def open_document(ctx: Context, path: Annotated[str, Field(min_length=1)]) -> list[TextContent]:
+    """Open a saved .FCStd file, or switch to it if it is open.
+
+    Args:
+        path: The file (~ is expanded).
+    """
+    return open_document_operation(get_freecad_connection(), path)
+
+
+@mcp.tool(annotations=_mutating("Save Document"))
+@_reports_user_changes
+def save_document(ctx: Context, doc_name: str, path: str | None = None) -> list[TextContent]:
+    """Save a document.
+
+    Args:
+        doc_name: The document's name.
+        path: A new .FCStd path; needed the first time.
+    """
+    return save_document_operation(get_freecad_connection(), doc_name, path)
 
 
 @mcp.tool(annotations=_mutating("CAD Modeling Operation"))

@@ -206,6 +206,34 @@ def create_document_operation(
         return text_response(f"Failed to create document: {e!s}")
 
 
+def open_document_operation(freecad: FreeCADConnection, path: str) -> ToolResponse:
+    try:
+        res = freecad.open_document(path)
+        if res.get("success"):
+            _set_last_doc(res["document_name"])
+            again = " (it was already open)" if res.get("already_open") else ""
+            return text_response(
+                f"Opened '{res['file']}' as document '{res['document_name']}'{again}"
+            )
+        return text_response(f"Failed to open document: {res.get('error')}")
+    except Exception as e:
+        logger.error(f"Failed to open document: {e!s}")
+        return text_response(f"Failed to open document: {e!s}")
+
+
+def save_document_operation(
+    freecad: FreeCADConnection, doc_name: str, path: str | None = None
+) -> ToolResponse:
+    try:
+        res = freecad.save_document(doc_name, path)
+        if res.get("success"):
+            return text_response(f"Saved document '{doc_name}' to '{res['file_name']}'")
+        return text_response(f"Failed to save document: {res.get('error')}")
+    except Exception as e:
+        logger.error(f"Failed to save document: {e!s}")
+        return text_response(f"Failed to save document: {e!s}")
+
+
 def create_object_operation(
     freecad: FreeCADConnection,
     doc_name: str,

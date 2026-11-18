@@ -1184,7 +1184,9 @@ class FreeCADRPC:
                 return f"Document '{doc_name}' not found."
             try:
                 if path:
-                    doc.saveAs(path)
+                    target = os.path.abspath(os.path.expanduser(path))
+                    os.makedirs(os.path.dirname(target), exist_ok=True)
+                    doc.saveAs(target)
                 else:
                     if not doc.FileName:
                         return f"Document '{doc_name}' has never been saved; provide a path."
@@ -1893,6 +1895,35 @@ class FreeCADRPC:
         return _last_screenshot_error
 
     # --- GUI-thread handlers --------------------------------------------------
+
+    def open_document(self, path: str):
+        return self._run_op_with_screenshot(
+            lambda: self._open_document_gui(path),
+            {"success": True},
+            None,
+            doc_name=None,
+            transaction=None,
+        )
+
+    def _open_document_gui(self, path):
+        path = os.path.abspath(os.path.expanduser(path))
+        if not os.path.isfile(path):
+            return {"success": False, "error": f"no such file: {path}"}
+        for doc in FreeCAD.listDocuments().values():
+            if (
+                doc.FileName
+                and os.path.exists(doc.FileName)
+                and os.path.samefile(doc.FileName, path)
+            ):
+                FreeCAD.setActiveDocument(doc.Name)
+                return {
+                    "success": True,
+                    "document_name": doc.Name,
+                    "file": doc.FileName,
+                    "already_open": True,
+                }
+        doc = FreeCAD.openDocument(path)
+        return {"success": True, "document_name": doc.Name, "file": doc.FileName}
 
     def _create_document_gui(self, name):
         doc = FreeCAD.newDocument(name)

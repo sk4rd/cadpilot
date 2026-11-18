@@ -350,6 +350,9 @@ class FreeCADConnection:
     ) -> dict[str, Any]:
         return self._invoke_with_screenshot("create_document", name, screenshot=screenshot)
 
+    def open_document(self, path: str) -> dict[str, Any]:
+        return self._invoke("open_document", path)
+
     def create_object(
         self,
         doc_name: str,
