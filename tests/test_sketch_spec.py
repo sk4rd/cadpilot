@@ -301,3 +301,30 @@ def test_unit_values_reach_the_datum_in_internal_units():
         ValueError, match=r"constraints\[0\] \(radius\): value '-3 mm': a radius must be"
     ):
         _plan({"type": "radius", "items": [0], "value": "-3 mm"})
+
+
+def test_constraint_names_are_identifiers_and_unique():
+    with pytest.raises(ValueError, match=r"constraints\[0\] \(distance\): name 'bad name'"):
+        _plan({"type": "distance", "items": [0], "value": 5, "name": "bad name"})
+    with pytest.raises(
+        ValueError,
+        match=r"constraints\[1\] \(radius\): name 'W' is already used by constraints\[0\]",
+    ):
+        _plan(
+            {"type": "distance", "items": [0], "value": 5, "name": "W"},
+            {"type": "radius", "items": [1], "value": 5, "name": "W"},
+        )
+    with pytest.raises(ValueError, match=r"'W' is already used by Constraints\[4\]"):
+        ss.plan_constraints(
+            [{"type": "distance", "items": [0], "value": 5, "name": "W"}],
+            taken={"W": "Constraints[4]"},
+        )
+
+
+def test_unnamed_dimensions_are_listed_once_per_entry():
+    plans = _plan(
+        {"type": "horizontal", "items": [0]},
+        {"type": "distance", "items": [0], "value": 5, "name": "Len"},
+        {"type": "radius", "items": [1, 2], "value": 5},
+    )
+    assert ss.unnamed_dimensions(plans) == ["constraints[2] (radius)"]

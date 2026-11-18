@@ -328,7 +328,23 @@ def datum(ctype: str, value: Any) -> tuple[float, str | None]:
     return number, None
 
 
-def plan_constraints(constraints: list | None, kinds: dict | None = None) -> list[dict]:
+_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+
+def check_name(name: Any) -> str:
+    """A constraint name usable in an expression (``Sketch.Constraints.<name>``)."""
+    text = str(name)
+    if not _NAME.fullmatch(text):
+        raise ValueError(
+            f"name {text!r} must be an identifier (letters, digits, '_'; not starting with a "
+            "digit) so expressions can reference it as <Sketch>.Constraints.<name>"
+        )
+    return text
+
+
+def plan_constraints(
+    constraints: list | None, kinds: dict | None = None, taken: dict | None = None
+) -> list[dict]:
     """The spec's constraint list -> one planned entry per Sketcher constraint.
 
     An entry can expand into several (see :func:`constraint_args`); each keeps
@@ -338,10 +354,13 @@ def plan_constraints(constraints: list | None, kinds: dict | None = None) -> lis
     datum), ``datum`` (None for a geometric constraint), ``expr`` (to bind
     after adding), ``name``, and ``entry``/``type`` (the spec index and type it
     came from).
-    ``kinds`` (see :func:`geometry_kinds`) validates every GeoId and point.
+    ``kinds`` (see :func:`geometry_kinds`) validates every GeoId and point;
+    ``taken`` maps names already in the sketch to where they are, so a
+    duplicate is refused before FreeCAD's bare "Duplicate constraint".
     Raises ValueError naming the offending entry.
     """
     planned = []
+    names = dict(taken or {})
     for i, c in enumerate(constraints or []):
         if not isinstance(c, dict):
             raise ValueError(f"constraints[{i}] must be a dict, got {c!r}")
@@ -369,7 +388,15 @@ def plan_constraints(constraints: list | None, kinds: dict | None = None) -> lis
             if value is not None:
                 raise ValueError(f"{where}: geometric constraint takes no 'value'.")
             value_datum, expr = None, None
-        name = str(c["name"]) if c.get("name") else None
+        name = None
+        if c.get("name") not in (None, ""):
+            try:
+                name = check_name(c["name"])
+            except ValueError as e:
+                raise ValueError(f"{where}: {e}") from e
+            if name in names:
+                raise ValueError(f"{where}: name {name!r} is already used by {names[name]}")
+            names[name] = f"constraints[{i}]"
         if name and ctype not in DIMENSIONAL and len(all_args) > 1:
             raise ValueError(
                 f"{where}: one name cannot label the {len(all_args)} constraints these items "
@@ -388,6 +415,17 @@ def plan_constraints(constraints: list | None, kinds: dict | None = None) -> lis
                 }
             )
     return planned
+
+
+def unnamed_dimensions(planned: list[dict]) -> list[str]:
+    """Spec entries whose dimension has no name, so a user cannot find it by name."""
+    out = []
+    for plan in planned:
+        if plan["datum"] is not None and not plan["name"]:
+            label = f"constraints[{plan['entry']}] ({plan['type']})"
+            if label not in out:
+                out.append(label)
+    return out
 
 
 def origin_of(plan: dict) -> dict:

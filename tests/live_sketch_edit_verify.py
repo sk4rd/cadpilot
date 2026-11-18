@@ -282,12 +282,61 @@ def m4_unit_strings_are_values():
     )
 
 
+def m6_names_are_checked_and_reported():
+    doc = "SkNames"
+    newdoc(doc)
+    geo = [LINE([0, 0], [10, 0]), {"type": "circle", "center": [5, 5], "radius": 2}]
+    res = cad(
+        "sketch",
+        doc,
+        None,
+        geometry=geo,
+        constraints=[
+            {"type": "distance", "items": [0], "value": 10, "name": "W"},
+            {"type": "radius", "items": [1], "value": 2, "name": "W"},
+        ],
+    )
+    check(
+        "m6 a duplicate name names both constraint indices",
+        "constraints[1] (radius): name 'W' is already used by constraints[0]" in err(res),
+        err(res),
+    )
+    res = cad(
+        "sketch",
+        doc,
+        None,
+        geometry=geo,
+        constraints=[{"type": "distance", "items": [5], "value": 10, "name": "W"}],
+    )
+    check(
+        "m6 a bad GeoId names the constraint index",
+        "constraints[0] (distance): GeoId 5 does not exist" in err(res),
+        err(res),
+    )
+    res = cad(
+        "sketch",
+        doc,
+        None,
+        geometry=geo,
+        constraints=[
+            {"type": "distance", "items": [0], "value": 10, "name": "W"},
+            {"type": "radius", "items": [1], "value": 2},
+        ],
+    )
+    check(
+        "m6 the reply lists unnamed dimensions",
+        res.get("unnamed_dimensions") == ["constraints[1] (radius)"],
+        str(res),
+    )
+
+
 CHECKS = [
     m1_diagnostics_name_the_spec_entry,
     m7_lists_expand_into_one_constraint_per_item,
     m1_new_constraint_types_solve,
     m2_m3_m8_points_follow_the_geometry,
     m4_unit_strings_are_values,
+    m6_names_are_checked_and_reported,
 ]
 
 if __name__ == "__main__":

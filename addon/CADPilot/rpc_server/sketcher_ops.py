@@ -207,10 +207,15 @@ def _geometry_kinds(sketch) -> dict:
     )
 
 
-def _add_constraints(sketch, constraints: list) -> list[dict]:
-    """Add the spec's constraints; returns their origins, indexed like Constraints."""
+def _add_constraints(sketch, constraints: list) -> tuple[list, list]:
+    """Add the spec's constraints.
+
+    Returns (origins indexed like Constraints, unnamed dimensional entries).
+    """
     origins = [None] * len(sketch.Constraints)
-    for plan in sketch_spec.plan_constraints(constraints, _geometry_kinds(sketch)):
+    taken = {k.Name: f"Constraints[{i}]" for i, k in enumerate(sketch.Constraints) if k.Name}
+    planned = sketch_spec.plan_constraints(constraints, _geometry_kinds(sketch), taken)
+    for plan in planned:
         args = plan["args"]
         if plan["datum"] is None:
             con = Sketcher.Constraint(*args)
@@ -227,7 +232,7 @@ def _add_constraints(sketch, constraints: list) -> list[dict]:
                     f"constraints[{plan['entry']}] ({plan['type']}): expression binding failed: {e}"
                 ) from e
         origins.append(sketch_spec.origin_of(plan))
-    return origins
+    return origins, sketch_spec.unnamed_dimensions(planned)
 
 
 # --- attachment -----------------------------------------------------------------
@@ -566,7 +571,7 @@ def build_sketch_gui(doc, spec):
     _attach_sketch(sketch, doc, spec)
     _add_geometry(sketch, geometry, spec.get("construction"))
     _add_external(sketch, doc, body, spec.get("external"))
-    origins = _add_constraints(sketch, spec.get("constraints"))
+    origins, unnamed = _add_constraints(sketch, spec.get("constraints"))
     doc.recompute()
     dof, diag = _solve(sketch, origins)
 
@@ -580,6 +585,8 @@ def build_sketch_gui(doc, spec):
         "external_count": len(spec.get("external") or []),
         "diagnostics": diag or None,
     }
+    if unnamed:
+        _LAST_SKETCH_INFO["unnamed_dimensions"] = unnamed
     if _LAST_ATTACHMENT:
         # Which face/plane the sketch actually landed on, with its center and
         # normal — a direction token on a stepped part picks the FARTHEST face

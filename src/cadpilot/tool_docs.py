@@ -318,7 +318,14 @@ Optional: plane, offset, body, construction, external, constraints.
   external line or [-3, "center"] on an external circle.
   Targets outside the sketch's PartDesign Body are bridged automatically via
   a SubShapeBinder (PartDesign scope rule).
-- constraints: list of {"type": ..., "items": [...], "value": ...}.
+- constraints: list of {"type": ..., "items": [...], "value": ..., "name": ...}.
+  NAME EVERY DIMENSION and bind it to the parameters spreadsheet: give each
+  dimensional constraint (distance*, radius, diameter, angle) a "name" (an
+  identifier such as "Width") and a value like "=Params.width". The user finds
+  it by that name in FreeCAD's constraint list, other features can reference
+  it as Sketch.Constraints.Width, and sketch_edit sets it by name. The reply
+  lists `unnamed_dimensions` when some are missing. Names must be unique in
+  the sketch; a duplicate is refused with both constraint indices.
   Point references are [geo_id, "start"|"end"|"center"|"mid"], checked
   against the geometry: a line has start/end, a circle only center, an arc
   start/end/center ("mid" = center on round geometry), a point any keyword.
@@ -379,8 +386,9 @@ Optional: plane, offset, body, construction, external, constraints.
   partially_redundant, malformed).
 
 Example (parametric plate: variables -> sketch -> pad):
-    {"operation": "variables", "doc_name": "D", "obj_name": "Spreadsheet",
-     "obj_properties": {"cells": {"A1": ["width", 60], "A2": ["thick", 8]}}}
+    {"operation": "variables", "doc_name": "D", "obj_name": "Params",
+     "obj_properties": {"cells": {"A1": ["width", 60], "A2": ["depth", 30],
+                                  "A3": ["thick", 8]}}}
     {"operation": "sketch", "doc_name": "D", "obj_name": "Profile",
      "obj_properties": {
        "plane": "XY",
@@ -400,11 +408,12 @@ Example (parametric plate: variables -> sketch -> pad):
          {"type": "vertical", "items": [[3]]},
          {"type": "coincident", "items": [[0, "start"], [-1, "center"]]},
          {"type": "distance_x", "items": [[0, "start"], [0, "end"]],
-          "value": "=Spreadsheet.width"},
-         {"type": "distance_y", "items": [[1, "start"], [1, "end"]], "value": 30}]}}
+          "value": "=Params.width", "name": "Width"},
+         {"type": "distance_y", "items": [[1, "start"], [1, "end"]],
+          "value": "=Params.depth", "name": "Depth"}]}}
     ([-1, "center"] refers to the sketch origin.)
     {"operation": "pad", "doc_name": "D", "obj_name": "Profile",
-     "obj_properties": {"length": "=Spreadsheet.thick"}}""",
+     "obj_properties": {"length": "=Params.thick"}}""",
     "pad": """\
 pad — extrude a closed sketch profile (obj_name = profile sketch).
 Optional in obj_properties: length (default 10), pad_type, length2, up_to_face,
