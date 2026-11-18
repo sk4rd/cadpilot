@@ -28,6 +28,7 @@ def test_transform_features_must_be_pushed_to_the_tip():
     """The live bug: a pattern in a body stayed inert because Tip never moved."""
     assert tp.advances_tip("PartDesign::PolarPattern")
     assert tp.advances_tip("PartDesign::LinearPattern")
+    assert tp.advances_tip("PartDesign::Mirrored")
     assert tp.advances_tip("PartDesign::MultiTransform")
 
 

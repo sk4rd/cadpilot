@@ -42,6 +42,7 @@ _ADVANCING_TYPES = frozenset(
         # transforms — the ones FreeCAD does NOT advance by itself
         "PartDesign::PolarPattern",
         "PartDesign::LinearPattern",
+        "PartDesign::Mirrored",
         "PartDesign::MultiTransform",
     }
 )

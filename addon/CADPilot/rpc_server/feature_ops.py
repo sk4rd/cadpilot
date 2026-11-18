@@ -366,9 +366,145 @@ def _build_sweep(doc, spec):
     return feat
 
 
+def _origin_feature(body, role: str):
+    """The body origin's datum with ``role`` ('X_Axis', 'XY_Plane', ...), or None."""
+    origin = getattr(body, "Origin", None)
+    return next(
+        (f for f in getattr(origin, "OriginFeatures", []) if getattr(f, "Role", "") == role),
+        None,
+    )
+
+
+def _require_transformable(obj, op: str) -> None:
+    """Refuse an original that a PartDesign transform cannot repeat.
+
+    FreeCAD transforms additive/subtractive features only; anything else
+    recomputes Invalid with "Only additive and subtractive features can be
+    transformed" (live on 1.1.4 for a LinearPattern of a LinearPattern).
+    """
+    is_derived = getattr(obj, "isDerivedFrom", None)
+    if not callable(is_derived):
+        return
+    if is_derived("PartDesign::Transformed"):
+        raise ValueError(
+            f"{op}: '{obj.Name}' is itself a {obj.TypeId}, and FreeCAD transforms only "
+            "additive/subtractive features (pad, pocket, revolution, groove, hole, ...). To "
+            "repeat a pattern again, use pattern_type='multi' with transforms=[...] (one "
+            "MultiTransform), or name the original features in originals=[...]."
+        )
+    if not is_derived("PartDesign::FeatureAddSub"):
+        raise ValueError(
+            f"{op}: '{obj.Name}' ({obj.TypeId}) cannot be repeated: FreeCAD transforms only "
+            "additive/subtractive features (pad, pocket, revolution, groove, hole, ...). A "
+            "fillet/chamfer/thickness on the copies has to be applied after the pattern."
+        )
+
+
+def _transform_originals(doc, body, base, spec, op: str) -> list:
+    """The features a PartDesign transform repeats: obj_name plus ``originals``."""
+    extra = spec.get("originals") or []
+    if isinstance(extra, str):
+        extra = [extra]
+    if not isinstance(extra, (list, tuple)):
+        raise ValueError(f"{op}: originals must be a list of feature names, got {extra!r}.")
+    originals = [base]
+    for name in extra:
+        obj = _get_obj(doc, name, "original")
+        if obj not in originals:
+            originals.append(obj)
+    for obj in originals:
+        if _parent_body(obj) is not body:
+            raise ValueError(
+                f"{op}: original '{obj.Name}' is not a feature of Body '{body.Name}'; a "
+                "PartDesign transform repeats features of its own body only."
+            )
+        _require_transformable(obj, op)
+    return originals
+
+
+def _transform_volumes(feat) -> tuple[float, float] | None:
+    """(volume before, volume after) of a transform: its BaseFeature vs itself.
+
+    The predecessor is ``BaseFeature``, not the original: an original earlier in
+    the chain carries an older, different volume.
+    """
+    try:
+        prev = getattr(feat, "BaseFeature", None)
+        before = float(prev.Shape.Volume) if prev is not None else 0.0
+        return before, float(feat.Shape.Volume)
+    except Exception:
+        return None
+
+
+def _mirror_plane_ref(doc, body, base, spec):
+    """(object, [subelement], label) for a PartDesign mirror plane."""
+    face_sel = spec.get("face")
+    if face_sel is not None:
+        if (
+            isinstance(face_sel, (list, tuple))
+            and len(face_sel) == 2
+            and isinstance(face_sel[0], str)
+            and doc.getObject(face_sel[0]) is not None
+        ):
+            ref = sketcher_ops.attachment_ref(_get_obj(doc, face_sel[0], "mirror face object"))
+            items = [face_sel[1]]
+        else:
+            ref = base
+            items = face_sel if isinstance(face_sel, list) else [face_sel]
+        name = _resolve_elements(ref, items, "Face")[0]
+        face = ref.Shape.getElement(name)
+        if face.Surface.TypeId != "Part::GeomPlane":
+            raise ValueError(f"mirror face {ref.Name}.{name} is not planar.")
+        _record_resolved_faces(ref, [name])
+        return ref, [name], f"{ref.Name}.{name}"
+    plane = spec.get("plane", "XY")
+    if isinstance(plane, dict) and plane.get("datum"):
+        dp = _get_obj(doc, plane["datum"], "mirror datum plane")
+        return dp, [""], dp.Name
+    role = _ORIGIN_ROLE.get(str(plane).upper())
+    support = _origin_feature(body, role) if role else None
+    if support is None:
+        raise ValueError(
+            f"mirror plane must be XY/XZ/YZ, {{'datum': name}} or a face, got {plane!r}"
+        )
+    return support, [""], f"{body.Name} origin {str(plane).upper()} plane"
+
+
+def _build_pd_mirror(doc, body, base, spec):
+    """Mirror PartDesign FEATURES inside their Body (PartDesign::Mirrored).
+
+    A ``Part::Mirroring`` of a feature copies the feature's whole Shape — the
+    entire body up to that feature — into a second solid at the document root,
+    and the Body itself never changes (live: the reply said success, the Body's
+    volume was untouched).
+    """
+    global _LAST_FEATURE_INFO
+    originals = _transform_originals(doc, body, base, spec, "mirror")
+    ref, subs, label = _mirror_plane_ref(doc, body, base, spec)
+    feat = body.newObject("PartDesign::Mirrored", spec.get("name") or "Mirrored")
+    feat.MirrorPlane = (ref, subs)
+    feat.Originals = originals
+    doc.recompute()
+    volumes = _transform_volumes(feat)
+    if volumes is not None and abs(volumes[1] - volumes[0]) < 1e-6:
+        raise RuntimeError(
+            f"mirror of {', '.join(o.Name for o in originals)} had no effect (volume unchanged "
+            f"at {round(volumes[0], 1)} mm^3): across {label} the mirrored copy lands where "
+            "it adds or removes nothing — outside the part, or onto the original itself (a "
+            "feature on the plane, or a part symmetric about it). Pass the plane the copy "
+            "should be reflected across (plane='YZ'/'XZ'/'XY', {'datum': name} or a face)."
+        )
+    _LAST_FEATURE_INFO = {"mirror_plane": label, "originals": [o.Name for o in originals]}
+    return feat
+
+
 def _build_mirror(doc, spec):
+    global _LAST_FEATURE_INFO
     _require(spec, "base")
     base = _get_obj(doc, spec["base"], "base")
+    body = _parent_body(base)
+    if body is not None:
+        return _build_pd_mirror(doc, body, base, spec)
     # FreeCAD >= 1.0 renamed Part::Mirror to Part::Mirroring.
     # Try the new name first; fall back only if the type does not exist.
     mirror_type = "Part::Mirroring"
@@ -398,6 +534,12 @@ def _build_mirror(doc, spec):
             raise ValueError(f"mirror plane must be XY/XZ/YZ, got {spec.get('plane')!r}")
         feat.Normal = FreeCAD.Vector(*normal)
         feat.Base = FreeCAD.Vector(0, 0, 0)
+    if getattr(base, "TypeId", "") == "PartDesign::Body":
+        _LAST_FEATURE_INFO = {
+            "note": f"'{base.Name}' is a whole Body, so the mirror is a separate mirrored "
+            f"copy ({feat.TypeId}) at the document root and '{base.Name}' is unchanged. To "
+            "mirror features INSIDE the body, name the feature (e.g. its Tip) instead."
+        }
     return feat
 
 
@@ -1978,7 +2120,9 @@ def describe_feature(feat, spec) -> dict:
             }
         return {}
     warnings: list[str] = []
-    resolved = pop_last_feature_info() if op in ("thickness", "draft", "datum_plane") else None
+    resolved = (
+        pop_last_feature_info() if op in ("thickness", "draft", "datum_plane", "mirror") else None
+    )
     if op in _CUT_TYPES:
         message = _cut_without_material(feat) or _cut_removed_nothing(feat)
         if message:

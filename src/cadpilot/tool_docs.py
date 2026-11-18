@@ -124,7 +124,17 @@ sweep — parametric sweep (obj_name = profile object).
 Required in obj_properties: path. Optional: solid, name.""",
     "mirror": """\
 mirror — parametric mirror (obj_name = base object).
-Optional in obj_properties: plane (XY/XZ/YZ, default XY) or face (selector item), name.""",
+Optional in obj_properties: plane (XY/XZ/YZ, default XY), face (selector item),
+originals, name.
+- Base is a PartDesign feature (a pad/pocket/… inside a Body): a
+  PartDesign::Mirrored is created in that Body and becomes its Tip, so the body
+  itself gains the mirrored copy. plane may also be {"datum": "DatumPlane"};
+  face is a planar face of the base ("+X", "Face3") or [obj, "+X"].
+  originals: more features of the same body to mirror in the same step. A
+  mirror whose copy adds or removes nothing (outside the part, or onto the
+  original) is refused, nothing is created.
+- Base is a Part-level solid or a whole Body: a Part::Mirroring copy is created
+  at the document root; the original is unchanged.""",
     "pattern": """\
 pattern — repeat a feature or solid (obj_name = base object).
 Required in obj_properties: count (>= 2, or an expression, e.g. "=Vars.n_holes";
