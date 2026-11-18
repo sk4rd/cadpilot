@@ -383,6 +383,53 @@ def m1_composite_geometry_is_fully_constrainable():
     )
 
 
+def m3_base_planes_attach_to_the_origin_with_an_expression_offset():
+    doc = "SkOrigin"
+    newdoc(doc)
+    cad("variables", doc, "Params", cells={"A1": ["lift", 7]})
+    res = cad(
+        "sketch",
+        doc,
+        "Front",
+        plane="XZ",
+        offset="=Params.lift",
+        geometry=[{"type": "circle", "center": [0, 0], "radius": 2}],
+    )
+    s = inspect(doc, "Front") if ok(res) else {}
+    check(
+        "M3 an XZ sketch is attached FlatFace to the body's XZ_Plane",
+        ok(res) and s["mapmode"] == "FlatFace" and s["support"][0][0].startswith("XZ_Plane"),
+        err(res) or str(s),
+    )
+    check(
+        "M3 the offset is bound to the spreadsheet and lands along -Y",
+        s.get("expr", {}).get(".AttachmentOffset.Base.z") == "Params.lift"
+        and s.get("origin") == [0.0, -7.0, 0.0],
+        str(s),
+    )
+    plane = res.get("plane", {})
+    check(
+        "M3 the reply echoes the XZ axes in world terms",
+        plane.get("x_axis") == [1.0, 0.0, 0.0]
+        and plane.get("y_axis") == [0.0, 0.0, 1.0]
+        and plane.get("normal") == [0.0, -1.0, 0.0]
+        and plane.get("offset") == "=Params.lift",
+        str(plane),
+    )
+    cad("variables", doc, "Params", cells={"A1": ["lift", 12]})
+    check(
+        "M3 changing the cell moves the sketch",
+        inspect(doc, "Front")["origin"] == [0.0, -12.0, 0.0],
+        str(inspect(doc, "Front")),
+    )
+    cad("edit_object", doc, "Body", Placement={"Base": {"x": 100, "y": 0, "z": 0}})
+    check(
+        "M3 the sketch moves with its body",
+        inspect(doc, "Front")["origin"] == [100.0, -12.0, 0.0],
+        str(inspect(doc, "Front")),
+    )
+
+
 CHECKS = [
     m1_diagnostics_name_the_spec_entry,
     m7_lists_expand_into_one_constraint_per_item,
@@ -391,6 +438,7 @@ CHECKS = [
     m4_unit_strings_are_values,
     m6_names_are_checked_and_reported,
     m1_composite_geometry_is_fully_constrainable,
+    m3_base_planes_attach_to_the_origin_with_an_expression_offset,
 ]
 
 if __name__ == "__main__":

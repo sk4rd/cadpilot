@@ -30,17 +30,12 @@ _LAST_SKETCH_INFO: dict | None = None
 _LAST_ATTACHMENT: dict | None = None
 _CENTER_OFF_MATERIAL: str | None = None
 
-# Base-plane placements as (yaw, pitch, roll) degrees, copied from FreeCAD's
-# own origin planes (XY_Plane R=identity, XZ_Plane roll +90, YZ_Plane
-# yaw 90/roll 90). Matching them is the point: plane="XZ" and a datum plane on
-# XZ_Plane must mean the SAME frame, or the same profile comes out mirrored
-# (the old XZ entry was R_x(-90), which put the drawing's +v along global -Z
-# and the solid below the XY plane while datum_plane(XZ) put it above).
-_BASE_PLANES = {
-    "XY": (0, 0, 0),
-    "XZ": (0, 0, 90),
-    "YZ": (90, 0, 90),
-}
+# A base plane is the body's own origin plane, found by Role. Attaching to it
+# (instead of writing a Placement) keeps the sketch with the body and lets the
+# offset be an expression; it also makes plane="XZ" and a datum plane on
+# XZ_Plane the same frame by construction (a hand-copied rotation table once
+# held R_x(-90) for XZ and mirrored every profile drawn on it).
+_ORIGIN_ROLES = {"XY": "XY_Plane", "XZ": "XZ_Plane", "YZ": "YZ_Plane"}
 
 
 def pop_last_sketch_info() -> dict | None:
@@ -335,7 +330,19 @@ def _resolve_semantic_face(ref, token: str) -> str:
 
 def _vec3(vec) -> list:
     """A vector in the same rounded form as the other echoes (4 decimals)."""
-    return [round(float(v), 4) for v in vec]
+    return [round(float(v), 4) + 0.0 for v in vec]
+
+
+def _frame_echo(sketch) -> dict:
+    """The sketch's origin and axes in world coordinates (after its attachment)."""
+    placement = sketch.getGlobalPlacement()
+    rot = placement.Rotation
+    return {
+        "sketch_origin": _vec3(placement.Base),
+        "x_axis": _vec3(rot.multVec(FreeCAD.Vector(1, 0, 0))),
+        "y_axis": _vec3(rot.multVec(FreeCAD.Vector(0, 1, 0))),
+        "normal": _vec3(rot.multVec(FreeCAD.Vector(0, 0, 1))),
+    }
 
 
 def _face_echo(obj, face_name: str) -> dict:
@@ -407,27 +414,56 @@ def center_attachment(obj, ref, face_name, doc, extra_offset: float = 0.0):
         )
 
 
-def _attach_sketch(sketch, doc, spec):
+def origin_plane(body, key: str):
+    """The body's origin plane for "XY"/"XZ"/"YZ"."""
+    role = _ORIGIN_ROLES[key]
+    for feat in getattr(getattr(body, "Origin", None), "OriginFeatures", []):
+        if getattr(feat, "Role", "") == role:
+            return feat
+    raise ValueError(f"body '{body.Name}' has no {role} in its Origin.")
+
+
+def _offset_spec(spec, plane) -> tuple[float, str | None]:
+    """(offset in mm, expression) from plane.offset or the top-level offset."""
+    raw = spec.get("offset")
+    if isinstance(plane, dict) and plane.get("offset") is not None:
+        raw = plane["offset"]
+    try:
+        return sketch_spec.offset_value(raw)
+    except ValueError as e:
+        raise ValueError(f"offset {e}") from e
+
+
+def _apply_offset(obj, offset: float, expr: str | None) -> None:
+    """Shift an attached object along its normal, by a number or an expression."""
+    base = FreeCAD.Vector(obj.AttachmentOffset.Base)
+    base.z += offset
+    obj.AttachmentOffset = FreeCAD.Placement(base, FreeCAD.Rotation())
+    if expr:
+        try:
+            obj.setExpression(".AttachmentOffset.Base.z", expr)
+        except Exception as e:
+            raise ValueError(f"offset expression {expr!r} failed: {e}") from e
+
+
+def _attach_sketch(sketch, doc, spec, body):
     global _LAST_ATTACHMENT
     plane = spec.get("plane", "XY")
-    offset = float(spec.get("offset", 0) or 0)
+    offset, offset_expr = _offset_spec(spec, plane)
+    support_prop = "AttachmentSupport" if hasattr(sketch, "AttachmentSupport") else "Support"
 
     if isinstance(plane, str):
         key = plane.upper()
-        if key not in _BASE_PLANES:
+        if key not in _ORIGIN_ROLES:
             raise ValueError(f"plane must be XY/XZ/YZ or {{'face': ...}}, got {plane!r}")
-        rot = FreeCAD.Rotation(*_BASE_PLANES[key])
-        normal = rot.multVec(FreeCAD.Vector(0, 0, 1))
-        sketch.Placement = FreeCAD.Placement(normal * offset, rot)
-        # Echo the plane's local axes in global terms: a profile's "+v" is the
-        # single most surprising thing about a non-XY base plane, and until
-        # this echo existed the caller had to infer it from a flipped result.
+        support = origin_plane(body, key)
+        setattr(sketch, support_prop, [(support, "")])
+        sketch.MapMode = "FlatFace"
+        _apply_offset(sketch, offset, offset_expr)
         _LAST_ATTACHMENT = {
             "plane": key,
-            "offset": offset,
-            "x_axis": _vec3(rot.multVec(FreeCAD.Vector(1, 0, 0))),
-            "y_axis": _vec3(rot.multVec(FreeCAD.Vector(0, 1, 0))),
-            "normal": _vec3(normal),
+            "support": support.Name,
+            "offset": f"={offset_expr}" if offset_expr else offset,
         }
         return
 
@@ -457,7 +493,6 @@ def _attach_sketch(sketch, doc, spec):
             raise ValueError(
                 f"'{face_name}' out of range on '{ref.Name}' (1-{len(ref.Shape.Faces)})."
             )
-        support_prop = "AttachmentSupport" if hasattr(sketch, "AttachmentSupport") else "Support"
         setattr(sketch, support_prop, [(ref, face_name)])
         sketch.MapMode = "FlatFace"
         global _CENTER_OFF_MATERIAL
@@ -468,11 +503,8 @@ def _attach_sketch(sketch, doc, spec):
             # Origin at the middle of the face instead of its parametric
             # origin (a corner on rectangular faces); the caller's offset is
             # along the face normal = the attachment frame's Z.
-            center_attachment(sketch, ref, face_name, doc, offset)
-        elif offset:
-            sketch.AttachmentOffset = FreeCAD.Placement(
-                FreeCAD.Vector(0, 0, offset), FreeCAD.Rotation()
-            )
+            center_attachment(sketch, ref, face_name, doc)
+        _apply_offset(sketch, offset, offset_expr)
         # The echo used to report only the FACE center, which a caller reads as
         # "the sketch origin is here" — while the origin actually sits on the
         # face's parametric origin (a corner). Say where the origin IS (live: a
@@ -494,7 +526,6 @@ def _attach_sketch(sketch, doc, spec):
         ref = doc.getObject(str(plane["datum"]))
         if ref is None:
             raise ValueError(f"datum plane '{plane['datum']}' not found.")
-        support_prop = "AttachmentSupport" if hasattr(sketch, "AttachmentSupport") else "Support"
         setattr(sketch, support_prop, [(ref, "")])
         sketch.MapMode = "FlatFace"
         _LAST_ATTACHMENT = {"object": ref.Name, "type": "datum"}
@@ -511,10 +542,7 @@ def _attach_sketch(sketch, doc, spec):
                     _LAST_ATTACHMENT["support"] = _face_echo(support[0][0], str(subs))
                 else:
                     _LAST_ATTACHMENT["support"] = {"object": support[0][0].Name}
-        if offset:
-            sketch.AttachmentOffset = FreeCAD.Placement(
-                FreeCAD.Vector(0, 0, offset), FreeCAD.Rotation()
-            )
+        _apply_offset(sketch, offset, offset_expr)
         return
 
     raise ValueError(
@@ -570,7 +598,7 @@ def build_sketch_gui(doc, spec):
     body = _get_or_create_body(doc, spec.get("body"))
     sketch = body.newObject("Sketcher::SketchObject", spec.get("base") or "Sketch")
 
-    _attach_sketch(sketch, doc, spec)
+    _attach_sketch(sketch, doc, spec, body)
     geometry_ids, implied = _add_geometry(sketch, geometry, spec.get("construction"))
     _add_external(sketch, doc, body, spec.get("external"))
     origins, unnamed = _add_constraints(sketch, spec.get("constraints"), implied)
@@ -597,4 +625,9 @@ def build_sketch_gui(doc, spec):
         # facing that way, and without this echo the wrong pick looked exactly
         # like success (live: a seat-face sketch landed on a wall top 92 mm up).
         _LAST_SKETCH_INFO["plane"] = _LAST_ATTACHMENT
+        if "plane" in _LAST_ATTACHMENT:
+            # "Which way is +v" is the most surprising thing about a non-XY
+            # base plane; without the axes a caller infers it from a flipped
+            # result.
+            _LAST_ATTACHMENT.update(_frame_echo(sketch))
     return sketch

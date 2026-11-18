@@ -276,14 +276,19 @@ obj_name = sketch name (default "Sketch", may be omitted).
 Required in obj_properties: geometry.
 Optional: plane, offset, body, construction, external, constraints.
 
-- plane: "XY" / "XZ" / "YZ" (with optional offset along the plane normal),
-  {"face": ["ObjName", "FaceN"], "offset": 0} to sketch on an existing solid
-  face, or {"datum": "DatumPlaneName"} to sketch on a datum plane.
-  A base-plane name means FreeCAD's own origin plane, identically to a datum
+- plane: "XY" / "XZ" / "YZ", {"face": ["ObjName", "FaceN"]} to sketch on an
+  existing solid face, or {"datum": "DatumPlaneName"} to sketch on a datum
+  plane.
+  A base-plane name ATTACHES the sketch to the body's own origin plane
+  (XY_Plane, ...), so it moves with the body and is the same frame as a datum
   plane made on it: XY has x->+X, y->+Y, normal +Z; XZ has x->+X, y->+Z,
   normal -Y; YZ has x->+Y, y->+Z, normal +X. So a profile drawn upward in y on
   XZ rises along +Z, and offset moves along the plane's normal (+offset on XZ
   goes toward -Y). The result echoes x_axis/y_axis/normal for the plane.
+- offset: distance along the plane's normal, at the top level or inside the
+  plane dict: a number (mm), a unit string ("5 mm"), or an expression
+  ("=Params.lift") bound to the attachment, so the sketch follows the
+  spreadsheet.
   PREFER A DIRECTION OVER A FACE NAME: {"face": ["ObjName", "+Z"]} (also -Z,
   +X/-X, +Y/-Y, top/bottom/left/right/front/back, MaxX/MinZ/…) resolves to the
   planar face facing that way. Face names (Face1, Face2, …) are re-derived

@@ -307,6 +307,18 @@ def parse_quantity(value: Any, dimension: str = "length") -> float:
     return number * factor
 
 
+def offset_value(value: Any) -> tuple[float, str | None]:
+    """An attachment offset: (mm, None), or (0.0, expression) for "=expr"."""
+    if value is None or value == "":
+        return 0.0, None
+    if isinstance(value, str) and value.strip().startswith("="):
+        expr = value.strip()[1:].strip()
+        if not expr:
+            raise ValueError(f"{value!r}: '=' needs an expression after it")
+        return 0.0, expr
+    return parse_quantity(value, "length"), None
+
+
 def datum(ctype: str, value: Any) -> tuple[float, str | None]:
     """A dimensional constraint's (datum, expression).
 

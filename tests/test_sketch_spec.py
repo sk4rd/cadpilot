@@ -400,3 +400,12 @@ def test_bad_geometry_names_its_index():
         ss.expand_geometry([{"type": "rectangle", "from": [0, 0], "to": [0, 5]}])
     with pytest.raises(ValueError, match=r"geometry\[1\]: unknown geometry type 'ellipse'"):
         ss.expand_geometry([{"type": "point", "at": [0, 0]}, {"type": "ellipse"}])
+
+
+def test_offset_value_takes_numbers_units_and_expressions():
+    assert ss.offset_value(None) == (0.0, None)
+    assert ss.offset_value(5) == (5.0, None)
+    assert ss.offset_value("2 cm") == (20.0, None)
+    assert ss.offset_value("=Params.lift") == (0.0, "Params.lift")
+    with pytest.raises(ValueError, match="needs an expression"):
+        ss.offset_value("= ")

@@ -237,32 +237,32 @@ def test_face_center_anchor_lies_on_the_face():
     assert "CenterOfMass" in _attrs(helper), "a regular face must keep its true center"
 
 
-def test_base_planes_match_freecads_own_origin_planes():
+def test_base_planes_attach_to_the_bodys_own_origin_planes():
     """plane="XZ" and a datum plane on XZ_Plane must mean the SAME frame.
 
-    The table used to hold R_x(-90) for XZ (FreeCAD's XZ_Plane is R_x(+90))
-    and R_y(90) for YZ (FreeCAD: R_z(90)xR_x(90)): the same mug profile drawn
-    on plane="XZ" came out upside down / below the XY plane while
-    datum_plane("XZ") + plane={"datum": ...} produced it upright — two
-    documented spellings of "XZ" with mirrored results (live: a 90-degree
-    revolve landed at z -90..0; the profile's +v must map to global +Z).
+    A hand-copied rotation table once held R_x(-90) for XZ (FreeCAD's XZ_Plane
+    is R_x(+90)): the same mug profile drawn on plane="XZ" came out below the
+    XY plane while datum_plane("XZ") + plane={"datum": ...} produced it upright
+    (live: a 90-degree revolve landed at z -90..0). Writing the Placement with
+    MapMode Deactivated also left the sketch unattached, so it did not follow
+    its body and its offset could not be an expression. The sketch now attaches
+    FlatFace to the body's own origin plane, found by Role.
     """
-    table = {}
+    roles = {}
     for n in SKETCHER.body:
-        if isinstance(n, ast.Assign) and getattr(n.targets[0], "id", "") == "_BASE_PLANES":
-            table = ast.literal_eval(n.value)
-    assert table == {"XY": (0, 0, 0), "XZ": (0, 0, 90), "YZ": (90, 0, 90)}, (
-        f"origin-plane yaw/pitch/roll expected, got {table}"
-    )
-    attach = _func(SKETCHER, "_attach_sketch")
-    src = ast.unparse(attach)
-    assert "_BASE_PLANES[key]" in src and "FreeCAD.Rotation(*" in src, (
-        "the rotation must come from the table"
-    )
-    echo = _strings_in(attach)
-    assert {"x_axis", "y_axis", "normal"} <= echo, (
+        if isinstance(n, ast.Assign) and getattr(n.targets[0], "id", "") == "_ORIGIN_ROLES":
+            roles = ast.literal_eval(n.value)
+    assert roles == {"XY": "XY_Plane", "XZ": "XZ_Plane", "YZ": "YZ_Plane"}
+    finder = _func(SKETCHER, "origin_plane")
+    assert {"Origin", "OriginFeatures"} <= _strings_in(finder) and "Role" in _strings_in(finder)
+    attach = ast.unparse(_func(SKETCHER, "_attach_sketch"))
+    assert "origin_plane(body, key)" in attach and "FlatFace" in attach
+    assert "sketch.Placement =" not in attach, "an attached sketch's Placement is derived"
+    echo = _func(SKETCHER, "_frame_echo")
+    assert {"x_axis", "y_axis", "normal"} <= _strings_in(echo), (
         "a base-plane sketch echoes its local axes in global terms"
     )
+    assert "getGlobalPlacement" in _attrs(echo)
 
 
 def test_revolution_refuses_the_profile_normal_and_defaults_to_an_in_plane_axis():
