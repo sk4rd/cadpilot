@@ -153,10 +153,11 @@ _PADLIKE_KEYS = (
     "offset",
     "reversed",
     "midplane",
+    "refine",
     "body",
     "name",
 )
-_REVLIKE_KEYS = ("angle", "axis", "reversed", "body", "name")
+_REVLIKE_KEYS = ("angle", "axis", "reversed", "refine", "body", "name")
 
 #: The obj_properties keys each feature op reads, the one list the builders
 #: are checked against. An unknown key used to be dropped silently: live,
@@ -170,7 +171,7 @@ SPEC_KEYS: dict[str, frozenset[str]] = {
         "chamfer": (*_DRESS_KEYS, "size"),
         "loft": ("profiles", "solid", "ruled", "name"),
         "sweep": ("path", "solid", "name"),
-        "mirror": ("plane", "face", "originals", "name"),
+        "mirror": ("plane", "face", "originals", "refine", "name"),
         "pattern": (
             "count",
             "pattern_type",
@@ -184,6 +185,7 @@ SPEC_KEYS: dict[str, frozenset[str]] = {
             "reversed",
             "originals",
             "transforms",
+            "refine",
             "name",
         ),
         "move": ("translate", "rotate", "placement"),
@@ -225,6 +227,7 @@ SPEC_KEYS: dict[str, frozenset[str]] = {
             "drill_point",
             "reversed",
             "midplane",
+            "refine",
             "body",
             "name",
         ),

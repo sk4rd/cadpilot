@@ -138,7 +138,7 @@ Required in obj_properties: path. Optional: solid, name.""",
     "mirror": """\
 mirror — parametric mirror (obj_name = base object).
 Optional in obj_properties: plane (XY/XZ/YZ, default XY), face (selector item),
-originals, name.
+originals, refine (as on pad, for a PartDesign base), name.
 - Base is a PartDesign feature (a pad/pocket/… inside a Body): a
   PartDesign::Mirrored is created in that Body and becomes its Tip, so the body
   itself gains the mirrored copy. plane may also be {"datum": "DatumPlane"};
@@ -153,7 +153,8 @@ pattern — repeat a feature or solid (obj_name = base object).
 Required in obj_properties: count (>= 2, or an expression, e.g. "=Vars.n_holes";
 an expression stays BOUND, so changing the spreadsheet updates the hole count).
 Optional: pattern_type (linear/polar/multi, default linear), spacing, spacings,
-  mode, length, axis, angle, center, reversed, originals, transforms, name.
+  mode, length, axis, angle, center, reversed, originals, transforms, refine
+  (as on pad), name.
   spacing, angle, length and each center item accept "=expressions" and stay
   bound.
 
@@ -486,7 +487,8 @@ Example (widen a named dimension, add a centred hole, drop a chamfer line):
     "pad": """\
 pad — extrude a closed sketch profile (obj_name = profile sketch).
 Optional in obj_properties: length (default 10), pad_type, length2, up_to_face,
-offset, reversed, midplane, body, name.
+offset, reversed, midplane, refine, body, name.
+refine: true/false sets the feature's Refine (merging coplanar faces); left out, FreeCAD's preference decides, and a result that only refining made invalid is rebuilt unrefined and the reply says so.
 pad_type (FreeCAD's own names work too):
   length       — `length` mm (the default)
   up_to_first  — up to the first face of the part along the extrusion
@@ -511,7 +513,7 @@ solid automatically — do not pad-then-boolean.""",
     "pocket": """\
 pocket — cut a closed sketch profile out of a solid (obj_name = profile sketch).
 Optional: length (default 10), through_all, pad_type, length2, up_to_face,
-offset, reversed, midplane, body, name.
+offset, reversed, midplane, refine (as on pad), body, name.
 pad_type: length (default), through_all (= through_all=true, PartDesign's
 parametric through-all; up_to_last means the same on a pocket), up_to_first,
 up_to_face (with up_to_face: [obj, "-Z"|"FaceN"] or a bare direction),
@@ -533,7 +535,8 @@ solid via attachment — no boolean needed.""",
 hole — drilled holes (PartDesign::Hole) at every circle centre of a sketch
 (obj_name = the sketch; the circles only place the holes).
 Required in obj_properties: diameter, and depth OR through (true).
-Optional: drill_point ("flat" default, "angled"), reversed, midplane, body, name.
+Optional: drill_point ("flat" default, "angled"), reversed, midplane, refine (as on pad),
+body, name.
 diameter and depth accept "=expressions". The direction is decided like a
 pocket's: if the default drills air and the opposite removes material, the
 opposite is used and the reply says so. Threads and counterbores are set in
@@ -543,7 +546,7 @@ revolution — revolve a closed profile (obj_name = profile sketch).
 Optional: axis (default "Y" = the sketch's in-plane V axis, the usual lathe
 setup where the profile's y is the axial position and x the radius; "X" = the
 in-plane H axis; {"edge": ["ObjName", "EdgeN"]} for an external axis),
-angle (degrees, default 360), reversed, body, name.
+angle (degrees, default 360), reversed, refine (as on pad), body, name.
 axis "Z" is the profile's own normal and is REFUSED: revolving a planar
 profile about its normal keeps every point in the drawing plane, so it can
 only ever produce a flat zero-volume shell (FreeCAD still reports success).
@@ -553,7 +556,7 @@ A profile that CROSSES its revolve axis is refused too — FreeCAD's own reason
 groove — subtractive revolution (obj_name = profile sketch), the revolved
 pocket: it cuts the swung profile OUT of the body.
 Optional: axis (default "Y", same forms as revolution), angle (degrees,
-default 360), reversed, body, name. The axis-refusal rules match revolution:
+default 360), reversed, refine (as on pad), body, name. The axis-refusal rules match revolution:
 the profile's own normal ("Z") and a profile crossing the axis are refused.""",
     "thickness": """\
 thickness — shell a solid (obj_name = base solid feature).

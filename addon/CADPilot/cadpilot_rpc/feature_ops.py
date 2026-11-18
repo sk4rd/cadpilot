@@ -1961,6 +1961,41 @@ def _take_auto_direction_note() -> str:
     return note
 
 
+_UNREFINED: set[str] = set()
+
+
+def _unrefine_if_broken(doc, feat, spec) -> bool:
+    """Turn Refine off when only refining made ``feat``'s result invalid; True if it did.
+
+    Refine merges coplanar faces, and on a face shared by several features (a
+    spine flush with a box whose rounded corners are tangent to it) OCC's merge
+    can return an unorientable shell from a valid fuse — live: the unrefined
+    fuse checked valid, the refined one gained 98 mm^3 and failed Shape.check,
+    the pad after it kept only its own solid, and a pocket on it could not tell
+    which way cut material, so it cut air. An explicit ``refine`` is the
+    caller's and is left alone.
+    """
+    if spec.get("refine") is not None or not getattr(feat, "Refine", False):
+        return False
+    feat.Refine = False
+    doc.recompute()
+    _shape, valid, _vol, _solids, error = _read_shape_state(feat, doc)
+    if valid and not error:
+        _UNREFINED.add(feat.Name)
+        return True
+    feat.Refine = True
+    doc.recompute()
+    return False
+
+
+def _read_unrefining(doc, feat, spec):
+    """_read_shape_state, retried unrefined when the refined result is broken."""
+    state = _read_shape_state(feat, doc)
+    if (state[4] or not state[1]) and _unrefine_if_broken(doc, feat, spec):
+        state = _read_shape_state(feat, doc)
+    return state
+
+
 def _auto_detect_cut_direction(doc, feat, spec, fc_type, base_vol) -> None:
     """Turn around a pocket that cuts AIR instead of material.
 
@@ -1987,7 +2022,7 @@ def _auto_detect_cut_direction(doc, feat, spec, fc_type, base_vol) -> None:
     if spec.get("reversed") is not None or spec.get("midplane"):
         return
     doc.recompute()
-    _shape, _valid, forward_vol, _solids, forward_error = _read_shape_state(feat, doc)
+    _shape, _valid, forward_vol, _solids, forward_error = _read_unrefining(doc, feat, spec)
     if forward_error:
         # An unreadable Shape reports volume 0.0, which would read as "removed
         # EVERYTHING" and flip the cut on a feature that never computed at all.
@@ -1997,7 +2032,7 @@ def _auto_detect_cut_direction(doc, feat, spec, fc_type, base_vol) -> None:
         return  # it cut something: nothing to decide
     feat.Reversed = True
     doc.recompute()
-    _shape, _valid, reversed_vol, _solids, reversed_error = _read_shape_state(feat, doc)
+    _shape, _valid, reversed_vol, _solids, reversed_error = _read_unrefining(doc, feat, spec)
     if reversed_error:
         feat.Reversed = False
         doc.recompute()
@@ -2643,6 +2678,16 @@ def _add_added_nothing(feat) -> str:
         return ""
     if prev_vol <= 0 or new_vol > prev_vol + _CUT_EPS:
         return ""
+    if new_vol < prev_vol - _CUT_EPS:
+        # An additive feature can only shrink the body when the fuse with its
+        # base failed and kept the new solid alone (live: a 1128 mm^3 foot
+        # padded onto a 71413 mm^3 part that an earlier refine had left invalid
+        # was reported as "added no material").
+        return (
+            f"{feat.Name} SHRANK the body from {round(prev_vol, 1)} to {round(new_vol, 1)} mm^3: "
+            f"the fuse with '{baseline.Name}' failed and kept only the new solid. Check that "
+            f"'{baseline.Name}' is valid (Shape.isValid()); a refine on it is the usual cause."
+        )
     return (
         f"{feat.Name} added no material (volume unchanged at {round(new_vol, 1)} mm^3): the "
         "profile extrudes into material the part already has. Check the direction "
@@ -3225,6 +3270,7 @@ def create_feature_gui(doc, spec):
     _AUTO_DIRECTION_NOTE = ""
     _LAST_FEATURE_INFO = None
     _EDGE_SELECTION = None
+    _UNREFINED.clear()
     # Read the Shape of what this feature is built on FIRST: a lazy predecessor
     # makes the new feature compute to nothing, silently (see the helper).
     _settle_shape_caches(doc, spec)
@@ -3234,6 +3280,8 @@ def create_feature_gui(doc, spec):
         issues_before = model_issues(doc)
         volumes_before = body_volumes(doc)
     feat = builder(doc, spec)
+    if spec.get("refine") is not None and "Refine" in getattr(feat, "PropertiesList", []):
+        feat.Refine = bool(spec["refine"])
     # "move" directly modifies Placement and "color" only the ViewObject —
     # neither builds a feature, so the recompute/validity/volume checks below do
     # not apply. They must not either: a color op has no business failing
@@ -3284,6 +3332,8 @@ def create_feature_gui(doc, spec):
         # lazy predecessor: settle those caches and read again before giving up.
         _settle_shape_caches(doc, spec)
         shape, valid, volume, solids, check_error = _read_shape_state(feat, doc)
+    if not valid and _unrefine_if_broken(doc, feat, spec):
+        shape, valid, volume, solids, check_error = _read_shape_state(feat, doc)
     if not valid and dress and not repaired and _dress_retry_repair():
         valid = True
         check_error = ""
@@ -3313,6 +3363,12 @@ def create_feature_gui(doc, spec):
             "geometry was kept, since that combination is usually a false negative "
             "(it happens on ordinary PartDesign fillets). Verify with Part > Check "
             "geometry if this part matters."
+        )
+    if feat.Name in _UNREFINED:
+        _SHAPE_CHECK_NOTE = (
+            f"Refine was turned off on '{feat.Name}': refining its result gave a shape that "
+            "fails OCC's validity check, and the unrefined one is valid. Pass refine=false "
+            "on the features after it too, or each one is retried the same way."
         )
     # A negative volume is never a legitimate solid: OCC returns one for a
     # self-intersecting result (a profile straddling its revolve axis is the
