@@ -536,7 +536,7 @@ def step_plan(
     Each step is a cad() argument dict and waits for release in the CADPilot Steps panel or via step_control.
 
     Args:
-        steps_file: A JSON file holding the steps instead (a list, or {"description", "steps"}).
+        steps_file: Absolute path of a JSON plan file, instead of steps.
 
     Reference: operation_help("step_plan").
     """

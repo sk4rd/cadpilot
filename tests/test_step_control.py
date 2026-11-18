@@ -6,6 +6,7 @@ exact spec forwarded over XML-RPC, and how a missing/old addon is tolerated.
 """
 
 import json
+from pathlib import Path
 
 from cadpilot.operations.core import (
     _journal_snapshot,
@@ -71,6 +72,17 @@ def test_step_plan_refuses_steps_and_a_file_together_or_a_bad_file(fake_freecad,
     bad = tmp_path / "bad.json"
     bad.write_text("{not json")
     assert "could not read" in _text(
+        step_plan_operation(fake_freecad, "Doc", None, steps_file=str(bad))
+    )
+    # the server reads the file from its own working directory: name the path tried
+    out = _text(step_plan_operation(fake_freecad, "Doc", None, steps_file="missing-plan.json"))
+    assert str(Path("missing-plan.json").resolve()) in out
+    bad.write_text("[" * 100_000)
+    assert "could not read" in _text(
+        step_plan_operation(fake_freecad, "Doc", None, steps_file=str(bad))
+    )
+    bad.write_text(json.dumps({"description": "no steps"}))
+    assert "holds none" in _text(
         step_plan_operation(fake_freecad, "Doc", None, steps_file=str(bad))
     )
 

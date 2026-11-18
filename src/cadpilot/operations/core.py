@@ -1487,11 +1487,14 @@ def _journal_snapshot(freecad: FreeCADConnection, doc_name: str) -> dict[str, An
 
 def _steps_from_file(path: str) -> tuple[list[Any] | None, str, str]:
     """(steps, description, error) read from a JSON plan file."""
+    # The server process reads it, and its working directory is whatever the
+    # client started it in, so the error names the path it actually tried.
+    resolved = os.path.abspath(os.path.expanduser(path))
     try:
-        with open(os.path.expanduser(path), encoding="utf-8") as f:
+        with open(resolved, encoding="utf-8") as f:
             data = json.load(f)
-    except (OSError, ValueError) as e:
-        return None, "", f"step_plan could not read steps_file {path!r}: {e}"
+    except (OSError, ValueError, RecursionError) as e:
+        return None, "", f"step_plan could not read steps_file {resolved!r}: {e}"
     if isinstance(data, dict):
         return data.get("steps"), str(data.get("description") or ""), ""
     return data, "", ""
@@ -1516,7 +1519,8 @@ def step_plan_operation(
             return text_response(error)
         description = description or file_description
     if not isinstance(steps, list) or not steps:
-        return text_response("step_plan requires a non-empty steps list")
+        source = f" (steps_file {steps_file!r} holds none)" if steps_file else ""
+        return text_response(f"step_plan requires a non-empty steps list{source}")
     for i, step in enumerate(steps, start=1):
         if not isinstance(step, dict) or not step.get("operation"):
             return text_response(

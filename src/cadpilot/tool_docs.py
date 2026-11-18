@@ -718,10 +718,12 @@ new step_plan replaces the planned steps.
 Batch steps work too: {"operation": "batch", "ops": [...]} runs the ops in one
 transaction as one step.
 
-steps_file: a path to a JSON file holding the plan instead of `steps` — a list of
-steps, or {"description": ..., "steps": [...]}. A generated plan (sketch geometry
-from a script) runs to tens of KB; writing it to a file and passing the path keeps
-it out of the call. The file is read when the plan is submitted.
+steps_file: the path of a JSON file holding the plan instead of `steps` — a list
+of steps, or {"description": ..., "steps": [...]}. A generated plan (sketch
+geometry from a script) runs to tens of KB; writing it to a file and passing the
+path keeps it out of the call. Pass an ABSOLUTE path: the CADPilot server
+process reads the file (on its own machine, also when FreeCAD runs on another
+host), once, when the plan is submitted.
 
 An execute_code step is plannable when it carries the code it will run
 ({"operation": "execute_code", "code": "import FreeCAD; …"}); a planned
