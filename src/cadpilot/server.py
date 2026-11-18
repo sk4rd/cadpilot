@@ -527,16 +527,22 @@ def session(
 def step_plan(
     ctx: Context,
     doc_name: str,
-    steps: list[dict[str, Any]],
+    steps: list[dict[str, Any]] | None = None,
     description: str = "",
+    steps_file: str = "",
 ) -> list[TextContent]:
     """Submit a modeling plan to the document's step journal without executing it.
 
     Each step is a cad() argument dict and waits for release in the CADPilot Steps panel or via step_control.
 
+    Args:
+        steps_file: A JSON file holding the steps instead (a list, or {"description", "steps"}).
+
     Reference: operation_help("step_plan").
     """
-    return step_plan_operation(get_freecad_connection(), doc_name, steps, description)
+    return step_plan_operation(
+        get_freecad_connection(), doc_name, steps, description, steps_file=steps_file
+    )
 
 
 @mcp.tool(annotations=_mutating("Control Step Journal"))

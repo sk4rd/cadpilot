@@ -1,5 +1,7 @@
 import contextlib
+import json
 import logging
+import os
 from typing import Any
 
 from ..freecad_client import FreeCADConnection
@@ -1479,14 +1481,36 @@ def _journal_snapshot(freecad: FreeCADConnection, doc_name: str) -> dict[str, An
     return res if isinstance(res, dict) and res.get("success") else None
 
 
+def _steps_from_file(path: str) -> tuple[list[Any] | None, str, str]:
+    """(steps, description, error) read from a JSON plan file."""
+    try:
+        with open(os.path.expanduser(path), encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError) as e:
+        return None, "", f"step_plan could not read steps_file {path!r}: {e}"
+    if isinstance(data, dict):
+        return data.get("steps"), str(data.get("description") or ""), ""
+    return data, "", ""
+
+
 def step_plan_operation(
     freecad: FreeCADConnection,
     doc_name: str,
-    steps: list[dict[str, Any]],
+    steps: list[dict[str, Any]] | None,
     description: str = "",
+    steps_file: str = "",
 ) -> ToolResponse:
     """Submit a plan to the addon's step journal WITHOUT executing it."""
     _set_last_doc(doc_name)
+    if steps_file:
+        if steps:
+            return text_response("step_plan takes steps or steps_file, not both")
+        # A generated plan runs to tens of KB of sketch geometry; passing the
+        # file keeps it out of the tool call.
+        steps, file_description, error = _steps_from_file(steps_file)
+        if error:
+            return text_response(error)
+        description = description or file_description
     if not isinstance(steps, list) or not steps:
         return text_response("step_plan requires a non-empty steps list")
     for i, step in enumerate(steps, start=1):

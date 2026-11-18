@@ -52,6 +52,29 @@ def test_step_plan_forwards_set_plan_spec(fake_freecad):
     assert "base plate" in out
 
 
+def test_step_plan_reads_its_steps_from_a_file(fake_freecad, tmp_path):
+    steps = [{"operation": "create_object", "obj_type": "Part::Box", "obj_name": "Base"}]
+    plan = tmp_path / "plan.json"
+    plan.write_text(json.dumps({"description": "base plate", "steps": steps}))
+    out = _text(step_plan_operation(fake_freecad, "Doc", None, steps_file=str(plan)))
+    assert "1. create_object" in out and "base plate" in out
+    spec = fake_freecad.calls[-1][1][1]
+    assert spec["steps"] == steps and spec["description"] == "base plate"
+    plan.write_text(json.dumps(steps))
+    _text(step_plan_operation(fake_freecad, "Doc", None, "mine", steps_file=str(plan)))
+    assert fake_freecad.calls[-1][1][1]["description"] == "mine"
+
+
+def test_step_plan_refuses_steps_and_a_file_together_or_a_bad_file(fake_freecad, tmp_path):
+    steps = [{"operation": "create_object"}]
+    assert "not both" in _text(step_plan_operation(fake_freecad, "Doc", steps, steps_file="x.json"))
+    bad = tmp_path / "bad.json"
+    bad.write_text("{not json")
+    assert "could not read" in _text(
+        step_plan_operation(fake_freecad, "Doc", None, steps_file=str(bad))
+    )
+
+
 def test_step_plan_reports_addon_failure(fake_freecad):
     fake_freecad.result_overrides["journal_op"] = {"success": False, "error": "no such document"}
     out = _text(step_plan_operation(fake_freecad, "Doc", [{"operation": "create_object"}]))
