@@ -19,12 +19,14 @@ import tempfile
 import textwrap
 import time
 
+from live_port import require_test_port
+
 from cadpilot import operations as ops
 from cadpilot.freecad_client import FreeCADConnection
 from cadpilot.operations.core import USER_CHANGES_HEADING
 
-if not os.environ.get("CADPILOT_PORT"):
-    sys.exit("set CADPILOT_PORT to the port of the FreeCAD to test against")
+require_test_port()
+
 os.environ.setdefault("CADPILOT_HOME", tempfile.mkdtemp(prefix="cadpilot-live-journal-"))
 
 c = FreeCADConnection()

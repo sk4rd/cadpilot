@@ -6,7 +6,7 @@ names and the sketch_edit op. Every call goes through ``cad_operation``, the
 same path the MCP tool takes.
 
 Run: CADPILOT_PORT=<port> uv run --frozen python tests/live_sketch_edit_verify.py
-The port is required: this script never falls back to the default 9875.
+The port is required, and it must be a test FreeCAD's (see tests/live_port.py).
 """
 
 import json
@@ -15,12 +15,14 @@ import os
 import sys
 import tempfile
 
-if not os.environ.get("CADPILOT_PORT"):
-    sys.exit("set CADPILOT_PORT to the FreeCAD instance to test against")
 os.environ.setdefault("CADPILOT_HOME", tempfile.mkdtemp(prefix="cadpilot-live-"))
+
+from live_port import require_test_port
 
 from cadpilot.freecad_client import FreeCADConnection
 from cadpilot.operations import cad_operation
+
+require_test_port()
 
 c = FreeCADConnection()
 FAILURES = []
@@ -757,6 +759,7 @@ def m2_sketch_edit_works_on_a_hand_edited_sketch():
     py(
         f"""
 import FreeCAD, Part, Sketcher
+
 d = FreeCAD.getDocument("{doc}")
 s = d.getObject("Base")
 d.openTransaction("by hand")

@@ -6,23 +6,22 @@ back from FreeCAD. One section per audit finding (the number in brackets).
 
 Run against a FreeCAD whose CADPilot add-on listens on CADPILOT_PORT:
     CADPILOT_PORT=9891 uv run --frozen python tests/live_features_verify.py
-The port is required: this script never falls back to the default 9875, so it
+The port is required, and it must be a test FreeCAD's (tests/live_port.py), so it
 cannot touch a FreeCAD someone is working in.
 """
 
 import ast
 import json
 import math
-import os
 import sys
+
+from live_port import require_test_port
 
 from cadpilot.freecad_client import FreeCADConnection
 from cadpilot.operations import cad_operation, measure_geometry_operation
 
-if not os.environ.get("CADPILOT_PORT", "").strip().isdigit() or os.environ[
-    "CADPILOT_PORT"
-].strip() in ("", "9875"):
-    sys.exit("set CADPILOT_PORT to the port of a test FreeCAD (never the default 9875)")
+require_test_port()
+
 
 c = FreeCADConnection()
 FAILURES: list[str] = []

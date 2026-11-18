@@ -18,11 +18,13 @@ import sys
 import threading
 import time
 
+from live_port import require_test_port
+
 from cadpilot.diagnostics import gui_state_note, probe_gui_state, probe_rpc
 from cadpilot.freecad_client import FreeCADConnection
 
-if not os.environ.get("CADPILOT_PORT", "").strip().isdigit():
-    sys.exit("set CADPILOT_PORT to the port of the FreeCAD to test; this script never guesses")
+require_test_port()
+
 PORT = int(os.environ["CADPILOT_PORT"])
 
 c = FreeCADConnection(timeout=120)

@@ -11,7 +11,11 @@ Run: uv run --no-sync python tests/live_sketch_verify.py
 import math
 import sys
 
+from live_port import require_test_port
+
 from cadpilot.freecad_client import FreeCADConnection
+
+require_test_port()
 
 c = FreeCADConnection()
 FAILURES = []

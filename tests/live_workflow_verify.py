@@ -8,11 +8,13 @@ import json
 import os
 import sys
 
+from live_port import require_test_port
+
 from cadpilot import operations as ops
 from cadpilot.freecad_client import FreeCADConnection
 
-if not os.environ.get("CADPILOT_PORT") or os.environ["CADPILOT_PORT"] == "9875":
-    sys.exit("set CADPILOT_PORT to the port of a FreeCAD started for testing")
+require_test_port()
+
 
 c = FreeCADConnection()
 DOC = "WorkflowLive"

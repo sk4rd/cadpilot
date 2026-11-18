@@ -14,7 +14,11 @@ import contextlib
 import math
 import sys
 
+from live_port import require_test_port
+
 from cadpilot.freecad_client import FreeCADConnection
+
+require_test_port()
 
 c = FreeCADConnection(connect_grace=10)
 FAILURES: list[str] = []
