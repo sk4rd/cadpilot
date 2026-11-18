@@ -142,3 +142,98 @@ def test_every_freecad_tool_reply_leads_with_the_user_changes(fake_freecad, monk
     content = asyncio.run(server.mcp.call_tool("list_documents", {}))
     blocks = content[0] if isinstance(content, tuple) else content
     assert not blocks[0].text.startswith("## User changes")
+
+
+# --- feature sync is data-driven ---------------------------------------------
+
+
+def _patch(op, prop, live, expr=None, base=""):
+    return sj.sync_patch(sj.feature_rule(op, prop), live, expr, base)
+
+
+def test_every_feature_rule_has_a_converter():
+    kinds = {rule.kind for rules in sj.FEATURE_SYNC.values() for rule in rules.values()}
+    known = {
+        "value",
+        "int",
+        "enum",
+        "spacings",
+        "extent_spacing",
+        "pad_type",
+        "link_sub",
+        "names",
+        "axis",
+        "mirror_plane",
+        "z_offset",
+        "edge_size",
+    }
+    assert kinds <= known
+
+
+def test_pad_and_pocket_sync_their_type_and_second_length():
+    assert _patch("pocket", "Type", "ThroughAll") == {"through_all": True, "pad_type": sj.REMOVE}
+    assert _patch("pad", "Type", "TwoLengths") == {
+        "pad_type": "two_lengths",
+        "through_all": sj.REMOVE,
+    }
+    assert _patch("pad", "Length2", 4.5) == {"length2": 4.5}
+    assert _patch("pocket", "Offset", 1) == {"offset": 1}
+    assert _patch("pocket", "UpToFace", {"name": "Pad", "subs": ["Face6"]}) == {
+        "up_to_face": ["Pad", "Face6"]
+    }
+
+
+def test_pattern_and_mirror_properties_sync():
+    assert _patch("pattern", "Occurrences", 6) == {"count": 6}
+    assert _patch("pattern", "Occurrences", 6, expr="Vars.n") == {"count": "=Vars.n"}
+    assert _patch("pattern", "Spacings", [10.0, 12.5]) == {"spacings": [10, 12.5]}
+    assert _patch("pattern", "Spacings", [-1.0, -1.0]) == {"spacings": sj.REMOVE}
+    assert _patch("pattern", "Length", (30.0, 4)) == {"spacing": 10}
+    assert _patch("pad", "SideType", "Two sides") == {"side_type": "two_sides"}
+    assert _patch("pattern", "Originals", ["Pocket", "Pocket001"], base="Pocket") == {
+        "originals": ["Pocket001"]
+    }
+    axis = {"name": "Sketch", "subs": ["V_Axis"], "role": "", "type": "Sketcher::SketchObject"}
+    assert _patch("pattern", "Direction", axis) == {"axis": "V"}
+    origin = {"name": "Z_Axis", "subs": [""], "role": "Z_Axis", "type": "App::Line"}
+    assert _patch("pattern", "Axis", origin) == {"axis": "Z"}
+    plane = {"name": "YZ_Plane", "subs": [""], "role": "YZ_Plane", "type": "App::Plane"}
+    assert _patch("mirror", "MirrorPlane", plane) == {"plane": "YZ", "face": sj.REMOVE}
+    face = {"name": "Pad", "subs": ["Face3"], "role": "", "type": "PartDesign::Pad"}
+    assert _patch("mirror", "MirrorPlane", face) == {"face": ["Pad", "Face3"], "plane": sj.REMOVE}
+
+
+def test_rules_are_limited_to_the_object_they_describe():
+    offset = sj.feature_rule("pattern", "Offset")
+    assert offset.only == ("PartDesign::LinearPattern",) and offset.when == ("Mode", "Spacing")
+
+
+def test_a_datum_offset_expression_stays_an_expression():
+    assert _patch("datum_plane", "AttachmentOffset", (0, 0, 5, 0)) == {"offset": 5}
+    assert _patch("datum_plane", "AttachmentOffset", (0, 0, 5, 0), expr="Vars.gap") == {
+        "offset": "=Vars.gap"
+    }
+    assert _patch("datum_plane", "AttachmentOffset", (1, 0, 5, 0)) is None
+
+
+def test_a_value_equal_to_the_builder_default_writes_nothing():
+    rule = sj.feature_rule("pad", "Reversed")
+    assert sj.patch_value_matches(rule, "reversed", None, False)
+    assert not sj.patch_value_matches(rule, "reversed", None, True)
+    rule = sj.feature_rule("pocket", "Type")
+    assert sj.patch_value_matches(rule, "pad_type", None, sj.REMOVE)
+    assert sj.patch_value_matches(rule, "pad_type", None, "length")
+    assert not sj.patch_value_matches(rule, "through_all", None, True)
+
+
+def test_feature_claims_follow_the_rules():
+    rec = sj.StepRecord(
+        index=4,
+        operation="pattern",
+        params={"obj_name": "Pocket", "obj_properties": {"count": 4}},
+        objects_before=["Pocket"],
+        objects_after=["Pocket", "LinearPattern"],
+    )
+    props = sj.tracked_objects([rec])["LinearPattern"]["props"]
+    assert props["Occurrences"] == (4, "count", None)
+    assert props["Originals"] == (4, "originals", None)

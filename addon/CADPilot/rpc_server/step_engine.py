@@ -1855,6 +1855,47 @@ def _placement_brief(d) -> str:
     return f"pos({pos}) rot {_num(rot.get('Angle', 0))}deg@({ax})"
 
 
+def _link_json(value) -> dict[str, Any] | None:
+    """A PropertyLinkSub value as sj.sync_patch reads it."""
+    if not value:
+        return None
+    target, subs = (value[0], value[1]) if isinstance(value, tuple) else (value, [])
+    if target is None:
+        return None
+    if isinstance(subs, str):
+        subs = [subs]
+    return {
+        "name": target.Name,
+        "subs": [str(x) for x in subs or []] or [""],
+        "role": str(getattr(target, "Role", "") or ""),
+        "type": str(getattr(target, "TypeId", "") or ""),
+    }
+
+
+def _read_live(obj, prop: str, kind: str):
+    """A feature property's live value, in the shape its sync rule's kind takes."""
+    value = getattr(obj, prop, None)
+    if kind in ("link_sub", "axis", "mirror_plane"):
+        return _link_json(value)
+    if kind == "names":
+        return [o.Name for o in value or [] if o is not None]
+    if kind == "spacings":
+        return list(value) if value is not None else None
+    if kind == "extent_spacing":
+        return (_json_scalar(value), getattr(obj, "Occurrences", 0))
+    if kind == "enum":
+        return str(value) if value is not None else None
+    if kind == "edge_size":
+        return _uniform_edge_size(value)
+    if kind == "z_offset":
+        if value is None:
+            return None
+        return (value.Base.x, value.Base.y, value.Base.z, value.Rotation.Angle)
+    if kind == "pad_type":
+        return str(value) if value is not None else None
+    return _json_scalar(value)
+
+
 def _sync_props_target(rec: sj.StepRecord, sub: int | None) -> dict[str, Any] | None:
     """The obj_properties dict a manual-edit sync write lands in.
 
@@ -2036,27 +2077,16 @@ class _JournalSyncObserver:
         rec = next((r for r in records if r.index == hit[0]), None)
         if rec is None:
             return
+        rule = sj.feature_rule(rec.operation, prop) if hit[2] is None else None
+        if rule is not None:
+            self._sync_rule(obj, doc, records, rec, prop, rule)
+            return
         if prop == "Placement":
             value, same, brief = (
                 _placement_json(obj.Placement),
                 _same_placement,
                 _placement_brief,
             )
-        elif prop == "Edges":
-            value = _uniform_edge_size(getattr(obj, prop, None))
-            if value is None:
-                return
-            same, brief = _same_scalar, None
-        elif prop == "AttachmentOffset":
-            # Only a pure-z translation maps onto the spec's scalar offset; a
-            # rotated/shifted attachment has no spec representation.
-            pl = getattr(obj, prop, None)
-            base, rot = getattr(pl, "Base", None), getattr(pl, "Rotation", None)
-            if base is None or rot is None:
-                return
-            if abs(base.x) > 1e-9 or abs(base.y) > 1e-9 or abs(rot.Angle) > 1e-9:
-                return
-            value, same, brief = _num(base.z), _same_scalar, None
         else:
             # An expression binding wins over the literal value, in both
             # directions: binding in the GUI stores "=expr" (the builder
@@ -2080,6 +2110,36 @@ class _JournalSyncObserver:
         props[hit[1]] = value
         shown = (brief(current), brief(value)) if brief else (current, value)
         self._commit_sync(doc, records, rec, [(f"{obj.Name}.{prop}", *shown)])
+
+    def _sync_rule(self, obj, doc, records, rec, prop: str, rule: sj.SyncRule) -> None:
+        """Mirror one feature property through its FEATURE_SYNC rule."""
+        if rule.only and getattr(obj, "TypeId", "") not in rule.only:
+            return
+        if rule.when is not None and str(getattr(obj, rule.when[0], "")) != str(rule.when[1]):
+            return
+        exprs = dict(getattr(obj, "ExpressionEngine", None) or [])
+        expr = exprs.get(prop)
+        if rule.kind == "z_offset":
+            expr = exprs.get(".AttachmentOffset.Base.z") or exprs.get("AttachmentOffset.Base.z")
+        base = str((rec.params or {}).get("obj_name") or "")
+        patch = sj.sync_patch(rule, _read_live(obj, prop, rule.kind), expr, base)
+        if not patch:
+            return
+        target = rec.params.setdefault("obj_properties", {})
+        edits: list[tuple[str, Any, Any]] = []
+        for key, value in patch.items():
+            current = target.get(key)
+            if sj.patch_value_matches(rule, key, current, value):
+                continue
+            if value is sj.REMOVE:
+                target.pop(key, None)
+                value = None
+            else:
+                target[key] = value
+            what = f"{obj.Name}.{prop}" + ("" if key == rule.key else f" ({key})")
+            edits.append((what, current, value))
+        if edits:
+            self._commit_sync(doc, records, rec, edits)
 
     def _sync_cells(self, obj, doc, records, index: int, sub: int | None = None) -> None:
         """Mirror spreadsheet cell edits (values, formulas, aliases) into the

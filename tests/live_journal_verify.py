@@ -28,13 +28,6 @@ if not os.environ.get("CADPILOT_PORT"):
 os.environ.setdefault("CADPILOT_HOME", tempfile.mkdtemp(prefix="cadpilot-live-journal-"))
 
 c = FreeCADConnection()
-# A FreeCAD that was killed with documents open greets the next start with a
-# modal Document Recovery dialog, which holds every queued call back.
-for _ in range(3):
-    if c.get_gui_state().get("defer_reason") != "modal":
-        break
-    c.dismiss_blocking_dialog()
-    time.sleep(1)
 FAILURES: list[str] = []
 CHANGE_TEXTS: list[str] = []
 
@@ -50,6 +43,12 @@ def check(name, cond, detail=""):
 
 def py(code, doc=None):
     res = c.execute_code(textwrap.dedent(code), doc_name=doc)
+    if not res.get("success") and "modal dialog" in str(res.get("error")):
+        # A FreeCAD that was killed with documents open greets the next start
+        # with a Document Recovery dialog, which holds every queued call back.
+        c.dismiss_blocking_dialog()
+        time.sleep(1)
+        res = c.execute_code(textwrap.dedent(code), doc_name=doc)
     if not res.get("success"):
         raise RuntimeError(f"snippet failed: {res.get('error')}")
     return str(res.get("message") or "").split("Output: ", 1)[-1].strip()
@@ -279,6 +278,87 @@ text = changes(D)
 check("D Claude is told the user added an object", "added UserBox (Part::Box)" in text, text)
 
 
+# --- F: feature properties beyond length sync through their rules -------------
+D = "LJ_Feat"
+fresh(D)
+SQUARE = {
+    "geometry": [
+        {"type": "line", "from": [0, 0], "to": [40, 0]},
+        {"type": "line", "from": [40, 0], "to": [40, 40]},
+        {"type": "line", "from": [40, 40], "to": [0, 40]},
+        {"type": "line", "from": [0, 40], "to": [0, 0]},
+    ],
+    "constraints": [
+        {"type": "coincident", "items": [[0, "end"], [1, "start"]]},
+        {"type": "coincident", "items": [[1, "end"], [2, "start"]]},
+        {"type": "coincident", "items": [[2, "end"], [3, "start"]]},
+        {"type": "coincident", "items": [[3, "end"], [0, "start"]]},
+    ],
+}
+cad("variables", D, "Vars", cells={"A1": ["gap", 3], "A2": ["n", 3]})
+cad("sketch", D, "Base", **SQUARE)
+cad("pad", D, "Base", length=8)
+cad(
+    "sketch",
+    D,
+    "Hole",
+    plane={"face": ["Pad", "+Z"]},
+    geometry=[{"type": "circle", "center": [8, 8], "radius": 2}],
+)
+cad("pocket", D, "Hole", length=3)
+cad("pattern", D, "Pocket", pattern_type="linear", axis="X", spacing=10, count=2)
+cad("datum_plane", D, "DP", plane="XY", offset=12)
+changes(D)
+user(
+    D,
+    """
+    pad = d.getObject('Pad')
+    d.openTransaction('two sides')
+    pad.SideType = 'Two sides'
+    pad.Length2 = 3
+    d.commitTransaction(); d.recompute()
+    """,
+)
+pad = step_params(D, "pad")
+check("F a pad's SideType syncs", pad.get("side_type") == "two_sides", str(pad))
+check("F ... with the second length", pad.get("length2") == 3, str(pad))
+user(D, "d.getObject('Pocket').Type = 'ThroughAll'; d.recompute()")
+pocket = step_params(D, "pocket")
+check("F a pocket switched to through-all syncs", pocket.get("through_all") is True, str(pocket))
+pattern = [r for r in records(D) if r["operation"] == "pattern"]
+if check("F the pattern step was built", pattern and pattern[0]["state"] == "done", str(pattern)):
+    user(D, "d.getObject('LinearPattern').setExpression('Occurrences', 'Vars.n'); d.recompute()")
+    params = step_params(D, "pattern")
+    check(
+        "F a bound pattern count syncs as an expression",
+        params.get("count") == "=Vars.n"
+        and set(params) == {"pattern_type", "axis", "spacing", "count"},
+        str(params),
+    )
+user(
+    D,
+    "d.getObject('DP').setExpression('.AttachmentOffset.Base.z', 'Vars.gap * 4'); d.recompute()",
+)
+dp = step_params(D, "datum_plane")
+check(
+    "F a datum offset expression stays an expression",
+    dp.get("offset") == "=Vars.gap*4",
+    str(dp),
+)
+text = changes(D)
+check(
+    "F Claude is told about the feature edits",
+    "Pad.SideType" in text and "Pocket.Type" in text and "=Vars.gap*4" in text,
+    text,
+)
+
+
+py(
+    "import FreeCAD\n"
+    "for name in list(FreeCAD.listDocuments()):\n"
+    "    if name.startswith(('LJ_', 'lj_')):\n"
+    "        FreeCAD.closeDocument(name)\n"
+)
 print()
 if CHANGE_TEXTS:
     print("Example of what Claude reads:\n" + CHANGE_TEXTS[0])

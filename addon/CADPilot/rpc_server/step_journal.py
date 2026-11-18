@@ -1064,29 +1064,215 @@ def rewind(records: list[StepRecord], count: int) -> list[StepRecord]:
 # lives here: which object/step owns which property (tracked_objects), and
 # what a live value maps back to (map_cell_value / map_constraint_value).
 
-# Feature op -> {object property: spec key}. Only properties the builder
-# actually consumes are mapped, so a synced value is always a valid spec key —
-# including ones the caller did not pass originally (a pad built with the
-# default length must still pick up a GUI Length edit, or replay reverts it).
-# Richer values (edge selectors, links, boolean tool compounds) stay unsynced.
+
+@dataclass(frozen=True)
+class SyncRule:
+    """How one live feature property maps back onto the op's spec.
+
+    ``kind`` names the converter (``sync_patch``) and the engine's reader:
+    ``value`` (a scalar), ``int``, ``enum`` (snake_case of the enum text),
+    ``spacings`` (a float list, FreeCAD's all -1 meaning "uniform"),
+    ``extent_spacing`` (a linear pattern's overall length as the pitch the
+    spec gives), ``pad_type`` (the Type enum, ThroughAll being the spec's
+    ``through_all``), ``link_sub`` (a ``[object, subelement]`` reference),
+    ``names`` (the extra originals beyond the step's own base), ``axis``,
+    ``mirror_plane``, ``z_offset`` (a pure-z AttachmentOffset) and
+    ``edge_size`` (a uniform Part fillet/chamfer size).
+    ``default`` is what the builder does when the key is absent, so a live
+    value equal to it writes nothing. ``only`` limits the rule to object
+    TypeIds; ``when`` to objects whose (property, value) matches.
+    """
+
+    key: str
+    kind: str = "value"
+    default: Any = None
+    only: tuple[str, ...] = ()
+    when: tuple[str, Any] | None = None
+
+
+#: A sync_patch value that removes the key from the spec.
+REMOVE = object()
+
+_PADLIKE = {
+    "Length": SyncRule("length", default=10.0),
+    "Length2": SyncRule("length2"),
+    "Offset": SyncRule("offset", default=0),
+    "Reversed": SyncRule("reversed", default=False),
+    "Midplane": SyncRule("midplane", default=False),
+    "SideType": SyncRule("side_type", "enum", default="one_side"),
+    "Type": SyncRule("pad_type", "pad_type", default="length"),
+    "UpToFace": SyncRule("up_to_face", "link_sub"),
+}
+_LINEAR = ("PartDesign::LinearPattern",)
+_POLAR = ("PartDesign::PolarPattern",)
+
+# Feature op -> {object property: rule}. Every property the op's builder reads
+# back from its spec is listed, including keys the caller did not pass (a pad
+# built with the default length must still pick up a GUI Length edit, or replay
+# reverts it); a new spec key is one line here (plus a reader in the engine for
+# a new kind). An expression bound to the property syncs as "=expr" whatever the
+# kind. Boolean tool compounds and edge selectors stay unsynced.
 # FreeCAD >= 1.1 moved Part-level fillet/chamfer sizes into per-edge Edges
 # tuples, so both names are claimed (only the one that exists fires).
-FEATURE_SYNC: dict[str, dict[str, str]] = {
-    "fillet": {"Radius": "radius", "Edges": "radius"},
-    "chamfer": {"Size": "size", "Edges": "size"},
-    "pad": {"Length": "length", "Reversed": "reversed", "Midplane": "midplane"},
-    "pocket": {"Length": "length", "Reversed": "reversed", "Midplane": "midplane"},
-    "revolution": {"Angle": "angle", "Reversed": "reversed"},
-    "groove": {"Angle": "angle", "Reversed": "reversed"},
-    "thickness": {"Value": "value", "Reversed": "reversed"},
-    "draft": {"Angle": "angle"},
-    "loft": {"Solid": "solid", "Ruled": "ruled"},
-    "sweep": {"Solid": "solid"},
+FEATURE_SYNC: dict[str, dict[str, SyncRule]] = {
+    "fillet": {"Radius": SyncRule("radius"), "Edges": SyncRule("radius", "edge_size")},
+    "chamfer": {"Size": SyncRule("size"), "Edges": SyncRule("size", "edge_size")},
+    "pad": _PADLIKE,
+    "pocket": _PADLIKE,
+    "revolution": {
+        "Angle": SyncRule("angle", default=360.0),
+        "Reversed": SyncRule("reversed", default=False),
+    },
+    "groove": {
+        "Angle": SyncRule("angle", default=360.0),
+        "Reversed": SyncRule("reversed", default=False),
+    },
+    "thickness": {"Value": SyncRule("value"), "Reversed": SyncRule("reversed", default=False)},
+    "draft": {"Angle": SyncRule("angle")},
+    "loft": {"Solid": SyncRule("solid", default=True), "Ruled": SyncRule("ruled", default=False)},
+    "sweep": {"Solid": SyncRule("solid", default=True)},
+    "pattern": {
+        "Occurrences": SyncRule("count", "int"),
+        "Angle": SyncRule("angle", default=360.0, only=_POLAR),
+        "Offset": SyncRule("spacing", only=_LINEAR, when=("Mode", "Spacing")),
+        "Length": SyncRule("spacing", "extent_spacing", only=_LINEAR, when=("Mode", "Extent")),
+        "Spacings": SyncRule("spacings", "spacings", only=_LINEAR),
+        "Reversed": SyncRule("reversed", default=False),
+        "Originals": SyncRule("originals", "names", default=[]),
+        "Direction": SyncRule("axis", "axis", only=_LINEAR),
+        "Axis": SyncRule("axis", "axis", only=_POLAR),
+    },
+    "mirror": {
+        "MirrorPlane": SyncRule("plane", "mirror_plane", default="XY"),
+        "Originals": SyncRule("originals", "names", default=[]),
+    },
     # A datum plane / attached sketch offset is a pure-z AttachmentOffset;
-    # the engine reader refuses anything more general (rotation, x/y shift).
-    "datum_plane": {"AttachmentOffset": "offset"},
-    "sketch": {"AttachmentOffset": "offset"},
+    # the converter refuses anything more general (rotation, x/y shift).
+    "datum_plane": {"AttachmentOffset": SyncRule("offset", "z_offset", default=0)},
+    "sketch": {"AttachmentOffset": SyncRule("offset", "z_offset", default=0)},
 }
+
+
+def feature_rule(op: str, prop: str) -> SyncRule | None:
+    return FEATURE_SYNC.get(op, {}).get(prop)
+
+
+# Type enum <-> the spec's pad_type; ThroughAll is the spec's through_all flag.
+PAD_TYPES = {
+    "Length": "length",
+    "TwoLengths": "two_lengths",
+    "UpToFirst": "up_to_first",
+    "UpToLast": "up_to_last",
+    "UpToFace": "up_to_face",
+    "UpToShape": "up_to_shape",
+}
+
+_ORIGIN_TOKENS = {
+    "X_Axis": "X",
+    "Y_Axis": "Y",
+    "Z_Axis": "Z",
+    "H_Axis": "H",
+    "V_Axis": "V",
+    "N_Axis": "N",
+    "XY_Plane": "XY",
+    "XZ_Plane": "XZ",
+    "YZ_Plane": "YZ",
+}
+
+
+def _link_token(link: Any) -> str | None:
+    """("X_Axis" role of a body origin, or a sketch's "H_Axis" sub) -> "X"/"H"."""
+    if not isinstance(link, dict):
+        return None
+    sub = (link.get("subs") or [""])[0]
+    return _ORIGIN_TOKENS.get(sub) or _ORIGIN_TOKENS.get(str(link.get("role") or ""))
+
+
+def sync_patch(
+    rule: SyncRule, live: Any, expr: str | None = None, base: str = ""
+) -> dict[str, Any] | None:
+    """Spec keys (and values) that reproduce ``live``; None = no representation.
+
+    ``live`` is what the engine read (a scalar, a list, or for links a dict
+    ``{"name", "subs", "role", "type"}``); ``expr`` the property's binding,
+    which wins in every kind, as ``"=expr"``. A value of ``REMOVE`` deletes the
+    key (a pocket that is no longer through-all). ``base`` is the step's own
+    object, which the spec names apart from its extra originals.
+    """
+    if expr:
+        return {rule.key: "=" + _normalize_expression(str(expr))}
+    kind = rule.kind
+    if kind in ("value", "edge_size"):
+        return None if live is None else {rule.key: live}
+    if kind == "int":
+        try:
+            return {rule.key: int(live)}
+        except (TypeError, ValueError):
+            return None
+    if kind == "enum":
+        return None if live is None else {rule.key: str(live).strip().lower().replace(" ", "_")}
+    if kind == "spacings":
+        if not isinstance(live, (list, tuple)):
+            return None
+        if all(float(v) == -1 for v in live):
+            return {rule.key: REMOVE}
+        return {rule.key: [_num(v) for v in live]}
+    if kind == "extent_spacing":
+        # (overall length, occurrences): the spec's pitch spans count-1 gaps.
+        try:
+            length, count = float(live[0]), int(live[1])
+        except (TypeError, ValueError, IndexError):
+            return None
+        return {rule.key: _num(length / (count - 1))} if count > 1 else None
+    if kind == "pad_type":
+        if live == "ThroughAll":
+            return {"through_all": True, rule.key: REMOVE}
+        token = PAD_TYPES.get(str(live))
+        return None if token is None else {rule.key: token, "through_all": REMOVE}
+    if kind == "link_sub":
+        if not live:
+            return {rule.key: REMOVE}
+        sub = (live.get("subs") or [""])[0]
+        return {rule.key: [live.get("name"), sub] if sub else live.get("name")}
+    if kind == "names":
+        if not isinstance(live, (list, tuple)):
+            return None
+        return {rule.key: [n for n in live if n != base]}
+    if kind == "axis":
+        token = _link_token(live)
+        return None if token is None else {rule.key: token}
+    if kind == "mirror_plane":
+        if not live:
+            return None
+        token = _link_token(live)
+        if token in ("XY", "XZ", "YZ"):
+            return {rule.key: token, "face": REMOVE}
+        sub = (live.get("subs") or [""])[0]
+        if sub.startswith("Face"):
+            return {"face": [live.get("name"), sub], rule.key: REMOVE}
+        if "Plane" in str(live.get("type") or ""):
+            return {rule.key: {"datum": live.get("name")}, "face": REMOVE}
+        return None
+    if kind == "z_offset":
+        if not isinstance(live, (list, tuple)) or len(live) != 4:
+            return None
+        x, y, z, angle = (float(v) for v in live)
+        if abs(x) > 1e-9 or abs(y) > 1e-9 or abs(angle) > 1e-9:
+            return None
+        return {rule.key: _num(z)}
+    return None
+
+
+def patch_value_matches(rule: SyncRule, key: str, current: Any, value: Any) -> bool:
+    """Whether the spec's ``current`` already says ``value`` (absent = default)."""
+    if current is None:
+        if value is REMOVE:
+            return True
+        current = rule.default if key == rule.key else False
+    if value is REMOVE:
+        return False
+    return _same_value(current, value)
+
 
 # Ops whose obj_name names the object they CREATE (not a base), so the object
 # is tracked by name even when the before/after diff is empty (an idempotent
@@ -1288,7 +1474,7 @@ def tracked_objects(records: list[StepRecord]) -> dict[str, dict[str, Any]]:
             else:
                 names = {str(params.get("obj_name") or "")}
         else:
-            claims = dict(FEATURE_SYNC.get(op, {}))
+            claims = {prop: rule.key for prop, rule in FEATURE_SYNC.get(op, {}).items()}
             names = set(rec.objects_after) - set(rec.objects_before)
             if op in NEW_OBJECT_OPS:
                 names |= {str(params.get("obj_name") or "")}
