@@ -64,6 +64,5 @@ class LoggedXMLRPCServer(FilteredXMLRPCServer):
         try:
             return super()._marshaled_dispatch(data, dispatch_method, path)
         finally:
-            # The handler thread is reused across requests; a stale id would
-            # mislabel every later line on it.
+            # A stale id would mislabel every later line logged on this thread.
             dbglog.clear_request_id()

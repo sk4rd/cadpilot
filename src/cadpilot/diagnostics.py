@@ -358,8 +358,8 @@ def port_listeners(port: int) -> tuple[str, list[str]]:
 
     Distinguishes the two failures that look identical from the client side: a
     closed port (RPC server not started) from an open port that never answers
-    (FreeCAD's GUI thread is wedged — restart FreeCAD, the addon log is still
-    readable).
+    (FreeCAD's Python side is deadlocked — restart FreeCAD; the addon log file
+    on disk is still readable).
     """
     if sys.platform == "win32":
         text = _run(["netstat", "-ano", "-p", "TCP"])
@@ -545,9 +545,12 @@ def _verdict(
     if listeners:
         return (
             "The port is LISTENING but ping did not answer: FreeCAD is up with "
-            "the RPC server open, and its GUI thread is busy or wedged (a modal "
-            "dialog, a long recompute, or a deadlock). The addon log stays "
-            "readable via get_addon_log; restart FreeCAD if it does not clear."
+            "the RPC server open, but its Python side is not running. Ping is "
+            "answered on its own thread, so a merely busy GUI thread (a modal "
+            "dialog, a long recompute) does not cause this; a deadlock does, for "
+            "example a document write from an execute_code_async worker outside "
+            "commit(). Restart FreeCAD; the addon log file listed above shows "
+            "the last thing it did."
         )
     crashes = [e for e in crash_logs or [] if e.get("crash")]
     if crashes:

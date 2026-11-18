@@ -95,10 +95,11 @@ During development you can reload the addon **without restarting FreeCAD**:
    It stops the server, reloads every loaded `rpc_server.*` module in
    `_RELOAD_ORDER` (dependencies before importers, main module last; a reload
    error is reported in the result and never aborts the restart), then starts
-   the server from a deferred self-healing retry loop. The start must be
-   deferred because the in-flight XML-RPC request (this call) blocks the old
-   server's shutdown drain; attempts run 1 s apart for up to a minute, after
-   which the watchdog (`rpc_server/watchdog.py`) keeps retrying every 3 s.
+   the server from a deferred self-healing retry loop. The start is deferred
+   because the old listening socket is released by a drain thread
+   (`server_close` after `shutdown`), and waiting for it inline would block the
+   GUI thread; attempts run 1 s apart for up to a minute, after which the
+   watchdog (`rpc_server/watchdog.py`) keeps retrying every 3 s.
 
    The watchdog also covers accidents on its own: a start that failed at
    boot, a `serve_forever` thread that died, a port that was briefly stolen.
@@ -137,7 +138,7 @@ During development you can reload the addon **without restarting FreeCAD**:
    call still ran the old code). Reload the IMPORTING modules after the
    imported one, or the fix is invisible.
 
-> **Why deferred?** `stop_rpc_server()` calls `shutdown()` which blocks until the current request drains, and `server_close()` must release the socket before `start_rpc_server()` can bind again. Running the restart synchronously inside the same `execute_code` call deadlocks because the request itself is blocking shutdown. The `QTimer` deferral runs on FreeCAD's main GUI thread after the RPC call returns.
+> **Why deferred?** `stop_rpc_server()` runs `shutdown()` and `server_close()` on a drain thread, and `server_close()` must release the socket before `start_rpc_server()` can bind again. The server is threaded (`ThreadingMixIn`, daemon request threads), so the in-flight call no longer blocks `shutdown()`, but binding before the drain thread has closed the old socket fails with EADDRINUSE, and joining it from the `execute_code` call would stall the GUI thread. The `QTimer` deferral runs on FreeCAD's main GUI thread after the RPC call returns.
 
 ## Architecture & Key Constraints
 

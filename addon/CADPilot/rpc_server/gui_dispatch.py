@@ -542,8 +542,9 @@ def dispatch_to_gui(task: Callable[[], Any], timeout: float = 60, force: bool = 
 
     queued_at = time.monotonic()
     (_force_queue if force else _rpc_request_queue).put(_wrapped)
-    if _waker is not None:
-        _waker.wake()  # immediate wake via Qt signal (thread-safe)
+    waker = _waker  # read once: a concurrent stop may clear the global
+    if waker is not None:
+        waker.wake()  # immediate wake via Qt signal (thread-safe)
 
     deadline = queued_at + timeout
     result: Any = _MISSING

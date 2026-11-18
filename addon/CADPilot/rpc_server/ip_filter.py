@@ -2,13 +2,24 @@
 
 import ipaddress
 import re
+from socketserver import ThreadingMixIn
 from xmlrpc.server import SimpleXMLRPCServer
 
 from rpc_server import dbglog
 
 
-class FilteredXMLRPCServer(SimpleXMLRPCServer):
-    """XML-RPC server that filters connections by allowed IP addresses/subnets."""
+class FilteredXMLRPCServer(ThreadingMixIn, SimpleXMLRPCServer):
+    """XML-RPC server that filters connections by allowed IP addresses/subnets.
+
+    One thread per request: the calls that are deliberately not GUI-dispatched
+    (ping, get_gui_state, get_addon_log, get_task_result, dismiss_blocking_dialog)
+    must answer while another call waits on the GUI thread, which is exactly
+    when they are needed. GUI work still runs one task at a time through
+    gui_dispatch, so this adds no concurrency on the document.
+    """
+
+    # A request thread blocked on the GUI must not hold FreeCAD open at exit.
+    daemon_threads = True
 
     def __init__(self, addr, allowed_ips_str="127.0.0.1", **kwargs):
         self._allowed_networks = _parse_allowed_ips(allowed_ips_str)

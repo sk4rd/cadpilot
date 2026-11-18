@@ -43,7 +43,7 @@ The XML-RPC transport times out after 150 seconds. A socket timeout is never ret
 
 ## 3. The single-threaded constraint
 
-FreeCAD's document tree and GUI are not thread safe: document work must happen on the main thread, while the XML-RPC server runs on its own. The addon therefore forwards every request to the main thread; the rest of this section describes the dispatch mechanism and its edge cases.
+FreeCAD's document tree and GUI are not thread safe: document work must happen on the main thread, while the XML-RPC server answers each request on a thread of its own. The addon therefore forwards every request that touches FreeCAD to the main thread, where tasks run one at a time; the calls that only report state (`ping`, `get_gui_state`, `get_addon_log`, `get_task_result`) answer directly, so they stay available while a long call holds the main thread. The rest of this section describes the dispatch mechanism and its edge cases.
 
 Each call is placed on a task queue, and the RPC thread blocks waiting for the answer. Every call has its own response queue, so a call that times out can never receive the next call's answer. The main thread is woken by a Qt signal, with a timer as a fallback in case the signal is lost.
 

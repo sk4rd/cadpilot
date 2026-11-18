@@ -1551,13 +1551,13 @@ def start_rpc_server(port=None):
     if rpc_server_instance:
         return "RPC Server already running."
 
-    # A previous stop may still be draining an in-flight request off-thread;
-    # binding before its server_close() would hit the old socket.
+    # A previous stop may still be closing its socket off-thread; binding
+    # before its server_close() would hit the old socket.
     if _stop_thread is not None and _stop_thread.is_alive():
         _stop_thread.join(timeout=5.0)
         if _stop_thread.is_alive():
             return (
-                "RPC Server is still stopping (a request is draining); try again in a few seconds."
+                "RPC Server is still stopping (its socket is closing); try again in a few seconds."
             )
 
     dbglog.setup_logging()
@@ -1609,21 +1609,19 @@ def stop_rpc_server():
     cleanup_waker()
 
     def _shutdown_and_close():
-        # shutdown() blocks until serve_forever drains the in-flight request,
-        # and that request may itself be waiting on dispatch_to_gui — running
-        # this on the GUI thread (menu command) froze the UI for up to the
-        # dispatch timeout. server_close() must always follow: without it the
-        # listening socket stays bound and Stop -> Start fails with
-        # EADDRINUSE (the restart the README asks for after changing Remote
-        # Connections or Allowed IPs).
+        # shutdown() waits for serve_forever's next poll (up to 0.5 s), so it
+        # stays off the GUI thread. Request threads are daemons and are not
+        # waited for: one still blocked on dispatch_to_gui times out by itself.
+        # server_close() must always follow: without it the listening socket
+        # stays bound and Stop -> Start fails with EADDRINUSE (the restart the
+        # README asks for after changing Remote Connections or Allowed IPs).
         try:
             server.shutdown()
             if thread is not None:
                 thread.join(timeout=10.0)
                 if thread.is_alive():
                     FreeCAD.Console.PrintWarning(
-                        "CADPilot: server thread still draining a request; "
-                        "socket closes when it finishes.\n"
+                        "CADPilot: server thread did not stop; socket closes when it finishes.\n"
                     )
         finally:
             server.server_close()
@@ -1672,9 +1670,9 @@ def restart_rpc_server(port: int | None = None) -> dict:
     Replaces the manual execute_code recipe. The reload happens HERE, in
     ``_RELOAD_ORDER`` (dependencies before importers, the main module last),
     and a reload error is reported but never aborts the restart. The start is
-    deferred to a main-window QTimer because the in-flight RPC request (this
-    call) blocks the old server's shutdown drain — the first attempt cannot
-    succeed before this function returns. Every attempt resolves
+    deferred to a main-window QTimer because the old listening socket is only
+    released when stop_rpc_server's drain thread has run server_close, and
+    waiting for that here would block the GUI thread. Every attempt resolves
     ``rpc_server.rpc_server`` FRESH, so it binds the reloaded code.
 
     desired is set True up front and the watchdog is suppressed for the
@@ -1759,7 +1757,7 @@ def restart_rpc_server(port: int | None = None) -> dict:
     timer.start()
 
     result["note"] = (
-        "start is deferred (the shutdown drain waits for this call to return); "
+        "start is deferred (the old socket closes on a drain thread); "
         f"up to {_RESTART_MAX_ATTEMPTS} attempts 1 s apart, then the watchdog takes over"
     )
     return result
