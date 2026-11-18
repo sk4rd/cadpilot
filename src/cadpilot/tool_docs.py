@@ -454,7 +454,10 @@ draft — taper faces (obj_name = base solid feature).
 Required in obj_properties: faces (selector), angle.
 Optional: neutral_plane, pull_direction ({"edge": ["ObjName", "EdgeN"]}), body, name.
 faces accepts direction tokens like thickness; the result echoes the resolved
-faces (name/center/normal).""",
+faces (name/center/normal) and the neutral plane used.
+neutral_plane is the face the taper pivots on (a direction token or FaceN). It
+defaults to the outermost planar face perpendicular to every drafted face,
+bottom (-Z) first; a drafted face cannot be its own neutral plane.""",
     "datum_plane": """\
 datum_plane — PartDesign datum plane (obj_name = plane name, default
 "DatumPlane", may be omitted).

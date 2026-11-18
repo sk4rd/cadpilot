@@ -2035,6 +2035,9 @@ _FAILURE_HINTS = {
     "revolution": "check that the profile is a closed wire on ONE side of the axis "
     "(a profile crossing its revolve axis is rejected by FreeCAD)",
     "groove": "check that the profile is a closed wire on one side of the axis",
+    "draft": "the neutral plane must be perpendicular to the drafted faces and meet them, and "
+    "a large angle can make the tapered faces cross; check neutral_plane, pull_direction and "
+    "the angle",
 }
 
 _REV_AXIS = {"X": "H_Axis", "Y": "V_Axis", "Z": "N_Axis"}
@@ -2282,6 +2285,45 @@ def _build_thickness(doc, spec):
     return feat
 
 
+_NEUTRAL_PREFERENCE = ("-Z", "+Z", "-Y", "+Y", "-X", "+X")
+
+
+def _default_neutral_plane(base, names) -> str:
+    """The face a draft pivots on when the caller names none.
+
+    The old default was the first DRAFTED face itself, which FreeCAD can never
+    build, so every draft without neutral_plane failed. The usual mould setup
+    is the bottom: a planar face perpendicular to every drafted face, -Z first.
+    """
+    shape = base.Shape
+    drafted = []
+    for name in names:
+        face = shape.getElement(name)
+        if face.Surface.TypeId == "Part::GeomPlane":
+            drafted.append(face.normalAt(0, 0))
+    best = None
+    for i, face in enumerate(shape.Faces, start=1):
+        if f"Face{i}" in names or face.Surface.TypeId != "Part::GeomPlane":
+            continue
+        normal = face.normalAt(0, 0)
+        if any(abs(normal.dot(n)) > 1e-6 for n in drafted):
+            continue
+        for rank, token in enumerate(_NEUTRAL_PREFERENCE):
+            axis = "XYZ".index(token[1])
+            sign = 1.0 if token[0] == "+" else -1.0
+            if normal[axis] * sign > 1.0 - 1e-6:
+                key = (rank, -face.CenterOfMass[axis] * sign)
+                if best is None or key < best[0]:
+                    best = (key, f"Face{i}")
+    if best is None:
+        raise ValueError(
+            "draft needs neutral_plane: no planar face of the base is perpendicular to every "
+            "drafted face, so there is no face for the taper to pivot on. Pass "
+            "neutral_plane='-Z' (a direction token or FaceN)."
+        )
+    return best[1]
+
+
 def _build_draft(doc, spec):
     _require(spec, "faces", "angle")
     body = sketcher_ops._get_or_create_body(doc, spec.get("body"))
@@ -2291,10 +2333,26 @@ def _build_draft(doc, spec):
         _require_end_of_chain(owner, base, "draft")
     names = _resolve_elements(base, spec["faces"], "Face")
     _record_resolved_faces(base, names)
-    neutral = spec.get("neutral_plane", names[0])
-    neutral_names = _resolve_elements(
-        base, neutral if isinstance(neutral, list) else [neutral], "Face"
-    )
+    neutral = spec.get("neutral_plane")
+    if neutral is None:
+        neutral_names = [_default_neutral_plane(base, names)]
+    else:
+        neutral_names = _resolve_elements(
+            base, neutral if isinstance(neutral, list) else [neutral], "Face"
+        )
+        if neutral_names[0] in names:
+            raise ValueError(
+                f"draft neutral_plane {neutral_names[0]} is one of the faces being drafted; the "
+                "neutral plane is the face the taper pivots on (usually the bottom, '-Z'), and "
+                "it must be perpendicular to the drafted faces."
+            )
+    global _LAST_FEATURE_INFO
+    if isinstance(_LAST_FEATURE_INFO, dict):
+        _LAST_FEATURE_INFO["neutral_plane"] = neutral_names[0] + (
+            " (default: the outermost face perpendicular to every drafted face, bottom first)"
+            if neutral is None
+            else ""
+        )
     feat = body.newObject("PartDesign::Draft", spec.get("name") or "Draft")
     if "Faces" in feat.PropertiesList:
         feat.Base = base

@@ -371,3 +371,14 @@ def test_up_to_modes_find_their_face_in_either_direction():
     assert "spec.get('reversed') is not None" in flip, "an explicit reversed wins"
     assert "_flip_up_to_direction" in _src("_build_padlike")
     assert "'Two sides'" in _src("_apply_padlike_mode")
+
+
+def test_draft_neutral_plane_is_never_a_drafted_face():
+    """The old default was the first drafted face, which FreeCAD never builds."""
+    draft = _src("_build_draft")
+    assert "spec.get('neutral_plane', names[0])" not in draft
+    assert "_default_neutral_plane(base, names)" in draft
+    assert "is one of the faces being drafted" in draft
+    default = _src("_default_neutral_plane")
+    assert "abs(normal.dot(n)) > 1e-06" in default, "perpendicular to every drafted face"
+    assert "'-Z'" in ast.unparse(_FEATURE).split("_NEUTRAL_PREFERENCE =")[1][:40]
