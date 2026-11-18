@@ -1641,6 +1641,11 @@ class FreeCADRPC:
                     step_engine.commit_transaction(doc)  # empty -> no undo entry
                     tx_changed = step_engine.undo_token(doc) != token_before
             changed_docs = step_engine.changed_documents(docs_before)
+            # An undo entry is a change even when no object's fingerprint moved
+            # (sketch.solve() makes one): the journal records it, so the reply must
+            # not call the snippet read-only.
+            if tx_changed and tx_name and tx_name not in changed_docs:
+                changed_docs = [*changed_docs, tx_name]
             # The step belongs to the document whose transaction we own, and is
             # atomic only when THAT document changed. A change made to another
             # document happened outside our transaction: it owns its own undo
