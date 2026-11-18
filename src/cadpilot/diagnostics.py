@@ -18,6 +18,7 @@ import contextlib
 import json
 import locale
 import os
+import re
 import shutil
 import socket
 import subprocess
@@ -322,6 +323,29 @@ def settings_status() -> list[dict[str, object]]:
 # --- process / port probes ---------------------------------------------------
 
 
+_FREECAD_PROCESS_NAMES = {"freecad", "freecadcmd", "freecad-daily", "freecadcmd-daily"}
+# NixOS wraps binaries as ".<name>-wrapped", and the kernel's process name keeps
+# only 15 characters (".FreeCAD-wrappe").
+_NIX_WRAPPER = re.compile(r"^\.(.+?)-wrap(?:p(?:e(?:d)?)?)?$")
+
+
+def _is_freecad(name: str | None, exe: str | None) -> bool:
+    """Case-insensitive match of the process name or executable to FreeCAD's.
+
+    A lowercase prefix check missed NixOS's ``.FreeCAD-wrapped`` and reported a
+    running FreeCAD as not running. Exact names, not a substring: FreeCADMCP's
+    own server runs as ``.freecad-mcp-wrapped``.
+    """
+    for text in (name, exe):
+        if not text:
+            continue
+        base = Path(text).name.lower().removesuffix(".exe")
+        wrapped = _NIX_WRAPPER.match(base)
+        if (wrapped.group(1) if wrapped else base) in _FREECAD_PROCESS_NAMES:
+            return True
+    return False
+
+
 def freecad_processes() -> tuple[str, list[dict[str, object]]]:
     """(method, processes) — psutil when present, else a platform command."""
     try:
@@ -331,8 +355,7 @@ def freecad_processes() -> tuple[str, list[dict[str, object]]]:
     else:
         procs: list[dict[str, object]] = []
         for p in psutil.process_iter(["pid", "name", "create_time", "exe"]):
-            name = (p.info.get("name") or "").lower()
-            if name.startswith("freecad"):
+            if _is_freecad(p.info.get("name"), p.info.get("exe")):
                 created = p.info.get("create_time")
                 procs.append(
                     {
@@ -348,9 +371,15 @@ def freecad_processes() -> tuple[str, list[dict[str, object]]]:
         text = _run(["tasklist", "/FI", "IMAGENAME eq FreeCAD.exe"])
         found = [ln for ln in (text or "").splitlines() if "freecad" in ln.lower()]
         return "tasklist", [{"line": ln.strip()} for ln in found]
-    text = _run(["pgrep", "-fl", "freecad"])
-    found = [ln for ln in (text or "").splitlines() if ln.strip()]
-    return "pgrep", [{"line": ln.strip()} for ln in found]
+    # -i: the name is FreeCAD (or .FreeCAD-wrapped on NixOS), not freecad; -f
+    # matched every command line that merely mentions a FreeCAD path.
+    text = _run(["pgrep", "-il", "freecad"])
+    found = [
+        ln.strip()
+        for ln in (text or "").splitlines()
+        if len(ln.split(None, 1)) == 2 and _is_freecad(ln.split(None, 1)[1], None)
+    ]
+    return "pgrep", [{"line": ln} for ln in found]
 
 
 def port_listeners(port: int) -> tuple[str, list[str]]:

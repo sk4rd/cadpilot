@@ -11,6 +11,7 @@ import socket
 import sys
 import threading
 import time
+import types
 import xmlrpc.server
 from pathlib import Path
 
@@ -163,6 +164,62 @@ def test_unparseable_settings_do_not_raise(tmp_path, monkeypatch):
     userdir = _userdir(tmp_path, monkeypatch=monkeypatch)
     (userdir / "cadpilot_settings.json").write_text("{not json", encoding="utf-8")
     assert "error" in diag.settings_status()[0]
+
+
+# --- process probe -------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("name", "exe", "expected"),
+    [
+        ("FreeCAD", None, True),
+        ("freecad.exe", None, True),
+        ("FreeCADCmd", None, True),
+        (".FreeCAD-wrapped", None, True),
+        (".FreeCAD-wrappe", None, True),  # the kernel keeps 15 characters
+        ("python3", "/nix/store/x-freecad-1.1.4/bin/.FreeCAD-wrapped", True),
+        (".freecad-mcp-wrapped", None, False),  # FreeCADMCP's server, not FreeCAD
+        ("python3", "/usr/bin/python3", False),
+    ],
+)
+def test_freecad_process_names_match_case_insensitively(name, exe, expected):
+    assert diag._is_freecad(name, exe) is expected
+
+
+def test_psutil_probe_finds_a_nixos_freecad(monkeypatch):
+    """Live: on NixOS the process is .FreeCAD-wrapped, and diagnose said
+    "FreeCAD is not running" while it was."""
+
+    class Proc:
+        def __init__(self, pid, name, exe):
+            self.info = {"pid": pid, "name": name, "exe": exe, "create_time": None}
+
+    fake = types.SimpleNamespace(
+        process_iter=lambda _attrs: [
+            Proc(7, ".FreeCAD-wrapped", "/nix/store/x-freecad/bin/.FreeCAD-wrapped"),
+            Proc(8, ".freecad-mcp-wrapped", "/nix/store/y/bin/.freecad-mcp-wrapped"),
+        ]
+    )
+    monkeypatch.setitem(sys.modules, "psutil", fake)
+    method, procs = diag.freecad_processes()
+    assert method == "psutil"
+    assert [p["pid"] for p in procs] == [7]
+
+
+def test_pgrep_probe_matches_the_name_case_insensitively(monkeypatch):
+    calls = []
+
+    def fake_run(cmd):
+        calls.append(cmd)
+        return "412 .FreeCAD-wrappe\n413 .freecad-mcp-wr\n"
+
+    monkeypatch.setitem(sys.modules, "psutil", None)  # import psutil -> ImportError
+    monkeypatch.setattr(diag.sys, "platform", "linux")
+    monkeypatch.setattr(diag, "_run", fake_run)
+    method, procs = diag.freecad_processes()
+    assert method == "pgrep"
+    assert calls == [["pgrep", "-il", "freecad"]]
+    assert procs == [{"line": "412 .FreeCAD-wrappe"}]
 
 
 # --- network probes ----------------------------------------------------------
