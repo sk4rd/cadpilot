@@ -580,6 +580,32 @@ def _centered_axis_line(body, axis: str, center):
     return line
 
 
+def _set_linear_spacing(feat, spec, count: int) -> bool:
+    """Set the pitch between copies; True when a negative pitch flipped the direction.
+
+    Spacing mode keeps the pitch when the count changes. The old Extent-mode
+    ``Length = spacing * (count - 1)`` froze the overall length instead, so a
+    count bound to a spreadsheet silently changed the pitch (live: 4 holes at
+    20 became 6 holes at 12) and a spacing expression could not be bound at all.
+    """
+    spacing = spec["spacing"]
+    numeric = isinstance(spacing, (int, float)) and not isinstance(spacing, bool)
+    flip = numeric and spacing < 0
+    if "Mode" not in feat.PropertiesList:
+        # FreeCAD < 1.1 has Extent mode only: Length spans the count-1 gaps.
+        if not numeric or isinstance(spec.get("count"), str):
+            raise ValueError(
+                "an expression-bound spacing or count needs FreeCAD 1.1's spacing mode; this "
+                "FreeCAD has extent mode only. Pass numbers."
+            )
+        feat.Length = abs(float(spacing)) * (count - 1)
+        return flip
+    feat.Mode = "Spacing"
+    # Offset is a PropertyLength (never negative): the sign goes to Reversed.
+    _set_or_bind(feat, "Offset", abs(float(spacing)) if numeric else spacing)
+    return flip
+
+
 def _build_pd_pattern(doc, body, base, spec, ptype: str, count: int):
     """Pattern a PartDesign FEATURE inside its Body.
 
@@ -593,6 +619,7 @@ def _build_pd_pattern(doc, body, base, spec, ptype: str, count: int):
     if axis not in _REV_AXIS:
         raise ValueError(f"axis must be 'X'/'Y'/'Z' for a PartDesign pattern, got {axis!r}")
     datum = _body_axis_datum(body, axis)
+    reversed_ = bool(spec.get("reversed", False))
     if ptype == "polar":
         feat = body.newObject("PartDesign::PolarPattern", spec.get("name") or "PolarPattern")
         _set_or_bind(feat, "Angle", spec.get("angle", 360.0))
@@ -610,8 +637,8 @@ def _build_pd_pattern(doc, body, base, spec, ptype: str, count: int):
     elif ptype == "linear":
         _require(spec, "spacing")
         feat = body.newObject("PartDesign::LinearPattern", spec.get("name") or "LinearPattern")
-        # Length spans the pattern (count-1 gaps), matching the Draft semantics.
-        _set_or_bind(feat, "Length", float(spec["spacing"]) * (count - 1))
+        if _set_linear_spacing(feat, spec, count):
+            reversed_ = not reversed_
         if datum is not None:
             feat.Direction = (datum, [""])
     else:
@@ -619,7 +646,7 @@ def _build_pd_pattern(doc, body, base, spec, ptype: str, count: int):
     # AFTER the transform props: assigning Originals re-derives the shape.
     feat.Originals = [base]
     feat.Occurrences = count
-    feat.Reversed = bool(spec.get("reversed", False))
+    feat.Reversed = reversed_
     doc.recompute()
     # FreeCAD 1.1 cannot be driven reliably into doing this through the Python
     # API: with Originals/Axis/Angle/Occurrences set, the occurrences can come

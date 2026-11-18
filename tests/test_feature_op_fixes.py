@@ -173,3 +173,15 @@ def test_measure_geometry_says_when_the_shape_is_stale():
 def test_self_intersecting_profiles_are_refused():
     for builder in ("_build_padlike", "_build_revlike"):
         assert "_refuse_self_intersecting_profile" in _src(builder)
+
+
+# --- patterns ---------------------------------------------------------------------
+
+
+def test_linear_pattern_keeps_its_pitch_when_the_count_changes():
+    """Extent mode with Length = spacing*(count-1) froze the overall length, so
+    a count bound to a spreadsheet silently changed the pitch."""
+    spacing = _src("_set_linear_spacing")
+    assert "'Spacing'" in spacing and "'Offset'" in spacing
+    assert "_set_or_bind(feat, 'Offset'" in spacing, "the pitch must be bindable"
+    assert "count - 1" not in _src("_build_pd_pattern")
