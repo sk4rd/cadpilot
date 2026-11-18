@@ -89,3 +89,47 @@ def test_diagnostics_for_constraints_not_added_by_the_call_keep_their_index():
     mapped = ss.map_diagnostics({"RedundantConstraints": [1]}, [None])
     assert mapped == {"redundant": [{"constraint": 0}]}
     assert ss.diagnostics_text(mapped) == "redundant: Constraints[0]"
+
+
+def test_a_list_of_edges_expands_instead_of_dropping_the_rest():
+    """horizontal used only items[0] and equal/parallel only the first two, so
+    the rest of a list was silently unconstrained."""
+    assert _args({"type": "horizontal", "items": [0, 2, [4]]}) == [
+        ("Horizontal", 0),
+        ("Horizontal", 2),
+        ("Horizontal", 4),
+    ]
+    assert _args({"type": "equal", "items": [0, 1, 2]}) == [("Equal", 0, 1), ("Equal", 1, 2)]
+    assert _args({"type": "parallel", "items": [1, 3, 5]}) == [
+        ("Parallel", 1, 3),
+        ("Parallel", 3, 5),
+    ]
+    assert _args({"type": "coincident", "items": [[0, "end"], [1, "start"], [2, "start"]]}) == [
+        ("Coincident", 0, 2, 1, 1),
+        ("Coincident", 1, 1, 2, 1),
+    ]
+
+
+def test_a_radius_list_is_one_named_dimension_plus_equalities():
+    plans = _plan({"type": "radius", "items": [0, 1, 2], "value": 4, "name": "R"})
+    assert [p["args"] for p in plans] == [("Radius", 0), ("Equal", 0, 1), ("Equal", 0, 2)]
+    assert [p["name"] for p in plans] == ["R", None, None]
+    assert [p["datum"] for p in plans] == [4.0, None, None]
+    assert {p["entry"] for p in plans} == {0}
+
+
+def test_extra_items_that_cannot_expand_are_refused():
+    for c in (
+        {"type": "distance", "items": [0, 1, 2], "value": 5},
+        {"type": "tangent", "items": [0, 1, 2]},
+        {"type": "symmetric", "items": [[0, "start"], [0, "end"], 1, 2]},
+        {"type": "angle", "items": [0, 1, 2], "value": 5},
+        {"type": "equal", "items": [0]},
+    ):
+        with pytest.raises(ValueError, match=rf"constraints\[0\] \({c['type']}\): takes "):
+            _plan(c)
+
+
+def test_a_name_cannot_label_an_expanded_geometric_entry():
+    with pytest.raises(ValueError, match="one name cannot label the 2 constraints"):
+        _plan({"type": "horizontal", "items": [0, 2], "name": "H"})

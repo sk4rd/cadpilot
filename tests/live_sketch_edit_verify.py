@@ -136,8 +136,48 @@ def m1_diagnostics_name_the_spec_entry():
     )
 
 
+def m7_lists_expand_into_one_constraint_per_item():
+    doc = "SkM7"
+    newdoc(doc)
+    circles = [{"type": "circle", "center": [10 * i, 0], "radius": 2 + i} for i in range(3)]
+    res = cad(
+        "sketch",
+        doc,
+        "Holes",
+        geometry=[LINE([0, 10], [20, 12]), LINE([0, 20], [20, 23]), *circles],
+        constraints=[
+            {"type": "horizontal", "items": [0, 1]},
+            {"type": "radius", "items": [2, 3, 4], "value": 4, "name": "HoleR"},
+        ],
+    )
+    s = inspect(doc, "Holes")
+    lines = s["geo"][:2]
+    check(
+        "M7 horizontal [0, 1] levels both lines",
+        ok(res) and all(abs(g["StartPoint"][1] - g["EndPoint"][1]) < 1e-6 for g in lines),
+        f"{res} {lines}",
+    )
+    check(
+        "M7 radius [2, 3, 4] gives one named radius and makes the others equal",
+        [g["r"] for g in s["geo"][2:]] == [4.0, 4.0, 4.0]
+        and [k["type"] for k in s["cons"]]
+        == ["Horizontal", "Horizontal", "Radius", "Equal", "Equal"]
+        and s["cons"][2]["name"] == "HoleR",
+        str(s["cons"]),
+    )
+    res = cad(
+        "sketch",
+        doc,
+        "TooMany",
+        geometry=circles,
+        constraints=[{"type": "distance", "items": [0, 1, 2], "value": 5}],
+    )
+    check("M7 a distance over three edges is refused", "takes one edge" in err(res), err(res))
+
+
 CHECKS = [
     m1_diagnostics_name_the_spec_entry,
+    m7_lists_expand_into_one_constraint_per_item,
 ]
 
 if __name__ == "__main__":

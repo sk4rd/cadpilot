@@ -8,6 +8,7 @@ and owns everything that needs a live document.
 from __future__ import annotations
 
 import math
+from itertools import pairwise
 from typing import Any
 
 # spec point keyword -> Sketcher PointPos
@@ -67,62 +68,90 @@ def is_point_item(item: Any) -> bool:
     return isinstance(item, (list, tuple)) and len(item) == 2
 
 
-def constraint_args(ctype: str, items: list) -> tuple:
-    """spec constraint -> Sketcher.Constraint args (without any value)."""
+def _count(items: list, low: int, high: int | None, shape: str) -> None:
+    """Refuse an item count the constraint cannot use, instead of dropping extras."""
+    n = len(items)
+    if n < low or (high is not None and n > high):
+        raise ValueError(f"takes {shape}, got {n} item(s)")
+
+
+def constraint_args(ctype: str, items: list) -> list[tuple]:
+    """spec constraint -> one Sketcher.Constraint args tuple per constraint.
+
+    A list of edges or points expands instead of being cut to the first one or
+    two: ``horizontal [0, 2]`` is two constraints, ``equal [0, 1, 2]`` the chain
+    0=1, 1=2, and ``radius [0, 1, 2]`` one radius on 0 with 1 and 2 equal to it,
+    so a single named dimension drives them all.
+    """
     if ctype == "coincident":
-        g1, p1 = point_ref(items[0])
-        g2, p2 = point_ref(items[1])
-        return ("Coincident", g1, p1, g2, p2)
+        _count(items, 2, None, "two or more points [g, p]")
+        out = []
+        for a, b in pairwise(items):
+            g1, p1 = point_ref(a)
+            g2, p2 = point_ref(b)
+            out.append(("Coincident", g1, p1, g2, p2))
+        return out
     if ctype in ("horizontal", "vertical"):
-        return (ctype.capitalize(), geo_ref(items[0]))
+        return [(ctype.capitalize(), geo_ref(item)) for item in items]
     if ctype in ("tangent", "perpendicular"):
-        if all(is_point_item(i) for i in items[:2]):
+        _count(items, 2, 2, "two edges or two points")
+        if all(is_point_item(i) for i in items):
             g1, p1 = point_ref(items[0])
             g2, p2 = point_ref(items[1])
-            return (ctype.capitalize(), g1, p1, g2, p2)
-        return (ctype.capitalize(), geo_ref(items[0]), geo_ref(items[1]))
+            return [(ctype.capitalize(), g1, p1, g2, p2)]
+        return [(ctype.capitalize(), geo_ref(items[0]), geo_ref(items[1]))]
     if ctype in ("parallel", "equal"):
-        return (ctype.capitalize(), geo_ref(items[0]), geo_ref(items[1]))
+        _count(items, 2, None, "two or more edges")
+        return [(ctype.capitalize(), geo_ref(a), geo_ref(b)) for a, b in pairwise(items)]
     if ctype == "symmetric":
+        _count(items, 3, 3, "two points and a line or a point")
         g1, p1 = point_ref(items[0])
         g2, p2 = point_ref(items[1])
         third = items[2]
         if is_point_item(third):  # symmetry about a point
             g3, p3 = point_ref(third)
-            return ("Symmetric", g1, p1, g2, p2, g3, p3)
-        return ("Symmetric", g1, p1, g2, p2, geo_ref(third))  # about a line
+            return [("Symmetric", g1, p1, g2, p2, g3, p3)]
+        return [("Symmetric", g1, p1, g2, p2, geo_ref(third))]  # about a line
     if ctype == "distance":
+        _count(items, 1, 2, "one edge, two points, or a point and an edge")
         if len(items) == 1:
-            return ("Distance", geo_ref(items[0]))
+            return [("Distance", geo_ref(items[0]))]
         a, b = items[0], items[1]
         if is_point_item(a) and is_point_item(b):
             g1, p1 = point_ref(a)
             g2, p2 = point_ref(b)
-            return ("Distance", g1, p1, g2, p2)
+            return [("Distance", g1, p1, g2, p2)]
         if is_point_item(a):
             g1, p1 = point_ref(a)
-            return ("Distance", g1, p1, geo_ref(b))
+            return [("Distance", g1, p1, geo_ref(b))]
         g2, p2 = point_ref(b)
-        return ("Distance", g2, p2, geo_ref(a))
+        return [("Distance", g2, p2, geo_ref(a))]
     if ctype in ("distance_x", "distance_y"):
+        _count(items, 1, 2, "one point, one edge, or two points")
         fc_type = "DistanceX" if ctype == "distance_x" else "DistanceY"
         if len(items) == 1:
             # ONE item is either a point (distance from the origin) or a whole
             # geometry (FreeCAD's edge form: the x/y extent of a line).
             if is_point_item(items[0]):
                 g, p = point_ref(items[0])
-                return (fc_type, g, p)
-            return (fc_type, geo_ref(items[0]))
+                return [(fc_type, g, p)]
+            return [(fc_type, geo_ref(items[0]))]
         g1, p1 = point_ref(items[0])
         g2, p2 = point_ref(items[1])
-        return (fc_type, g1, p1, g2, p2)
+        return [(fc_type, g1, p1, g2, p2)]
     if ctype == "radius":
-        return ("Radius", geo_ref(items[0]))
+        first = geo_ref(items[0])
+        return [("Radius", first)] + [("Equal", first, geo_ref(i)) for i in items[1:]]
     if ctype == "angle":
+        _count(items, 1, 2, "one or two edges")
         if len(items) == 1:
-            return ("Angle", geo_ref(items[0]))
-        return ("Angle", geo_ref(items[0]), geo_ref(items[1]))
+            return [("Angle", geo_ref(items[0]))]
+        return [("Angle", geo_ref(items[0]), geo_ref(items[1]))]
     raise ValueError(f"unknown constraint type {ctype!r}; supported: {', '.join(CONSTRAINT_TYPES)}")
+
+
+# Sketcher constraint types that carry a datum
+_DATUM_TYPES = frozenset({"Distance", "DistanceX", "DistanceY", "Radius", "Diameter", "Angle"})
 
 
 def datum(ctype: str, value: Any) -> tuple[float, str | None]:
@@ -142,6 +171,9 @@ def datum(ctype: str, value: Any) -> tuple[float, str | None]:
 def plan_constraints(constraints: list | None) -> list[dict]:
     """The spec's constraint list -> one planned entry per Sketcher constraint.
 
+    An entry can expand into several (see :func:`constraint_args`); each keeps
+    the spec index it came from, so the solver's complaints map back to it.
+
     Each entry: ``args`` (Sketcher.Constraint positional args without the
     datum), ``datum`` (None for a geometric constraint), ``expr`` (to bind
     after adding), ``name``, and ``entry``/``type`` (the spec index and type it
@@ -153,37 +185,44 @@ def plan_constraints(constraints: list | None) -> list[dict]:
         if not isinstance(c, dict):
             raise ValueError(f"constraints[{i}] must be a dict, got {c!r}")
         ctype = c.get("type")
+        where = f"constraints[{i}] ({ctype})"
         items = c.get("items")
         if not isinstance(items, list) or not items:
-            raise ValueError(f"constraints[{i}] ({ctype}): 'items' must be a non-empty list.")
+            raise ValueError(f"{where}: 'items' must be a non-empty list.")
         try:
-            args = constraint_args(ctype, items)
+            all_args = constraint_args(ctype, items)
         except (IndexError, TypeError) as e:
-            raise ValueError(f"constraints[{i}] ({ctype}): malformed items: {e}") from e
+            raise ValueError(f"{where}: malformed items: {e}") from e
+        except ValueError as e:
+            raise ValueError(f"{where}: {e}") from e
 
         value = c.get("value")
         if ctype in DIMENSIONAL:
             if value is None:
-                raise ValueError(
-                    f"constraints[{i}] ({ctype}): dimensional constraint requires 'value'."
-                )
+                raise ValueError(f"{where}: dimensional constraint requires 'value'.")
             value_datum, expr = datum(ctype, value)
         else:
             if value is not None:
-                raise ValueError(
-                    f"constraints[{i}] ({ctype}): geometric constraint takes no 'value'."
-                )
+                raise ValueError(f"{where}: geometric constraint takes no 'value'.")
             value_datum, expr = None, None
-        planned.append(
-            {
-                "args": args,
-                "datum": value_datum,
-                "expr": expr,
-                "name": str(c["name"]) if c.get("name") else None,
-                "entry": i,
-                "type": ctype,
-            }
-        )
+        name = str(c["name"]) if c.get("name") else None
+        if name and ctype not in DIMENSIONAL and len(all_args) > 1:
+            raise ValueError(
+                f"{where}: one name cannot label the {len(all_args)} constraints these items "
+                "expand to; split the entry or drop the name."
+            )
+        for args in all_args:
+            dimensional = args[0] in _DATUM_TYPES
+            planned.append(
+                {
+                    "args": args,
+                    "datum": value_datum if dimensional else None,
+                    "expr": expr if dimensional else None,
+                    "name": name if dimensional or ctype not in DIMENSIONAL else None,
+                    "entry": i,
+                    "type": ctype,
+                }
+            )
     return planned
 
 

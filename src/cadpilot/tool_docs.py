@@ -324,9 +324,10 @@ Optional: plane, offset, body, construction, external, constraints.
   parallel, equal, symmetric, distance, distance_x, distance_y, radius, angle.
   value accepts numbers or "=expressions".
   Item shapes per type (a whole-geometry reference is the GeoId or [GeoId]):
-    coincident     [[g,p], [g,p]]                     (two points)
-    horizontal     [g]        vertical     [g]        (one edge)
-    tangent/perpendicular/parallel/equal  [g]  or [g, g]
+    coincident     [[g,p], [g,p], ...]                (points, chained a=b, b=c)
+    horizontal     [g, ...]   vertical     [g, ...]   (one constraint per edge)
+    tangent/perpendicular  [g, g] | [[g,p], [g,p]]
+    parallel/equal [g, g, ...]                        (chained a-b, b-c)
     symmetric      [[g,p], [g,p], [g]|  [g,p]]        (about a line or a point)
     distance       [g] | [[g,p],[g,p]] | [[g,p], g]
     distance_x / _y  [[g,p]] (that point's x/y from the ORIGIN, the usual way
@@ -336,8 +337,11 @@ Optional: plane, offset, body, construction, external, constraints.
                      position: on a VERTICAL line that extent is 0, so pairing
                      [g] with a `vertical` constraint conflicts) |
                      [[g,p],[g,p]]
-    radius         [g]        angle   [g] | [g, g]
+    radius         [g, ...]   (the value goes on the first; the rest are made
+                               equal to it, so one named dimension drives all)
+    angle          [g] | [g, g]
   A bare GeoId (not wrapped in a list) is accepted wherever one edge is meant.
+  Item counts a type cannot use are refused, never silently dropped.
   distance_x/distance_y are SIGNED and measured FROM the first referenced point
   TO the second, so [[0,"start"],[-1,"center"]] with +30 puts the origin at
   (−30, ·) — swapping the two items flips the sign. Write the constraint in the
