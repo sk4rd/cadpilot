@@ -298,8 +298,13 @@ def addon_log_status() -> list[dict[str, object]]:
     return out
 
 
-def settings_status() -> list[dict[str, object]]:
-    """``cadpilot_settings.json`` per user dir: auto-start / remote flags."""
+def settings_status(server_port: int | None = None) -> list[dict[str, object]]:
+    """``cadpilot_settings.json`` per user dir: auto-start, remote, port.
+
+    ``server_port`` is the port this MCP server connects to. An add-on set to
+    listen on another one gets a ``port_mismatch`` entry: both sides answer
+    "nothing there" while each is fine on its own.
+    """
     out: list[dict[str, object]] = []
     for d in user_data_dirs():
         f = d / "cadpilot_settings.json"
@@ -310,14 +315,29 @@ def settings_status() -> list[dict[str, object]]:
         except (OSError, ValueError) as e:
             out.append({"path": str(f), "error": f"{type(e).__name__}: {e}"})
             continue
-        keys = (
-            "auto_start_rpc",
-            "allow_remote_connections",
-            "allowed_ips",
-            "rpc_port",
-        )
-        out.append({"path": str(f), **{k: data.get(k) for k in keys if k in data}})
+        if not isinstance(data, dict):
+            out.append({"path": str(f), "error": f"not a JSON object: {type(data).__name__}"})
+            continue
+        keys = ("auto_start_rpc", "remote_enabled", "allowed_ips", "port")
+        entry: dict[str, object] = {"path": str(f), **{k: data.get(k) for k in keys if k in data}}
+        try:
+            addon_port = int(data.get("port", DEFAULT_PORT))
+        except (TypeError, ValueError):
+            addon_port = None
+        if server_port is not None and addon_port is not None and addon_port != server_port:
+            entry["port_mismatch"] = {"addon": addon_port, "server": server_port}
+        out.append(entry)
     return out
+
+
+def _port_mismatch_text(entry: dict) -> str:
+    ports = entry["port_mismatch"]
+    return (
+        f"{entry['path']} sets the add-on's port to {ports['addon']}, but this MCP server "
+        f"connects to {ports['server']}. Start the server with --port {ports['addon']} (or "
+        f'CADPILOT_PORT={ports["addon"]}), or change "port" there and restart the RPC '
+        "server. A CADPILOT_PORT set for FreeCAD itself overrides the file."
+    )
 
 
 # --- process / port probes ---------------------------------------------------
@@ -565,8 +585,10 @@ def _verdict(
     logs: list[dict],
     crash_logs: list[dict] | None = None,
     gui_state: dict | None = None,
+    settings: list[dict] | None = None,
 ) -> str:
     note = gui_state_note(gui_state)
+    mismatch = next((e for e in settings or [] if e.get("port_mismatch")), None)
     if rpc.get("reachable"):
         if note:
             return "FreeCAD is reachable, but " + note
@@ -588,6 +610,10 @@ def _verdict(
             f"{crashes[0]['path']} records a bootstrap crash (see below). Fix the "
             "crash, then restart FreeCAD — the addon, its workbench and the RPC "
             "server all come up together at startup."
+        )
+    if procs and mismatch:
+        return "FreeCAD is running but nothing is listening on the port: " + _port_mismatch_text(
+            mismatch
         )
     if procs:
         return (
@@ -653,7 +679,7 @@ def diagnose(host: str, port: int = DEFAULT_PORT, timeout: float = PROBE_TIMEOUT
         proc_dirs = [Path(p["exe"]).parent for p in procs if p.get("exe")]
         report["bootstrap_logs"] = bootstrap_logs(proc_dirs)
         report["addon_logs"] = addon_log_status()
-        report["settings"] = settings_status()
+        report["settings"] = settings_status(port)
 
     report["verdict"] = _verdict(
         rpc,
@@ -662,6 +688,7 @@ def diagnose(host: str, port: int = DEFAULT_PORT, timeout: float = PROBE_TIMEOUT
         report.get("addon_logs") or [],
         report.get("bootstrap_logs"),
         report.get("gui_state"),
+        report.get("settings"),
     )
     return report
 
@@ -746,8 +773,10 @@ def format_report(report: dict) -> str:
         )
 
     for entry in report.get("settings") or []:
-        flags = {k: v for k, v in entry.items() if k != "path"}
+        flags = {k: v for k, v in entry.items() if k not in ("path", "port_mismatch")}
         lines.append(f"Settings : {entry.get('path')} {flags}")
+        if entry.get("port_mismatch") and not rpc.get("reachable"):
+            lines.append(f"    PORT MISMATCH: {_port_mismatch_text(entry)}")
 
     lines.append(f"\nVerdict: {report.get('verdict')}")
     lines.append("\n" + CHECKLIST)

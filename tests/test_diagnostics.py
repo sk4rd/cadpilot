@@ -160,6 +160,35 @@ def test_settings_status_reads_the_rpc_flags(tmp_path, monkeypatch):
     assert "unrelated" not in entry
 
 
+def test_settings_status_reads_the_keys_the_addon_writes(tmp_path, monkeypatch):
+    """The add-on writes port/remote_enabled; diagnose read rpc_port and
+    allow_remote_connections, so it never showed either."""
+    userdir = _userdir(tmp_path, monkeypatch=monkeypatch)
+    (userdir / "cadpilot_settings.json").write_text(
+        '{"port": 9894, "remote_enabled": true, "auto_start_rpc": true}', encoding="utf-8"
+    )
+    entry = diag.settings_status(9894)[0]
+    assert entry["port"] == 9894
+    assert entry["remote_enabled"] is True
+    assert "port_mismatch" not in entry
+
+
+def test_a_port_mismatch_is_flagged_and_named_in_the_verdict(tmp_path, monkeypatch):
+    userdir = _userdir(tmp_path, monkeypatch=monkeypatch)
+    (userdir / "cadpilot_settings.json").write_text('{"port": 9894}', encoding="utf-8")
+    entries = diag.settings_status(9875)
+    assert entries[0]["port_mismatch"] == {"addon": 9894, "server": 9875}
+
+    verdict = diag._verdict({"reachable": False}, [], [{"pid": 7}], [], None, None, entries)
+    assert "9894" in verdict and "--port 9894" in verdict, verdict
+    text = diag.format_report({"platform": "linux", "rpc": {}, "settings": entries})
+    assert "PORT MISMATCH" in text
+
+    # No "port" key: the add-on listens on its default.
+    (userdir / "cadpilot_settings.json").write_text("{}", encoding="utf-8")
+    assert diag.settings_status(9894)[0]["port_mismatch"] == {"addon": 9875, "server": 9894}
+
+
 def test_unparseable_settings_do_not_raise(tmp_path, monkeypatch):
     userdir = _userdir(tmp_path, monkeypatch=monkeypatch)
     (userdir / "cadpilot_settings.json").write_text("{not json", encoding="utf-8")
