@@ -52,7 +52,7 @@ addon/CADPilot/             # FreeCAD workbench addon (copied to FreeCAD's Mod/ 
     request_log.py        # Tags log records with the RPC request that caused them
 
 examples/                 # Showcase models (.FCStd) and their PNG renders
-tests/                    # pytest suite for the MCP server side (fake XML-RPC connection) and tests/live_complex_verify.py — the ACCUMULATING live regression corpus: complex real-scenario builds (parametric flange, enclosure, hinge assembly, journal truth, session semantics, async) asserting analytic volumes against a RUNNING FreeCAD; stress rounds ADD cases here instead of writing throwaway probes (run: .venv/Scripts/python.exe tests/live_complex_verify.py)
+tests/                    # pytest suite for the MCP server side (fake XML-RPC connection) and tests/live_complex_verify.py — the ACCUMULATING live regression corpus: complex real-scenario builds (parametric flange, enclosure, hinge assembly, journal truth, session semantics, async) asserting analytic volumes against a RUNNING FreeCAD; stress rounds ADD cases here instead of writing throwaway probes (run: .venv/Scripts/python.exe tests/live_complex_verify.py); tests/live_runtime_verify.py checks the add-on runtime live (status calls during a long call, serialized mutations, the heartbeat after a long task, dismissing a modal opened inside a task, execute_code_async commit() and its guards, late completions, the active document handed back; run: CADPILOT_PORT=<port> uv run --frozen python tests/live_runtime_verify.py — it refuses to run without CADPILOT_PORT)
 evaluations/              # mcp-builder Phase 4: read-only QA pairs + run notes
 ```
 
