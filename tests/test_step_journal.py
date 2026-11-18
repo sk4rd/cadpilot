@@ -574,6 +574,11 @@ def test_insert_before_plan_appends_when_nothing_is_planned():
     assert sj.plan_shift_note(recs, rec, 0) == ""
 
 
+def test_text_and_quantity_cells_read_back():
+    """The builder writes text as 'Width and FreeCAD stores "10 mm" as =10 mm."""
+    assert sj.map_cell_value(None, "'Width") == "Width"
+    assert sj.map_cell_value(None, "=10 mm") == "=10mm"
+
 
 # --- manual-edit sync (pure half) -------------------------------------------
 

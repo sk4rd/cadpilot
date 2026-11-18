@@ -1,5 +1,6 @@
 """Property assignment from JSON-friendly dicts onto FreeCAD document objects."""
 
+import re
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -141,6 +142,17 @@ def resolve_references(doc: FreeCAD.Document, val: Any) -> list[tuple[Any, Any]]
     return refs
 
 
+def _is_quantity(text: str) -> bool:
+    """A value such as "10 mm": stored as a quantity, so expressions can use it."""
+    if not re.match(r"\s*[-+]?(\d|\.\d)", text):
+        return False
+    try:
+        FreeCAD.Units.Quantity(text)
+    except Exception:
+        return False
+    return True
+
+
 def set_spreadsheet_cells(ss, cells: dict) -> None:
     """Write ``{cell: [alias, value]}`` entries onto a Spreadsheet.
 
@@ -161,7 +173,7 @@ def set_spreadsheet_cells(ss, cells: dict) -> None:
         if isinstance(value, (int, float)):
             ss.set(cell, repr(value))
         elif isinstance(value, str):
-            ss.set(cell, value if value.startswith("=") else f'"{value}"')
+            ss.set(cell, value if value.startswith("=") or _is_quantity(value) else f"'{value}")
         else:
             raise ValueError(f"cells['{cell}']: unsupported value {value!r}.")
         try:
