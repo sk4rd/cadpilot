@@ -377,3 +377,25 @@ def test_restart_reload_order_imports_every_dependency_first():
                     f"{dep} first in _RELOAD_ORDER or its from-imports keep "
                     f"the OLD code alive after a hot restart"
                 )
+
+
+def test_initgui_prefers_its_own_folder_over_sys_path():
+    """find_addon_dir took the first sys.path entry holding
+    rpc_server/rpc_server.py, which is FreeCADMCP's when both add-ons are
+    installed (live: a decoy at Mod/CADPilot won, and the add-on failed to load).
+    The code object's filename survives the bare exec() that loses __file__."""
+    finder = next(
+        n
+        for n in ast.walk(_INITGUI)
+        if isinstance(n, ast.FunctionDef) and n.name == "find_addon_dir"
+    )
+    source = ast.unparse(finder)
+    assert "co_filename" in source
+    assert source.index("co_filename") < source.index("sys.path"), (
+        "the add-on's own folder must be the first candidate"
+    )
+    boot = ast.unparse(
+        next(n for n in _INITGUI.body if isinstance(n, ast.FunctionDef) and n.name == "_bootstrap")
+    )
+    assert "sys.path.remove(addon_dir)" in boot, "move it to the front, even when listed"
+    assert "addon_dir.txt" in boot, "diagnose reads the recorded location"

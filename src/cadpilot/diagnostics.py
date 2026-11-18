@@ -129,8 +129,26 @@ def user_data_dirs() -> list[Path]:
 
 
 def addon_roots() -> list[Path]:
-    """Candidate ``Mod/CADPilot`` directories, newest user dir first."""
-    return [d / "Mod" / "CADPilot" for d in user_data_dirs()]
+    """Candidate add-on directories, newest user dir first.
+
+    Per user dir: where the add-on's InitGui last said it lives
+    (``CADPilot/addon_dir.txt``, which covers a Nix store or ``--module-path``
+    install), then the conventional ``Mod/CADPilot``.
+    """
+    roots: list[Path] = []
+    seen: set[str] = set()
+    for d in user_data_dirs():
+        cands = [d / "Mod" / "CADPilot"]
+        with contextlib.suppress(OSError):
+            recorded = (d / "CADPilot" / "addon_dir.txt").read_text(encoding="utf-8").strip()
+            if recorded:
+                cands.insert(0, Path(recorded))
+        for cand in cands:
+            key = os.path.realpath(cand)
+            if key not in seen:
+                seen.add(key)
+                roots.append(cand)
+    return roots
 
 
 def addon_source_is_complete(path: Path) -> bool:

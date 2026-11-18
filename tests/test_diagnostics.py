@@ -78,6 +78,22 @@ def test_addon_status_flags_an_incomplete_install(tmp_path, monkeypatch):
     assert entries[0]["kind"] == "copy"
 
 
+def test_addon_roots_include_where_initgui_says_it_lives(tmp_path, monkeypatch):
+    """A Nix store or --module-path install is not under Mod/CADPilot; the
+    add-on records its own location for diagnose."""
+    userdir = _userdir(tmp_path, monkeypatch=monkeypatch)
+    store = tmp_path / "store" / "CADPilot"
+    (store / "rpc_server").mkdir(parents=True)
+    (store / "rpc_server" / "rpc_server.py").write_text("# addon\n", encoding="utf-8")
+    (userdir / "CADPilot").mkdir()
+    (userdir / "CADPilot" / "addon_dir.txt").write_text(f"{store}\n", encoding="utf-8")
+
+    assert diag.addon_roots()[0] == store
+    entries = diag.addon_status()
+    assert [e["path"] for e in entries] == [str(store)]
+    assert entries[0]["complete"] is True
+
+
 def test_addon_status_reports_a_linked_install(tmp_path, monkeypatch):
     userdir = _userdir(tmp_path, monkeypatch=monkeypatch)
     source = tmp_path / "src-addon"

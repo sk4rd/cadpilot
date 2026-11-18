@@ -58,6 +58,15 @@ def _bootstrap():
     # ---- locate the addon dir (authoritative: where rpc_server lives) -----
     def find_addon_dir():
         candidates = []
+        # Own folder first: FreeCAD compiles this file with its path as the
+        # code's filename (FreeCADGuiInit.RunInitGuiPy), which survives the
+        # bare exec() that loses __file__. The sys.path scan below took the
+        # first entry holding rpc_server/rpc_server.py, which is FreeCADMCP's
+        # when both add-ons are installed.
+        with contextlib.suppress(Exception):
+            here = sys._getframe().f_code.co_filename
+            if os.path.basename(here) == "InitGui.py":
+                candidates.append(os.path.dirname(os.path.abspath(here)))
         with contextlib.suppress(NameError):
             # Bare exec(): __file__ may be absent or point at the loader.
             candidates.append(os.path.dirname(os.path.abspath(__file__)))
@@ -74,7 +83,11 @@ def _bootstrap():
         return None
 
     addon_dir = find_addon_dir()
-    if addon_dir and addon_dir not in sys.path:
+    if addon_dir:
+        # To the front even when FreeCAD already listed it: `import rpc_server`
+        # must find this add-on's package before another add-on's.
+        with contextlib.suppress(ValueError):
+            sys.path.remove(addon_dir)
         sys.path.insert(0, addon_dir)
     if not addon_dir:
         try:
@@ -137,6 +150,26 @@ def _bootstrap():
         dbg(msg)
 
     dbg(f"bootstrap start addon_dir={addon_dir}")
+
+    # diagnose runs in the MCP process and can only guess Mod/CADPilot; a Nix
+    # store or --module-path install lives elsewhere, so say where this one is.
+    try:
+        os.makedirs(os.path.dirname(debug_log), exist_ok=True)
+        marker = os.path.join(os.path.dirname(debug_log), "addon_dir.txt")
+        with open(marker, "w", encoding="utf-8") as fh:
+            fh.write(addon_dir + "\n")
+    except Exception:
+        dbg_err("recording the addon dir FAILED")
+
+    loaded = sys.modules.get("rpc_server")
+    origin = getattr(loaded, "__file__", None) if loaded is not None else None
+    if origin and addon_dir:
+        origin_dir = os.path.dirname(os.path.dirname(os.path.abspath(origin)))
+        if os.path.realpath(origin_dir) != os.path.realpath(addon_dir):
+            dbg(
+                f"another add-on's rpc_server package is already loaded from {origin_dir}; "
+                "CADPilot's modules cannot load beside it"
+            )
 
     try:
         import FreeCAD
