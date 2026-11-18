@@ -1725,6 +1725,25 @@ def _refuse_self_intersecting_profile(sketch, op):
             )
 
 
+def _feature_body(doc, spec, anchor, op: str):
+    """The Body a feature built on ``anchor`` (its profile or base) belongs in.
+
+    It used to come from ``body`` alone, so with two bodies every pad needed it
+    and a wrong one was accepted: a pad landed in Body built from Body001's
+    sketch. The anchor's own body decides; ``body`` may only confirm it.
+    """
+    owner = _parent_body(anchor) if anchor is not None else None
+    named = spec.get("body")
+    if owner is None:
+        return sketcher_ops._get_or_create_body(doc, named)
+    if named and named != owner.Name:
+        raise ValueError(
+            f"{op}: '{anchor.Name}' belongs to Body '{owner.Name}', not '{named}'. A feature is "
+            f"built in the body of what it is built on; drop body or pass body='{owner.Name}'."
+        )
+    return owner
+
+
 def _profile_sketch(doc, spec, op):
     _require(spec, "base")
     sketch = _get_obj(doc, spec["base"], "profile sketch")
@@ -1985,8 +2004,8 @@ def _flip_up_to_direction(doc, feat, spec, fc_mode) -> None:
 
 def _build_padlike(doc, spec, fc_type, default_name):
     op = fc_type.split("::")[-1].lower()
-    body = sketcher_ops._get_or_create_body(doc, spec.get("body"))
     sketch = _profile_sketch(doc, spec, fc_type)
+    body = _feature_body(doc, spec, sketch, op)
     fc_mode, mode_note = tip_policy.padlike_mode(op, spec)
     doc.recompute()
     _require_closed_profile(sketch, fc_type)
@@ -2044,8 +2063,8 @@ _REV_AXIS = {"X": "H_Axis", "Y": "V_Axis", "Z": "N_Axis"}
 
 
 def _build_revlike(doc, spec, fc_type, default_name):
-    body = sketcher_ops._get_or_create_body(doc, spec.get("body"))
     sketch = _profile_sketch(doc, spec, fc_type)
+    body = _feature_body(doc, spec, sketch, fc_type.split("::")[-1].lower())
     doc.recompute()
     _require_closed_profile(sketch, fc_type)
     _refuse_self_intersecting_profile(sketch, fc_type.split("::")[-1].lower())
@@ -2101,9 +2120,14 @@ _ORIGIN_ROLE = {"XY": "XY_Plane", "XZ": "XZ_Plane", "YZ": "YZ_Plane"}
 def _build_datum_plane(doc, spec):
     """PartDesign datum plane on a base plane or existing face (+offset)."""
     _require(spec, "plane")
-    body = sketcher_ops._get_or_create_body(doc, spec.get("body"))
-    dp = body.newObject("PartDesign::Plane", spec.get("base") or "DatumPlane")
     plane = spec["plane"]
+    anchor = None
+    if isinstance(plane, dict) and isinstance(plane.get("face"), (list, tuple)) and plane["face"]:
+        anchor = doc.getObject(str(plane["face"][0]))
+        if anchor is not None:
+            anchor = sketcher_ops.attachment_ref(anchor)
+    body = _feature_body(doc, spec, anchor, "datum_plane")
+    dp = body.newObject("PartDesign::Plane", spec.get("base") or "DatumPlane")
     support_prop = "AttachmentSupport" if hasattr(dp, "AttachmentSupport") else "Support"
     center_target = None
     if isinstance(plane, str):
@@ -2265,8 +2289,8 @@ def _build_thickness(doc, spec):
             "FreeCAD returns the solid unchanged. List the faces to remove "
             '(e.g. faces=[5] or ["Face5"]) or all but one.'
         )
-    body = sketcher_ops._get_or_create_body(doc, spec.get("body"))
     base = _get_obj(doc, spec["base"], "base feature")
+    body = _feature_body(doc, spec, base, "thickness")
     owner = _parent_body(base)
     if owner is not None:
         _require_end_of_chain(owner, base, "thickness")
@@ -2326,8 +2350,8 @@ def _default_neutral_plane(base, names) -> str:
 
 def _build_draft(doc, spec):
     _require(spec, "faces", "angle")
-    body = sketcher_ops._get_or_create_body(doc, spec.get("body"))
     base = _get_obj(doc, spec["base"], "base feature")
+    body = _feature_body(doc, spec, base, "draft")
     owner = _parent_body(base)
     if owner is not None:
         _require_end_of_chain(owner, base, "draft")

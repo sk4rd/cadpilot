@@ -394,6 +394,9 @@ does not cross itself (a crossing outline is refused).
 A NEGATIVE length is legal and extrudes the other way (the result warns).
 A profile that does not touch the base still succeeds (the Body allows
 compounds) but leaves a floating solid — the result warns about it.
+The feature is built in the profile's own Body; `body` is only needed for a
+profile outside any Body, and naming a different body is refused (the same
+holds for pocket, revolution, groove, thickness, draft and a face datum_plane).
 Attachment fusion: on a face-attached sketch, pad FUSES into the supporting
 solid automatically — do not pad-then-boolean.""",
     "pocket": """\

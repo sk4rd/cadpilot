@@ -389,3 +389,13 @@ def test_a_pad_that_adds_nothing_warns():
     assert "_add_added_nothing(feat)" in describe
     helper = _src("_add_added_nothing")
     assert "BaseFeature" in helper and "_CUT_EPS" in helper and "added no material" in helper
+
+
+def test_a_feature_is_built_in_the_body_of_its_profile_or_base():
+    """With two bodies every pad needed `body`, and a wrong one was accepted
+    (a pad in Body built from Body001's sketch)."""
+    for builder in ("_build_padlike", "_build_revlike", "_build_thickness", "_build_draft"):
+        text = _src(builder)
+        assert "_feature_body(doc, spec," in text and "_get_or_create_body" not in text
+    assert "_feature_body(doc, spec, anchor" in _src("_build_datum_plane")
+    assert "belongs to Body" in _src("_feature_body")
