@@ -558,9 +558,10 @@ def append_execute_code(
         records = read_journal(doc)
         after = _object_names(doc)
         # A read-only execute_code — inspecting the model, the common case —
-        # must NOT destroy a pending plan; only a call that actually moved the
-        # object set invalidates it (see sj.invalidates_plan).
-        if sj.invalidates_plan(records, after):
+        # must NOT destroy a pending plan. The snippet's own undo entry is the
+        # test: comparing object sets against the journal's last snapshot also
+        # counted every object the USER had added since, and dropped the plan.
+        if changed:
             sj.drop_planned(records)
         # The inspection is APPENDED at the very end, even behind a pending
         # plan. Inserting it before the tail shifted every planned step's
