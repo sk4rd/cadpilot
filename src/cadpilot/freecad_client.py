@@ -101,9 +101,9 @@ class _TimeoutTransport(xmlrpc.client.Transport):
 
 
 def default_port() -> int:
-    """CADPILOT_PORT if it holds a valid port, else 9875."""
+    """CADPILOT_PORT if it holds a valid port, else 9876."""
     raw = os.environ.get("CADPILOT_PORT", "").strip()
-    return int(raw) if raw.isdigit() and 0 < int(raw) < 65536 else 9875
+    return int(raw) if raw.isdigit() and 0 < int(raw) < 65536 else 9876
 
 
 class FreeCADConnection:

@@ -28,7 +28,7 @@ import xmlrpc.client
 from pathlib import Path
 
 # FreeCAD's RPC server, as started by the addon.
-DEFAULT_PORT = 9875
+DEFAULT_PORT = 9876
 
 # Probing is interactive: never inherit the 150s modeling timeout.
 PROBE_TIMEOUT = 5.0

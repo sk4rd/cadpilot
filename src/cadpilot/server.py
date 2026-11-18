@@ -1001,7 +1001,7 @@ def main():
         "--port",
         type=int,
         default=default_port(),
-        help="Port of the FreeCAD RPC server (default: CADPILOT_PORT, else 9875)",
+        help="Port of the FreeCAD RPC server (default: CADPILOT_PORT, else 9876)",
     )
     parser.add_argument(
         "--no-auto-audit",

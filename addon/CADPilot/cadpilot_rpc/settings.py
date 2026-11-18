@@ -12,7 +12,7 @@ _DEFAULT_SETTINGS = {
     "remote_enabled": False,
     "allowed_ips": "127.0.0.1",
     "auto_start_rpc": True,
-    "port": 9875,
+    "port": 9876,
     "step_panel_visible": False,
     "log_level": "INFO",
     "log_dir": "",

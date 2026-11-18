@@ -95,7 +95,7 @@ Then use this MCP client configuration instead of the one below, and **replace `
 }
 ```
 
-The server speaks MCP on stdio and connects to FreeCAD's XML-RPC addon on `localhost:9875`. You normally don't run it by hand; your AI client launches it via the configuration below.
+The server speaks MCP on stdio and connects to FreeCAD's XML-RPC addon on `localhost:9876`. You normally don't run it by hand; your AI client launches it via the configuration below.
 
 ## Client setup
 

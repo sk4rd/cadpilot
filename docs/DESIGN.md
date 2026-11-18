@@ -23,7 +23,7 @@ AI client (Claude Code, Cherry Studio, ...)
    |  MCP over stdio
    v
 cadpilot MCP server (src/cadpilot, Python >= 3.12, launched by uvx)
-   |  XML-RPC over TCP, localhost:9875
+   |  XML-RPC over TCP, localhost:9876
    v
 FreeCAD addon (addon/CADPilot, living inside the FreeCAD process)
    |

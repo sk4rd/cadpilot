@@ -1619,7 +1619,7 @@ def get_addon_log_operation(
 
 def diagnose_operation(
     host: str,
-    port: int = 9875,
+    port: int = 9876,
     timeout: float = 5.0,
     dismiss: bool = False,
     freecad: FreeCADConnection | None = None,

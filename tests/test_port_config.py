@@ -29,9 +29,9 @@ def addon_settings(tmp_path, monkeypatch):
     return module
 
 
-def test_server_port_defaults_to_9875(monkeypatch):
+def test_server_port_defaults_to_9876(monkeypatch):
     monkeypatch.delenv("CADPILOT_PORT", raising=False)
-    assert default_port() == 9875
+    assert default_port() == 9876
 
 
 def test_server_port_from_environment(monkeypatch):
@@ -42,13 +42,13 @@ def test_server_port_from_environment(monkeypatch):
 @pytest.mark.parametrize("raw", ["abc", "0", "70000", "-1"])
 def test_server_ignores_an_invalid_port(monkeypatch, raw):
     monkeypatch.setenv("CADPILOT_PORT", raw)
-    assert default_port() == 9875
+    assert default_port() == 9876
 
 
 def test_addon_port_from_settings(addon_settings, monkeypatch):
     monkeypatch.delenv("CADPILOT_PORT", raising=False)
     assert addon_settings.resolve_port({"port": 9877}) == 9877
-    assert addon_settings.resolve_port() == 9875
+    assert addon_settings.resolve_port() == 9876
 
 
 def test_addon_environment_overrides_settings(addon_settings, monkeypatch):

@@ -213,7 +213,7 @@ def test_a_port_mismatch_is_flagged_and_named_in_the_verdict(tmp_path, monkeypat
 
     # No "port" key: the add-on listens on its default.
     (userdir / "cadpilot_settings.json").write_text("{}", encoding="utf-8")
-    assert diag.settings_status(9894)[0]["port_mismatch"] == {"addon": 9875, "server": 9894}
+    assert diag.settings_status(9894)[0]["port_mismatch"] == {"addon": 9876, "server": 9894}
 
 
 def test_unparseable_settings_do_not_raise(tmp_path, monkeypatch):
