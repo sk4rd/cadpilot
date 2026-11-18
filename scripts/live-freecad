@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+# Start a FreeCAD with this checkout's add-on, isolated from your own FreeCAD, for the live tests.
+#
+# usage: scripts/live-freecad start PORT [ROOT]   then CADPILOT_PORT=PORT uv run python tests/live_*.py
+#        scripts/live-freecad stop PORT [ROOT]
+#
+# It runs under xvfb-run (set XVFB_RUN to its path if it isn't on PATH): with
+# QT_QPA_PLATFORM=offscreen FreeCAD 1.1 hangs at startup. ROOT (default
+# ${TMPDIR:-/tmp}/cadpilot-live-PORT) holds its own HOME, so your FreeCAD settings, add-ons
+# and ~/.cadpilot are never touched. Never pick the port your own FreeCAD listens on.
+set -euo pipefail
+cmd=${1:?start or stop}
+PORT=${2:?port}
+ROOT=${3:-${TMPDIR:-/tmp}/cadpilot-live-$PORT}
+ADDON=$(cd "$(dirname "$0")/../addon/CADPilot" && pwd)
+case $cmd in
+start)
+  data="$ROOT/home/.local/share/FreeCAD/v1-1"
+  mkdir -p "$data/Mod" "$ROOT/home/.config" "$ROOT/tmp"
+  ln -sfn "$ADDON" "$data/Mod/CADPilot"
+  echo "{\"port\": $PORT, \"auto_start_rpc\": true}" > "$data/cadpilot_settings.json"
+  cd "$ROOT"
+  HOME="$ROOT/home" XDG_CONFIG_HOME="$ROOT/home/.config" XDG_DATA_HOME="$ROOT/home/.local/share" \
+    XDG_CACHE_HOME="$ROOT/home/.cache" TMPDIR="$ROOT/tmp" CADPILOT_PORT=$PORT QT_QPA_PLATFORM=xcb WAYLAND_DISPLAY= \
+    nohup "${XVFB_RUN:-xvfb-run}" -a -s '-screen 0 1600x1000x24' "${FREECAD:-FreeCAD}" > "$ROOT/freecad.log" 2>&1 &
+  echo $! > "$ROOT/pid"
+  for _ in $(seq 1 60); do
+    if (exec 3<>"/dev/tcp/127.0.0.1/$PORT") 2>/dev/null; then echo "FreeCAD is up on $PORT; log in $ROOT"; exit 0; fi
+    if ! kill -0 "$(cat "$ROOT/pid")" 2>/dev/null; then tail -30 "$ROOT/freecad.log"; exit 1; fi
+    sleep 1
+  done
+  echo "FreeCAD did not start; log:"; tail -30 "$ROOT/freecad.log"; exit 1
+  ;;
+stop)
+  if [ -f "$ROOT/pid" ]; then
+    pid=$(cat "$ROOT/pid")
+    pkill -TERM -P "$pid" 2>/dev/null || true
+    kill "$pid" 2>/dev/null || true
+    rm -f "$ROOT/pid"
+  fi
+  ;;
+*) echo "usage: $0 start|stop PORT [ROOT]" >&2; exit 2 ;;
+esac

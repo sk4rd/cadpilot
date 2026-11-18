@@ -72,6 +72,11 @@ uv build
 
 # Run tests (MCP server side only; the addon needs a live FreeCAD)
 uv run pytest
+
+# Live tests against a FreeCAD of their own (never the port your FreeCAD uses)
+scripts/live-freecad start 9879
+CADPILOT_PORT=9879 uv run python tests/live_features_verify.py
+scripts/live-freecad stop 9879
 ```
 
 The FreeCAD addon must be installed separately — copy `addon/CADPilot/` into FreeCAD's `Mod/` directory and restart FreeCAD.
