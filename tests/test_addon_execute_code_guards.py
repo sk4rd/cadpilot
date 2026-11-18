@@ -75,3 +75,49 @@ def test_document_name_is_not_read_after_the_snippet_could_delete_it():
         "the snippet may close or replace the active document; reading doc.Name afterwards "
         "raises ReferenceError on the deleted object and reports a successful snippet as a failure"
     )
+
+
+def _restore_helpers(active: str | None):
+    """The restore helpers from rpc_server.py, run against a stub FreeCAD."""
+    import contextlib
+    import types
+
+    state = {"active": active}
+
+    class StubFreeCAD:
+        @property
+        def ActiveDocument(self):
+            return types.SimpleNamespace(Name=state["active"]) if state["active"] else None
+
+        def setActiveDocument(self, name):
+            state["active"] = name
+
+    freecad = StubFreeCAD()
+    wanted = {"_active_document_name", "_restore_active_document"}
+    module = ast.Module(
+        body=[n for n in _TREE.body if getattr(n, "name", None) in wanted], type_ignores=[]
+    )
+    ns = {"contextlib": contextlib, "FreeCAD": freecad}
+    exec(compile(module, str(_RPC_SERVER), "exec"), ns)
+    return ns, state
+
+
+def test_a_bound_run_hands_the_active_document_back():
+    """execute_code(doc_name=...) activated the bound document and never gave
+    the user's one back, so their view and Steps panel jumped to whatever
+    document Claude last touched."""
+    ns, state = _restore_helpers("UserDoc")
+    previous = ns["_active_document_name"]()
+    state["active"] = "Bound"  # the binding
+    ns["_restore_active_document"](previous, "Bound")
+    assert state["active"] == "UserDoc"
+
+    state["active"] = "Elsewhere"  # the snippet switched documents itself
+    ns["_restore_active_document"]("UserDoc", "Bound")
+    assert state["active"] == "Elsewhere", "a deliberate switch must stick"
+
+    body = _func(_TREE, "run_and_restore")
+    finals = [n for n in ast.walk(body) if isinstance(n, ast.Try) and n.finalbody]
+    assert any(
+        "_restore_active_document" in ast.unparse(stmt) for t in finals for stmt in t.finalbody
+    ), "the restore must also run when the snippet raises"

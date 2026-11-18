@@ -404,6 +404,26 @@ def _install_off_thread_observer() -> None:
     setattr(FreeCAD, _OFF_THREAD_OBSERVER_ATTR, observer)
 
 
+def _active_document_name() -> str | None:
+    with contextlib.suppress(Exception):
+        active = FreeCAD.ActiveDocument
+        return active.Name if active is not None else None
+    return None
+
+
+def _restore_active_document(previous: str | None, bound: str) -> None:
+    """Hand the active document back after a run bound to ``bound``.
+
+    The GUI follows the App-active document, so leaving the binding in place
+    moved the user's view and Steps panel to whatever document Claude last
+    touched. A snippet that switched documents itself keeps its switch.
+    """
+    if previous is None or previous == bound or _active_document_name() != bound:
+        return
+    with contextlib.suppress(Exception):
+        FreeCAD.setActiveDocument(previous)
+
+
 class FreeCADRPC:
     """RPC server for FreeCAD"""
 
@@ -1509,7 +1529,8 @@ class FreeCADRPC:
         With ``doc_name`` the run is BOUND to that document: it becomes the
         active document (so ``App.ActiveDocument`` inside the snippet
         resolves there), the wrapper transaction and the journal step land
-        on it. Without it the active document at call time is used — which
+        on it, and the previously active document is handed back afterwards
+        unless the snippet switched documents itself. Without it the active document at call time is used — which
         under two concurrent agents is whichever document the OTHER agent's
         call left active, so always pass doc_name (or work in a session,
         which binds it automatically).
@@ -1530,6 +1551,14 @@ class FreeCADRPC:
         # RPC round trip, no race with intervening ops).
         tmp_path = _make_tmp_png() if screenshot is not None else None
 
+        def run_and_restore():
+            previous = _active_document_name()
+            try:
+                return combined_task()
+            finally:
+                if doc_name:
+                    _restore_active_document(previous, doc_name)
+
         def combined_task():
             doc = None
             if doc_name:
@@ -1540,9 +1569,9 @@ class FreeCADRPC:
                 except Exception as e:
                     raise ValueError(f"unknown document {doc_name!r}: {e}") from e
                 # App.setActiveDocument makes App.ActiveDocument resolve to the
-                # bound document inside the snippet. There is no
-                # Gui.activateDocument on 1.1.x, and flipping the foreground MDI
-                # tab is deliberately NOT done — a concurrent agent holds it.
+                # bound document inside the snippet. The GUI follows it on 1.1.4
+                # (Gui.ActiveDocument and the foreground tab), which is why
+                # run_and_restore hands the previous document back.
                 with contextlib.suppress(Exception):
                     FreeCAD.setActiveDocument(doc_name)
             else:
@@ -1659,7 +1688,7 @@ class FreeCADRPC:
             )
 
         try:
-            out = dispatch_to_gui(combined_task, timeout=self.EXECUTE_CODE_TIMEOUT)
+            out = dispatch_to_gui(run_and_restore, timeout=self.EXECUTE_CODE_TIMEOUT)
             if isinstance(out, tuple) and len(out) >= 2:
                 res, shot_path = out[0], out[1]
                 changed = out[2] if len(out) > 2 else False
