@@ -332,3 +332,90 @@ def test_a_hand_edited_step_says_so_in_its_row():
     rec = sj.StepRecord(index=2, operation="sketch", label="base profile")
     rec.params = {"user_edited": True}
     assert sj.row_text(rec) == "base profile (edited by hand)"
+
+
+# --- stale steps --------------------------------------------------------------
+
+
+def _done(index, op, before, after, tx=None, **kw):
+    return sj.StepRecord(
+        index=index,
+        state=sj.STATE_DONE,
+        operation=op,
+        transaction=tx if tx is not None else f"CADPilot: #{index} {op}",
+        objects_before=before,
+        objects_after=after,
+        **kw,
+    )
+
+
+def _chain():
+    return [
+        _done(1, "variables", [], ["Vars"]),
+        _done(2, "sketch", ["Vars"], ["Body", "Profile", "Vars"]),
+        _done(3, "pad", ["Body", "Profile", "Vars"], ["Body", "Pad", "Profile", "Vars"]),
+        _done(
+            4,
+            "pocket",
+            ["Body", "Pad", "Profile", "Vars"],
+            ["Body", "Pad", "Pocket", "Profile", "Vars"],
+        ),
+    ]
+
+
+def test_every_done_step_is_checked_not_just_the_last():
+    recs = _chain()
+    undo = [r.transaction for r in reversed(recs)]
+    present = ["Body", "Pad", "Profile", "Vars"]  # the user deleted the Pocket
+    assert sj.stale_steps(recs, undo, [], present) == [
+        {"index": 4, "reason": "deleted by the user: Pocket", "missing": ["Pocket"]}
+    ]
+    recs.append(_done(5, "create_object", present, [*present, "Fixture"]))
+    assert [s["index"] for s in sj.stale_steps(recs, undo, [], [*present, "Fixture"])] == [4]
+
+
+def test_an_undone_step_stays_stale_after_the_next_commit():
+    recs = _chain()
+    present = ["Body", "Profile", "Vars"]  # Ctrl+Z took the pad (and the pocket with it)
+    redo = [recs[2].transaction]
+    stale = sj.stale_steps(recs, [r.transaction for r in recs[:2]], redo, present)
+    assert stale[0] == {"index": 3, "reason": "undone by the user (Ctrl+Z)", "missing": ["Pad"]}
+    # A commit cleared the redo stack; the record still remembers the undo.
+    recs[2].stale = "undone by the user (Ctrl+Z)"
+    assert [s["index"] for s in sj.stale_steps(recs, [], [], present)] == [3, 4]
+
+
+def test_an_object_a_later_step_deleted_is_not_stale():
+    recs = _chain()[:3]
+    recs.append(
+        _done(4, "delete_object", ["Body", "Pad", "Profile", "Vars"], ["Body", "Profile", "Vars"])
+    )
+    assert sj.stale_steps(recs, [], [], ["Body", "Profile", "Vars"]) == []
+
+
+def test_dropping_accepts_the_users_change():
+    recs = _chain()
+    assert sj.drop_step(recs, 3).operation == "pad"
+    assert [(r.index, r.operation) for r in recs] == [
+        (1, "variables"),
+        (2, "sketch"),
+        (3, "pocket"),
+    ]
+    planned = sj.StepRecord(index=4, state=sj.STATE_PLANNED, operation="fillet")
+    recs.append(planned)
+    assert sj.drop_step(recs, 4) is None
+
+
+def test_a_stale_step_claims_no_undo():
+    recs = _chain()
+    plan = sj.plan_rollback(recs, 2, skip={4})
+    assert plan["undo_count"] == 1 and plan["affected"] == [3, 4]
+    names = [recs[2].transaction]  # the pocket's entry already left the stack
+    assert sj.undo_trust_span(names, recs, 2, 1, skip={4}) == 1
+    assert sj.plan_reject(recs, 3, skip={4})["undo_count"] == 1
+
+
+def test_creator_of_names_the_step_that_built_an_object():
+    assert sj.creator_of(_chain(), "Pocket").index == 4
+    assert sj.creator_of(_chain(), "Body").index == 2
+    assert sj.creator_of(_chain(), "UserChamfer") is None

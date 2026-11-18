@@ -121,7 +121,7 @@ A session disappears when the MCP server exits, and it is invisible to a user wo
 
 Several rules keep this loop safe:
 
-* Journal entries are written inside each step's transaction, but FreeCAD's undo does not restore document properties, so the journal is reconciled explicitly after every rollback and re-run. A `drift` flag, anchored on the most recent step that owns a transaction, detects a manual Ctrl+Z.
+* Journal entries are written inside each step's transaction, but FreeCAD's undo does not restore document properties, so the journal is reconciled explicitly after every rollback and re-run. Every done step is checked against the model: a step the user undid (its transaction is on the redo stack, or the observer saw the Ctrl+Z and noted it on the record, which outlives the redo stack) or whose objects the user deleted is *stale*, its row is struck through in the panel, and `drift` is true while one exists. A rollback, re-run or replay refuses to quietly re-create a stale step; `drop` accepts the user's change instead and forgets the step, and Claude hears about both through the user-change report.
 * Rollback counts only steps that own a transaction. A read-only step owns none; counting it would pop an earlier step's transaction off the undo stack.
 * A read-only step does not block a rollback either, since it demonstrably changed nothing. Blocking is reserved for a step that may have changed the document without a transaction; crossing one requires the caller's explicit `force`.
 * Steps the user has accepted form a soft lock: rollback, re-run, and replay refuse to cross one unless the caller passes `force=true`. `reject` is the deliberate act of destroying work, so it is not bound by the lock.

@@ -517,7 +517,7 @@ def step_control(
 ) -> list[TextContent]:
     """Review, run and undo the steps of a document's step journal.
 
-    Actions: run_next | run_all | run_to | rollback_to | reexecute | accept | reject | update | insert | replay | snapshot | clear_plan | reset (needs confirm=true) | status.
+    Actions: run_next | run_all | run_to | rollback_to | reexecute | accept | reject | drop | update | insert | replay | snapshot | clear_plan | reset (needs confirm=true) | status.
 
     Reference: operation_help("step_control").
     """

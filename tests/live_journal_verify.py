@@ -60,8 +60,11 @@ _EDITS = 0
 def user(doc, body):
     """Run ``body`` the way a GUI edit runs: later, on the GUI thread, unmuted.
 
-    ``d`` is the document inside ``body``. Waits until the edit has run and the
-    observer's deferred reads have settled.
+    ``d`` is the document inside ``body``. The body is bracketed like a GUI
+    command (FreeCAD.closeActiveTransaction before and after): a read-only
+    execute_code leaves its transaction name active in FreeCAD, and a change
+    made without a transaction of its own would otherwise be filed under it.
+    Waits until the edit has run and the observer's deferred reads settled.
     """
     global _EDITS
     _EDITS += 1
@@ -71,8 +74,10 @@ def user(doc, body):
         "from PySide import QtCore\n"
         "def _edit():\n"
         f"    d = FreeCAD.getDocument({doc!r})\n"
+        "    FreeCAD.closeActiveTransaction()\n"
         "    try:\n" + textwrap.indent(textwrap.dedent(body), "        ") + "\n"
         "    finally:\n"
+        "        FreeCAD.closeActiveTransaction()\n"
         f"        FreeCAD._cadpilot_live_edit = {token!r}\n"
         "QtCore.QTimer.singleShot(50, _edit)\n"
     )
@@ -297,6 +302,116 @@ check(
     str(live),
 )
 changes(D)
+
+# --- H: a feature the user deleted is stale, and drop accepts it ---------------
+PLATE = {
+    "geometry": [
+        {"type": "line", "from": [0, 0], "to": [60, 0]},
+        {"type": "line", "from": [60, 0], "to": [60, 30]},
+        {"type": "line", "from": [60, 30], "to": [0, 30]},
+        {"type": "line", "from": [0, 30], "to": [0, 0]},
+    ],
+    "constraints": [
+        {"type": "coincident", "items": [[0, "end"], [1, "start"]]},
+        {"type": "coincident", "items": [[1, "end"], [2, "start"]]},
+        {"type": "coincident", "items": [[2, "end"], [3, "start"]]},
+        {"type": "coincident", "items": [[3, "end"], [0, "start"]]},
+    ],
+}
+HOLE = {
+    "plane": {"face": ["Pad", "+Z"]},
+    "geometry": [{"type": "circle", "center": [15, 15], "radius": 4}],
+}
+
+
+def plate(doc):
+    fresh(doc)
+    cad("variables", doc, "Vars", cells={"A1": ["thick", 8]})
+    cad("sketch", doc, "Profile", desc="base profile", **PLATE)
+    cad("pad", doc, "Profile", desc="plate pad", length="=Vars.thick")
+    cad("sketch", doc, "HoleSk", desc="hole sketch", **HOLE)
+    cad("pocket", doc, "HoleSk", desc="hole", through_all=True)
+    changes(doc)
+
+
+D = "LJ_Gone"
+plate(D)
+user(
+    D,
+    "d.openTransaction('Delete'); d.removeObject('Pocket'); d.commitTransaction(); d.recompute()",
+)
+status = control(D, "status", params={"summary": True})
+check(
+    "H a deleted feature makes its step stale",
+    [x["index"] for x in status.get("stale") or []] == [5],
+    str(status.get("stale")),
+)
+check("H ... and that is drift", status.get("drift") is True)
+text = changes(D)
+check(
+    "H Claude is told the step is gone and how to accept it",
+    "deleted Pocket" in text and "drop 5" in text,
+    text,
+)
+res = control(D, "rollback_to", index=5)
+check(
+    "H a rollback refuses to re-create it silently",
+    not res.get("success") and "drop" in str(res.get("error")),
+    str(res),
+)
+count = len(records(D))
+res = control(D, "drop", index=5)
+check(
+    "H drop forgets the step",
+    res.get("success") and res["journal"]["count"] == count - 1 and len(records(D)) == count - 1,
+    str(res),
+)
+status = control(D, "status", params={"summary": True})
+check(
+    "H no drift once the change is accepted", status.get("drift") is False, str(status.get("stale"))
+)
+
+# --- I: a user Ctrl+Z stays visible after Claude's next commit -----------------
+D = "LJ_Undo"
+plate(D)
+user(D, "d.undo(); d.undo(); d.recompute()")  # Ctrl+Z twice: the pocket, then its sketch
+text = changes(D)
+check(
+    "I Claude is told which steps the user undid",
+    "Ctrl+Z undid step 5 (hole)" in text and "Ctrl+Z undid step 4" in text,
+    text,
+)
+user(D, "d.redo(); d.recompute()")  # Ctrl+Y brings the sketch back
+text = changes(D)
+check("I Claude is told about the redo", "Ctrl+Y redid step 4" in text, text)
+status = control(D, "status", params={"summary": True})
+check(
+    "I a redo makes the step whole again",
+    [x["index"] for x in status.get("stale") or []] == [5],
+    str(status.get("stale")),
+)
+cad("create_object", D, "Fixture", obj_type="Part::Box")
+status = control(D, "status", params={"summary": True})
+check(
+    "I Claude's next commit does not clear it",
+    status.get("drift") is True and [x["index"] for x in status.get("stale") or []] == [5],
+    str(status.get("stale")),
+)
+res = control(D, "rollback_to", index=5)
+check(
+    "I a rollback across it refuses without force",
+    not res.get("success") and "drop 5" in str(res.get("error")),
+    str(res),
+)
+res = control(D, "rollback_to", index=5, force=True)
+objects = py(
+    "import FreeCAD\nprint(sorted(o.Name for o in FreeCAD.getDocument('LJ_Undo').Objects))", D
+)
+check(
+    "I ... and re-creates it when forced",
+    res.get("success") and "Pocket" in objects,
+    f"{res} {objects}",
+)
 
 # --- C: opening a saved file is not a burst of manual edits -------------------
 D = "LJ_Open"

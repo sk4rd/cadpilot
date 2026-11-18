@@ -169,9 +169,10 @@ class StepPanel(QtWidgets.QDockWidget):
         self._digest: str | None = None
         self._note: str | None = None
         self._records: list = []
+        self._stale: dict[int, str] = {}
         self._details_for: int = 0
         self._in_apply: bool = False
-        self._drifted: bool = False
+        self._stale_logged: set[int] = set()
         self._entries: list[dict] = []
         self._spotlight: dict | None = None
         self._meta_raw: str = ""
@@ -272,6 +273,12 @@ class StepPanel(QtWidgets.QDockWidget):
             "Undo the selected step and forget everything from it onward",
             self._reject,
         )
+        self.act_drop = self._action(
+            "Drop",
+            "Forget the selected step: it is no longer in the model (undone or deleted "
+            "by hand), and dropping it keeps a rollback or replay from re-creating it",
+            self._drop,
+        )
         self.act_replay = self._action(
             "Replay",
             "Roll back to the start and re-run the whole journal",
@@ -294,6 +301,7 @@ class StepPanel(QtWidgets.QDockWidget):
             self.act_rollback,
             self.act_accept,
             self.act_reject,
+            self.act_drop,
             self.act_replay,
             self.act_snapshot,
         ):
@@ -518,14 +526,16 @@ QLabel#PanelStatus {{ color: {c["dim"]}; padding: 5px 8px 4px 8px; }}
         except Exception:
             text = ""
         records = sj.from_json(text)
-        self._report_drift(doc, records)
-        note = self._summary(records)
-        if text == self._digest and note == self._note:
+        stale = {s["index"]: s["reason"] for s in step_engine.stale_steps(doc, records)}
+        self._report_drift(stale)
+        note = self._summary(records, stale)
+        if text == self._digest and note == self._note and stale == self._stale:
             return
         old_states = {r.index: r.state for r in self._records}
         self._digest = text
         self._note = note
         self._records = records
+        self._stale = stale
         self._render(records, self._header_text(doc, records, sj.meta_from_json(text)), note)
         # Mirror failures caused OUTSIDE the panel (MCP step_control, another
         # client) into the log: the panel's own _apply already narrated its
@@ -555,40 +565,27 @@ QLabel#PanelStatus {{ color: {c["dim"]}; padding: 5px 8px 4px 8px; }}
             text += f"<br><span style='color:{dim}'>Plan: {html.escape(description)}</span>"
         return text
 
-    def _summary(self, records) -> str:
-        return (
+    def _summary(self, records, stale=None) -> str:
+        text = (
             f"{len(records)} step(s), "
             f"{sj.done_count(records)} done, {sj.pending_count(records)} planned, "
             f"{sum(1 for r in records if r.accepted)} accepted"
         )
+        if stale:
+            text += f", {len(stale)} no longer in the model"
+        return text
 
-    def _report_drift(self, doc, records) -> None:
-        """Log once when the journal and FreeCAD's undo stack start disagreeing.
+    def _report_drift(self, stale: dict[int, str]) -> None:
+        """Log each step once when it goes stale (the user undid or deleted it).
 
-        A manual Ctrl+Z/Ctrl+Y pops journal transactions without touching the
-        journal itself, so from then on rollback's undo math is unreliable —
-        it may rebuild instead of undoing cleanly. The notice is
-        edge-triggered (clean -> drifted logs one line, drifted -> clean
-        re-arms it): pinned in the status line it stayed on screen forever,
-        because the stack never realigns on its own.
+        Edge-triggered per step: pinned in the status line a notice stayed on
+        screen forever, and the row itself already shows the state.
         """
-        try:
-            names = list(getattr(doc, "UndoNames", []) or [])
-        except Exception:
-            names = []
-        # Same anchor as step_engine._status: the last ATOMIC step. A trailing
-        # execute_code record has no transaction, so anchoring on the last
-        # completed record outright would hide a manual undo here too.
-        last = sj.last_atomic_done(records)
-        drifted = bool(last and last.transaction not in names)
-        if drifted and not self._drifted:
-            # Default kind (dim), not "error": a heads-up about the undo
-            # stack, not a failed action — red is reserved for failures.
-            self._log(
-                "out of sync with FreeCAD's undo stack (undone manually?) — "
-                "rollback may rebuild instead of undoing cleanly",
-            )
-        self._drifted = drifted
+        for index, reason in sorted(stale.items()):
+            if index not in self._stale_logged:
+                # Default kind (dim), not "error": red is reserved for failures.
+                self._log(f"step {index} is no longer in the model ({reason}); Drop accepts that")
+        self._stale_logged = set(stale)
 
     def _render(self, records, header: str, note: str) -> None:
         self.header.setText(header)
@@ -602,9 +599,11 @@ QLabel#PanelStatus {{ color: {c["dim"]}; padding: 5px 8px 4px 8px; }}
         self.tree.blockSignals(True)
         self.tree.clear()
         for rec in records:
-            item = QtWidgets.QTreeWidgetItem([str(rec.index), _row_text(rec), rec.operation])
+            stale = self._stale.get(rec.index) if rec.state == sj.STATE_DONE else None
+            text = _row_text(rec) + (" — no longer in the model" if stale else "")
+            item = QtWidgets.QTreeWidgetItem([str(rec.index), text, rec.operation])
             item.setIcon(0, _state_icon(rec))
-            item.setToolTip(1, _tooltip_text(rec))
+            item.setToolTip(1, _tooltip_text(rec) + (f"\n{stale}" if stale else ""))
             if rec.accepted:
                 font = item.font(1)
                 font.setBold(True)
@@ -614,6 +613,12 @@ QLabel#PanelStatus {{ color: {c["dim"]}; padding: 5px 8px 4px 8px; }}
                     item.setForeground(col, QtGui.QBrush(_GREY))
             elif rec.state == sj.STATE_FAILED:
                 item.setForeground(1, QtGui.QBrush(_RED))
+            if stale:
+                font = item.font(1)
+                font.setStrikeOut(True)
+                item.setFont(1, font)
+                for col in range(3):
+                    item.setForeground(col, QtGui.QBrush(_GREY))
             self.tree.addTopLevelItem(item)
             if rec.index == selected:
                 self.tree.setCurrentItem(item)
@@ -750,6 +755,7 @@ QLabel#PanelStatus {{ color: {c["dim"]}; padding: 5px 8px 4px 8px; }}
         self.act_accept.setEnabled(done)
         self.act_accept.setText("Unaccept" if (rec is not None and rec.accepted) else "Accept")
         self.act_reject.setEnabled(rec is not None)
+        self.act_drop.setEnabled(rec is not None and rec.index in self._stale)
         self.btn_save.setEnabled(
             rec is not None and rec.state in (sj.STATE_PLANNED, sj.STATE_FAILED)
         )
@@ -867,6 +873,12 @@ QLabel#PanelStatus {{ color: {c["dim"]}; padding: 5px 8px 4px 8px; }}
             return
         self._apply({"operation": "reject", "index": rec.index, "force": force})
 
+    def _drop(self, _checked=False):
+        rec = self._selected_record()
+        if rec is None or rec.index not in self._stale:
+            return
+        self._apply({"operation": "drop", "index": rec.index})
+
     def _replay(self, _checked=False):
         doc = FreeCAD.ActiveDocument
         if doc is None:
@@ -953,6 +965,7 @@ QLabel#PanelStatus {{ color: {c["dim"]}; padding: 5px 8px 4px 8px; }}
             self.act_rollback,
             self.act_accept,
             self.act_reject,
+            self.act_drop,
             self.act_replay,
         ):
             menu.addAction(action)

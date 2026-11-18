@@ -139,7 +139,11 @@ def _undo_cap() -> int:
 
 
 def _undo_trust(
-    doc, records: list[sj.StepRecord], upto_index: int, undo_count: int
+    doc,
+    records: list[sj.StepRecord],
+    upto_index: int,
+    undo_count: int,
+    skip: set[int] | frozenset[int] = frozenset(),
 ) -> tuple[int, str]:
     """How much of this span the undo stack can revert, and why it falls short.
 
@@ -161,7 +165,7 @@ def _undo_trust(
     guessing between a reopen and an off-journal edit.
     """
     names = _real_undo_names(doc)
-    span = sj.undo_trust_span(names, records, upto_index, undo_count)
+    span = sj.undo_trust_span(names, records, upto_index, undo_count, skip)
     if span >= undo_count:
         return span, ""
     if span == 0:
@@ -188,6 +192,30 @@ def _object_names(doc) -> list[str]:
         return sorted(o.Name for o in doc.Objects)
     except Exception:
         return []
+
+
+def stale_steps(doc, records: list[sj.StepRecord] | None = None) -> list[dict[str, Any]]:
+    """Done steps whose work is gone from the model (see sj.stale_steps)."""
+    return sj.stale_steps(
+        read_journal(doc) if records is None else records,
+        _real_undo_names(doc),
+        _real_redo_names(doc),
+        _object_names(doc),
+    )
+
+
+def _stale_refusal(stale: list[dict[str, Any]], upto: int, verb: str) -> str:
+    """Why ``verb`` must not silently re-create steps the user took out, or ""."""
+    hit = [s for s in stale if s["index"] <= upto]
+    if not hit:
+        return ""
+    what = "; ".join(f"step {s['index']}: {s['reason']}" for s in hit)
+    first = hit[0]["index"]
+    return (
+        f"{verb} would re-create work the user took out of the model ({what}). Accept the "
+        f"user's change with drop (step_control drop {first}), or pass force=true to "
+        "re-create it"
+    )
 
 
 def _transaction_name(rec: sj.StepRecord) -> str:
@@ -853,6 +881,7 @@ def _run_record_locked(doc, records: list[sj.StepRecord], rec: sj.StepRecord) ->
         return res
 
     rec.state = sj.STATE_DONE
+    rec.stale = ""
     rec.transaction = tx
     rec.objects_before = before
     rec.objects_after = _object_names(doc)
@@ -955,14 +984,13 @@ def note_panel_action(doc, spec: dict[str, Any], result: dict[str, Any] | None) 
 def _compact_journal(doc) -> dict[str, Any]:
     """The steps list without params — small enough to attach to every reply."""
     records = read_journal(doc)
-    names = _undo_names(doc)
-    last = sj.last_atomic_done(records)
+    stale = {s["index"]: s["reason"] for s in stale_steps(doc, records)}
     return {
         "count": len(records),
         "done": sj.done_count(records),
         "planned": sj.pending_count(records),
         "accepted": sum(1 for r in records if r.accepted),
-        "drift": bool(last and last.transaction not in names),
+        "drift": bool(stale),
         "steps": [
             {
                 "index": r.index,
@@ -972,6 +1000,7 @@ def _compact_journal(doc) -> dict[str, Any]:
                 "accepted": r.accepted,
                 **({"error": r.error} if r.error else {}),
                 **({"user_edited": True} if (r.params or {}).get("user_edited") else {}),
+                **({"stale": stale[r.index]} if r.index in stale else {}),
             }
             for r in records
         ],
@@ -1049,6 +1078,31 @@ def _apply_op(doc, spec: dict[str, Any]) -> dict[str, Any]:
             bool(spec.get("force")),
             bool(spec.get("replace")),
         )
+    if operation == "drop":
+        index = int(spec.get("index") or 0)
+        stale = {s["index"]: s for s in stale_steps(doc, records)}
+        rec = next((r for r in records if r.index == index and r.state == sj.STATE_DONE), None)
+        if rec is None:
+            return {"success": False, "error": f"no done step {index} to drop"}
+        if index not in stale and not spec.get("force"):
+            return {
+                "success": False,
+                "error": (
+                    f"step {index} is still in the model; drop only forgets a step the user "
+                    "undid or deleted (pass force=true to forget it anyway, or reject it to "
+                    "undo it)"
+                ),
+            }
+        sj.drop_step(records, index)
+        write_journal(doc, records)
+        logger.info("dropped step %d (%s)", index, rec.label)
+        return {
+            "success": True,
+            "dropped": index,
+            "label": rec.label,
+            "reason": stale.get(index, {}).get("reason", "forced"),
+            "count": len(records),
+        }
     if operation == "accept":
         rec = sj.set_accepted(
             records, int(spec.get("index") or 0), bool((spec.get("params") or {}).get("on", True))
@@ -1146,22 +1200,18 @@ def _apply_op(doc, spec: dict[str, Any]) -> dict[str, Any]:
 def _status(
     doc, records: list[sj.StepRecord], spec: dict[str, Any] | None = None
 ) -> dict[str, Any]:
-    names = _undo_names(doc)
-    # Anchor on the last ATOMIC step: a trailing non-atomic execute_code record
-    # carries no transaction, so using the last completed record outright would
-    # compare "" against the undo stack and always report clean.
-    last = sj.last_atomic_done(records)
-    # The last executed step's transaction should still be on the undo stack.
-    # If it is not, work was undone (or redone past) behind the journal's back
-    # — Ctrl+Z in the GUI — and counts derived from the log are suspect.
-    drift = bool(last and last.transaction not in names)
+    # Every done step is checked, not just the last one: a deleted Pocket under
+    # a later step went unnoticed, and a check anchored on the newest step
+    # cleared itself the moment Claude committed anything after a Ctrl+Z.
+    stale = stale_steps(doc, records)
     out: dict[str, Any] = {
         "success": True,
         "document": doc.Name,
         "count": len(records),
         "done": sj.done_count(records),
         "planned": sj.pending_count(records),
-        "drift": drift,
+        "drift": bool(stale),
+        "stale": stale,
         "meta": read_meta(doc),
     }
     # Read-only options, so the tool signature (and its docstring budget) stays
@@ -1381,7 +1431,12 @@ def _remove_objects_locked(doc, names: list[str]) -> list[str]:
 def _rollback(doc, records, to_index: int, force: bool) -> dict[str, Any]:
     if to_index < 0 or to_index > len(records):
         return {"success": False, "error": f"step {to_index} out of range 0-{len(records)}"}
-    plan = sj.plan_rollback(records, to_index)
+    stale = stale_steps(doc, records)
+    refusal = _stale_refusal(stale, to_index, f"rolling back to step {to_index}")
+    if refusal and not force:
+        return {"success": False, "error": refusal, "stale": stale}
+    gone = {s["index"] for s in stale if s["index"] > to_index}
+    plan = sj.plan_rollback(records, to_index, gone)
     if plan["blocking"] and not force:
         return {
             "success": False,
@@ -1398,7 +1453,7 @@ def _rollback(doc, records, to_index: int, force: bool) -> dict[str, Any]:
                 "pass force=true to roll back across them"
             ),
         }
-    span, undo_why = _undo_trust(doc, records, to_index, plan["undo_count"])
+    span, undo_why = _undo_trust(doc, records, to_index, plan["undo_count"], gone)
     res = undo_n(doc, span)
     # doc.undo() does NOT rewind the journal — the property is document-level and
     # FreeCAD only tracks undo for objects. This reconciliation is what makes
@@ -1536,7 +1591,8 @@ def _reject(doc, records, index: int, force: bool, reason: str) -> dict[str, Any
     it does not stop at accepted steps; it only refuses to cross non-atomic
     ones without force, where undo itself is unreliable.
     """
-    plan = sj.plan_reject(records, index)
+    gone = {s["index"] for s in stale_steps(doc, records) if s["index"] >= index}
+    plan = sj.plan_reject(records, index, gone)
     if plan is None:
         return {"success": False, "error": f"no step {index}"}
     if plan["blocking"] and not force:
@@ -1547,7 +1603,7 @@ def _reject(doc, records, index: int, force: bool, reason: str) -> dict[str, Any
                 f"{sj.blocking_text(records, plan['blocking'])}; pass force=true"
             ),
         }
-    span, undo_why = _undo_trust(doc, records, index - 1, plan["undo_count"])
+    span, undo_why = _undo_trust(doc, records, index - 1, plan["undo_count"], gone)
     res = undo_n(doc, span)
     records = read_journal(doc)
     warnings: list[str] = []
@@ -1618,7 +1674,12 @@ def _reexecute(
         return {"success": False, "error": f"no step {index}"}
     if not rec.executable:
         return {"success": False, "error": f"step {index} ('{rec.operation}') is not re-executable"}
-    plan = sj.plan_rollback(records, index - 1)
+    stale = stale_steps(doc, records)
+    refusal = _stale_refusal(stale, index - 1, f"re-running step {index}")
+    if refusal and not force:
+        return {"success": False, "error": refusal, "stale": stale}
+    gone = {s["index"] for s in stale if s["index"] >= index}
+    plan = sj.plan_rollback(records, index - 1, gone)
     if plan["blocking"] and not force:
         # force is honored here like _rollback and _reject honor it, and the
         # message names it: the panel only offers a force retry when the error
@@ -1650,7 +1711,7 @@ def _reexecute(
     # popping the reachable part and then bailing out would leave the document
     # rolled back AND un-rerun, which is further from what the caller asked for
     # than not touching it at all.
-    _span, undo_why = _undo_trust(doc, records, index - 1, plan["undo_count"])
+    _span, undo_why = _undo_trust(doc, records, index - 1, plan["undo_count"], gone)
     if undo_why:
         return {
             "success": False,
@@ -2071,6 +2132,17 @@ class _JournalSyncObserver:
                 self._undo_buffer(doc)["removed"].append(obj.Name)
                 return
             note_user_change(doc.Name, {"kind": "removed", "objects": [obj.Name]})
+            owner = sj.creator_of(read_journal(doc), obj.Name)
+            if owner is not None:
+                note_user_change(
+                    doc.Name,
+                    {
+                        "kind": "stale",
+                        "step": owner.index,
+                        "label": owner.label,
+                        "detail": f"the user deleted {obj.Name}",
+                    },
+                )
 
     def slotUndoDocument(self, doc):
         with contextlib.suppress(Exception):
@@ -2087,6 +2159,17 @@ class _JournalSyncObserver:
         stack = _real_redo_names(doc) if kind == "undo" else _real_undo_names(doc)
         name = stack[0] if stack else ""
         rec = _record_for_transaction(doc, name)
+        if rec is not None:
+            # Remembered on the record: a later commit clears the redo stack,
+            # and with it the only other trace that the step was undone.
+            records = read_journal(doc)
+            target = next(r for r in records if r.index == rec.index)
+            target.stale = "undone by the user (Ctrl+Z)" if kind == "undo" else ""
+            self._writing = True
+            try:
+                write_journal(doc, records)
+            finally:
+                self._writing = False
         if not name.startswith(TX_PREFIX):
             # The user undid (or redid) their OWN edit: the values FreeCAD
             # restored are the user's again, so the journal follows them. A

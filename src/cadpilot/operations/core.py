@@ -1229,6 +1229,7 @@ _STEP_ACTIONS = (
     "reexecute",
     "accept",
     "reject",
+    "drop",
     "update",
     "insert",
     "replay",

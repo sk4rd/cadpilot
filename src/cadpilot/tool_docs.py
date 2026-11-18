@@ -549,6 +549,12 @@ Review loop (the point of the panel: plan, release, review, fix):
                 authored against step `index` existing). params.reason is
                 logged. Reject never stops at accepted steps: it is the
                 deliberate act of destruction
+  drop          forget done step `index` WITHOUT touching the model: the
+                user undid it (Ctrl+Z) or deleted its objects, and this
+                accepts that (a rollback or replay would re-create it).
+                Refused for a step that is still in the model unless
+                force=true. `status` lists such steps under `stale`, and
+                `drift` is true while any exist
   update        edit a PLANNED/FAILED step without running it: params
                 deep-merge (send only what changes; a null value removes
                 the key; the reply's `replaced` lists the keys whose values
@@ -587,7 +593,8 @@ Housekeeping:
                 records
 
 Every mutating action's reply carries a compact `journal` snapshot (counts,
-drift flag, per-step index/state/label/error/accepted) — one call tells you
+drift flag, per-step index/state/label/error/accepted, and `stale` for a done
+step the user undid or deleted) — one call tells you
 the new state; use status only when you need the full params.
 
 `rollback_to`/`reexecute`/`replay` refuse to cross a non-atomic step unless

@@ -23,6 +23,7 @@ JOURNAL_OPS = {
     "reexecute",
     "accept",
     "reject",
+    "drop",
     "update",
     "insert",
     "replay",

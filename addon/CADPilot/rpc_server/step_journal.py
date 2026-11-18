@@ -56,6 +56,10 @@ class StepRecord:
     note: str = ""
     result: str = ""
     duration_ms: int = 0
+    # Why a DONE step is no longer in the model ("" = it is): the user undid
+    # it. The observer sets it when it sees the undo, because once a new
+    # commit clears the redo stack nothing else remembers that it happened.
+    stale: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -80,6 +84,7 @@ class StepRecord:
             note=data.get("note", ""),
             result=data.get("result", ""),
             duration_ms=int(data.get("duration_ms", 0)),
+            stale=data.get("stale", ""),
         )
 
 
@@ -548,7 +553,11 @@ def steps_without_undo(records: list[StepRecord], index: int) -> list[int]:
 
 
 def undo_trust_span(
-    stack_names: list[str], records: list[StepRecord], upto_index: int, undo_count: int
+    stack_names: list[str],
+    records: list[StepRecord],
+    upto_index: int,
+    undo_count: int,
+    skip: set[int] | frozenset[int] = frozenset(),
 ) -> int:
     """How many of the rollback's newest transactions ``stack_names`` still holds.
 
@@ -577,7 +586,10 @@ def undo_trust_span(
     expected = [
         rec.transaction
         for rec in reversed(records)
-        if rec.index > upto_index and rec.state == STATE_DONE and rec.transaction
+        if rec.index > upto_index
+        and rec.state == STATE_DONE
+        and rec.transaction
+        and rec.index not in skip
     ]
     span = 0
     # strict=False: the stack is legitimately SHORTER than the span when FreeCAD
@@ -908,7 +920,9 @@ def done_count(records: list[StepRecord]) -> int:
     return sum(1 for r in records if r.state == STATE_DONE)
 
 
-def plan_rollback(records: list[StepRecord], to_index: int) -> dict[str, Any]:
+def plan_rollback(
+    records: list[StepRecord], to_index: int, skip: set[int] | frozenset[int] = frozenset()
+) -> dict[str, Any]:
     """What it takes to put the model back at ``to_index``.
 
     ``undo_count`` — how many FreeCAD transactions to undo. Only records that
@@ -922,10 +936,13 @@ def plan_rollback(records: list[StepRecord], to_index: int) -> dict[str, Any]:
                      execute_code (mutated=False) is not one of them.
     ``accepted``   — reviewed indices in that range: rolling back across them
                      discards someone's approval, so the caller must force.
+    ``skip`` are steps the user already undid or deleted (stale): they go
+    back to planned with the rest, but their transactions are not on the undo
+    stack any more, so they claim no undo.
     """
     affected = [r for r in records if r.state == STATE_DONE and r.index > to_index]
     return {
-        "undo_count": sum(1 for r in affected if r.transaction),
+        "undo_count": sum(1 for r in affected if r.transaction and r.index not in skip),
         "affected": [r.index for r in affected],
         "blocking": [r.index for r in affected if not r.atomic and r.mutated],
         "accepted": [r.index for r in affected if r.accepted],
@@ -935,21 +952,24 @@ def plan_rollback(records: list[StepRecord], to_index: int) -> dict[str, Any]:
 # --- review semantics --------------------------------------------------------
 
 
-def plan_reject(records: list[StepRecord], index: int) -> dict[str, Any] | None:
+def plan_reject(
+    records: list[StepRecord], index: int, skip: set[int] | frozenset[int] = frozenset()
+) -> dict[str, Any] | None:
     """What rejecting step ``index`` destroys: everything from it onward.
 
     Uniform semantics, mirroring "a new commit invalidates the planned tail":
     transaction-bearing done steps in the range are undone, planned ones
     dropped — the tail was authored against step ``index`` existing, so
     keeping it would replay steps against a world they were not designed
-    for. None = no such step.
+    for. ``skip`` are steps the user already undid (see plan_rollback). None =
+    no such step.
     """
     if not any(r.index == index for r in records):
         return None
     drop = [r for r in records if r.index >= index]
     done = [r for r in drop if r.state == STATE_DONE]
     return {
-        "undo_count": sum(1 for r in done if r.transaction),
+        "undo_count": sum(1 for r in done if r.transaction and r.index not in skip),
         "drop": [r.index for r in drop],
         "blocking": [r.index for r in done if not r.atomic and r.mutated],
         "accepted": [r.index for r in done if r.accepted],
@@ -1096,7 +1116,83 @@ def rewind(records: list[StepRecord], count: int) -> list[StepRecord]:
         rec.state = STATE_PLANNED
         rec.transaction = ""
         rec.error = ""
+        rec.stale = ""
     return back
+
+
+def _record_diffs(records: list[StepRecord]) -> list[tuple[StepRecord, set[str], set[str]]]:
+    """(record, objects it created, objects it removed) for every mutating done step."""
+    out: list[tuple[StepRecord, set[str], set[str]]] = []
+    prev_after: set[str] = set()
+    for rec in records:
+        if rec.state != STATE_DONE:
+            continue
+        after = set(rec.objects_after or [])
+        if getattr(rec, "mutated", True):
+            before = set(rec.objects_before) if rec.objects_before else prev_after
+            out.append((rec, after - before, before - after))
+        if rec.objects_after:
+            prev_after = after
+    return out
+
+
+def creator_of(records: list[StepRecord], name: str) -> StepRecord | None:
+    """The done step that created object ``name`` (the latest, if several did)."""
+    owner = None
+    for rec, created, _removed in _record_diffs(records):
+        if name in created:
+            owner = rec
+    return owner
+
+
+def stale_steps(
+    records: list[StepRecord],
+    undo_names: list[str],
+    redo_names: list[str],
+    present: list[str],
+) -> list[dict[str, Any]]:
+    """Done steps whose work the model no longer has: ``{index, reason, missing}``.
+
+    A step is stale when the user undid it (its transaction sits on the redo
+    stack, or the observer saw the undo and noted it on the record), or when
+    objects it created are gone and no later journal step removed them (the
+    user deleted them). Checked for EVERY done step: anchoring on the last
+    step alone missed a deleted Pocket under a later step, and cleared itself
+    as soon as Claude committed anything.
+    """
+    live = set(present)
+    undo, redo = set(undo_names), set(redo_names)
+    diffs = _record_diffs(records)
+    out: list[dict[str, Any]] = []
+    for pos, (rec, created, _removed) in enumerate(diffs):
+        removed_later: set[str] = set()
+        for _later, _c, gone in diffs[pos + 1 :]:
+            removed_later |= gone
+        missing = sorted(created - live - removed_later)
+        reason = ""
+        if rec.transaction and rec.transaction in redo and rec.transaction not in undo:
+            reason = "undone by the user (Ctrl+Z)"
+        elif rec.stale:
+            reason = rec.stale
+        elif missing:
+            reason = "deleted by the user: " + ", ".join(missing)
+        if reason:
+            out.append({"index": rec.index, "reason": reason, "missing": missing})
+    return out
+
+
+def drop_step(records: list[StepRecord], index: int) -> StepRecord | None:
+    """Forget one done step without touching the model; None = no such done step.
+
+    For the user's undo or deletion of a step's work: the model already lost
+    it, so the journal follows instead of re-creating it on the next rollback.
+    """
+    rec = next((r for r in records if r.index == index), None)
+    if rec is None or rec.state != STATE_DONE:
+        return None
+    records.remove(rec)
+    reindex(records)
+    return rec
 
 
 # --- manual-edit sync (pure half) ---------------------------------------------
