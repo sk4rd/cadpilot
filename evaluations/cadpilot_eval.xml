@@ -29,11 +29,11 @@
   </qa_pair>
   <qa_pair>
     <question>List the exact set of operations the unified cad() tool accepts (from its operation enum). How many of them are there?</question>
-    <answer>24</answer>
+    <answer>25</answer>
   </qa_pair>
   <qa_pair>
     <question>Call operation_help with no argument to get the topic index. How many help topics are listed?</question>
-    <answer>34</answer>
+    <answer>35</answer>
   </qa_pair>
   <qa_pair>
     <question>An agent needs a picture of the model but the documentation insists only one tool can capture one. Which tool is the sole screenshot entry point?</question>

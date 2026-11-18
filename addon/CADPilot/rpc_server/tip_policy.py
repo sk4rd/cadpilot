@@ -22,6 +22,8 @@ from __future__ import annotations
 
 import difflib
 
+from .sketch_spec import EDIT_KEYS as _SKETCH_EDIT_KEYS
+
 # PartDesign features that are a modelling step, so the body should show them.
 _ADVANCING_TYPES = frozenset(
     {
@@ -205,7 +207,9 @@ SPEC_KEYS: dict[str, frozenset[str]] = {
             "construction",
             "external",
             "constraints",
+            "replace",
         ),
+        "sketch_edit": _SKETCH_EDIT_KEYS,
         "pad": _PADLIKE_KEYS,
         "pocket": _PADLIKE_KEYS,
         "revolution": _REVLIKE_KEYS,
