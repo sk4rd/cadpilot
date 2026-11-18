@@ -96,7 +96,8 @@ be used: it does not merge overlapping tools (a box+arm+knuckle fuse measured
 base ∩ (T1 ∪ T2) instead of base ∩ T1 ∩ T2.""",
     "fillet": """\
 fillet — parametric fillet (obj_name = base object).
-Required in obj_properties: edges (selector), radius. Optional: name.
+Required in obj_properties: edges (selector), radius. Optional: refine (as on
+pad, inside a Body), name.
 radius accepts an "=expression" inside a Body (a Part-level fillet stores one
 size per edge and cannot be bound).
 Selectors accept "all", an index list [0,2], a name list ["Edge1"], or a
@@ -125,7 +126,7 @@ name them, try a smaller radius). A single invalid first recompute is retried in
 place before failing, since a stale recompute alone can produce it.""",
     "chamfer": """\
 chamfer — parametric chamfer (obj_name = base object).
-Required in obj_properties: edges (selector), size. Optional: name.
+Required in obj_properties: edges (selector), size. Optional: refine, name.
 Same selector syntax, the same Body-Tip rule and the same bare-base hiding as
 fillet.""",
     "loft": """\
@@ -169,6 +170,9 @@ Two VERY different behaviours, picked by the base object:
 - Base is a whole Body: refused — name the feature to repeat (e.g. its Tip).
 Linear (PartDesign): spacing is the PITCH between neighbours (FreeCAD's Spacing
 mode), so changing count keeps the pitch; a negative spacing goes the other way.
+The sign is read when the pattern is built (FreeCAD's spacing cannot be
+negative, so it goes to Reversed): a bound expression that later changes sign
+leaves the pattern invalid until it is rebuilt.
 mode="extent" with length spreads the copies over that overall length instead.
 spacings: uneven gaps, one per gap (count - 1 items): a number, an
 "=expression", or null for `spacing` — e.g. 5 groups of 4 slots at pitch 9,
@@ -491,7 +495,8 @@ Optional in obj_properties: length (default 10), pad_type, length2, up_to_face,
 offset, reversed, midplane, refine, body, name.
 refine: true/false sets the feature's Refine (merging coplanar faces); left
 out, FreeCAD's preference decides, and a result that only refining made
-invalid is rebuilt unrefined and the reply says so.
+invalid is rebuilt unrefined and the reply says so. A pad that leaves the body
+SMALLER fails: its fuse with an invalid base kept only the new solid.
 pad_type (FreeCAD's own names work too):
   length       — `length` mm (the default)
   up_to_first  — up to the first face of the part along the extrusion
@@ -504,7 +509,8 @@ feature that finds no face in its default direction is built reversed, and the
 reply says so; an explicit reversed is never overridden. `length` is ignored in
 the up_to_* modes. An up_to_* feature that ends past the part is refused: when no
 face covers the whole profile (a stub whose top rises above the cylinder it
-should end on), FreeCAD extrudes a long way and calls it success.
+should end on), FreeCAD extrudes a long way and calls it success. A planar
+face the profile overhangs is extended, as FreeCAD does, so that one builds.
 Numeric params accept "=expressions". The profile must have a closed wire that
 does not cross itself (a crossing outline is refused).
 A NEGATIVE length is legal and extrudes the other way (the result warns).
@@ -565,7 +571,8 @@ default 360), reversed, refine (as on pad), body, name. The axis-refusal rules m
 the profile's own normal ("Z") and a profile crossing the axis are refused.""",
     "thickness": """\
 thickness — shell a solid (obj_name = base solid feature).
-Required in obj_properties: faces (selector), value. Optional: reversed, body, name.
+Required in obj_properties: faces (selector), value. Optional: reversed, refine
+(as on pad), body, name.
 faces uses the selector syntax ("all" / index list / name list) and also
 accepts DIRECTION tokens ("+Z", "top", "MaxX", …), which is the stable way to
 name a face (FaceN is re-derived after every feature). A direction picks the
@@ -581,7 +588,8 @@ material was added outside, so a wrong-direction shell is not silent.""",
     "draft": """\
 draft — taper faces (obj_name = base solid feature).
 Required in obj_properties: faces (selector), angle.
-Optional: neutral_plane, pull_direction ({"edge": ["ObjName", "EdgeN"]}), body, name.
+Optional: neutral_plane, pull_direction ({"edge": ["ObjName", "EdgeN"]}), refine
+(as on pad), body, name.
 faces accepts direction tokens like thickness; the result echoes the resolved
 faces (name/center/normal) and the neutral plane used.
 neutral_plane is the face the taper pivots on (a direction token or FaceN). It

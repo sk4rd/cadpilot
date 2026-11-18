@@ -374,6 +374,7 @@ def _build_fillet_chamfer(doc, spec, kind):
         # FreeCAD 1.1's PartDesign dress-up holds ONE scalar size for all edges
         # (the per-edge tuple form is Part-level only).
         feat = body.newObject(tip_policy.dress_type(kind, True), label)
+        _apply_refine(feat, spec)
 
         def _probe(subset, feat=feat, target=target, doc=doc):
             feat.Base = (target, list(subset))
@@ -573,6 +574,7 @@ def _build_pd_mirror(doc, body, base, spec):
     originals = _transform_originals(doc, body, base, spec, "mirror")
     ref, subs, label = _mirror_plane_ref(doc, body, base, spec)
     feat = body.newObject("PartDesign::Mirrored", spec.get("name") or "Mirrored")
+    _apply_refine(feat, spec)
     feat.MirrorPlane = (ref, subs)
     feat.Originals = originals
     doc.recompute()
@@ -918,6 +920,7 @@ def _build_pd_pattern(doc, body, base, spec, ptype: str, count: int):
         direction, point, label, _link = _setup_linear(feat, body, base, spec, count)
     else:
         raise ValueError(f"pattern_type must be linear/polar/multi, got {ptype!r}")
+    _apply_refine(feat, spec)
     # AFTER the transform props: assigning Originals re-derives the shape.
     feat.Originals = originals
     feat.Occurrences = count
@@ -945,6 +948,7 @@ def _build_multi_transform(doc, body, base, spec):
         )
     originals = _transform_originals(doc, body, base, spec, "pattern")
     feat = body.newObject("PartDesign::MultiTransform", spec.get("name") or "MultiTransform")
+    _apply_refine(feat, spec)
     subs, labels = [], []
     for i, step in enumerate(steps):
         if not isinstance(step, dict):
@@ -1968,6 +1972,19 @@ def _take_auto_direction_note() -> str:
 _UNREFINED: set[str] = set()
 
 
+def _apply_refine(feat, spec) -> None:
+    """Set an explicit ``refine`` on a feature the moment it exists.
+
+    The builders compute the feature while they decide things about it (which
+    way a pocket cuts, whether an up-to pad ran away). Set after the builder,
+    as it first was, ``refine=false`` let those probes read the REFINED result:
+    live, a pocket on a body whose refined shape is invalid measured more
+    volume both ways, concluded it cut air either way and removed nothing.
+    """
+    if spec.get("refine") is not None and "Refine" in feat.PropertiesList:
+        feat.Refine = bool(spec["refine"])
+
+
 def _unrefine_if_broken(doc, feat, spec) -> bool:
     """Turn Refine off when only refining made ``feat``'s result invalid; True if it did.
 
@@ -2150,6 +2167,57 @@ def _square_face(centre, normal, half: float):
     return Part.Face(Part.makePolygon([*corners, corners[0]]))
 
 
+def _in_body_frame(feat, shape):
+    """``shape`` (a copy), moved from ``feat``'s own frame into its Body's.
+
+    A PartDesign feature's Shape already carries the feature's Placement, but
+    its AddSubShape does not, and that Placement is the first sketch's: every
+    feature of a body started on XZ or YZ is rotated against its own Shape.
+    """
+    moved = shape.copy()
+    moved.Placement = feat.Placement.multiply(moved.Placement)
+    return moved
+
+
+def _ends_on_a_plane_of(added, sketch_plane, direction, limiters) -> bool:
+    """True when every far cap of ``added`` lies in the plane of a planar face of ``limiters``.
+
+    FreeCAD extends a planar up-to face that the profile overhangs, so a pad up
+    to a tilted face smaller than the profile legitimately ends past the part
+    (live: a 40x40 profile up to a 20x20 face at 30 degrees, valid, was refused
+    as "5.8 mm past").
+    """
+    normal = sketch_plane.Rotation.multVec(FreeCAD.Vector(0, 0, 1))
+    caps = []
+    for face in added.Faces:
+        surface = face.Surface
+        if not isinstance(surface, Part.Plane):
+            u, v = surface.parameter(face.CenterOfMass)
+            if abs(face.normalAt(u, v).dot(direction)) > 1e-6:
+                return False  # a curved end: it stopped on a curved face, or ran away
+            continue
+        if abs(surface.Axis.dot(direction)) < 1e-6:
+            continue  # a side of the prism
+        on_sketch = abs((surface.Position - sketch_plane.Base).dot(normal)) < 1e-6
+        if on_sketch and surface.Axis.cross(normal).Length < 1e-6:
+            continue  # the start cap
+        caps.append(surface)
+    planes = [
+        face.Surface
+        for shape in limiters
+        for face in shape.Faces
+        if isinstance(face.Surface, Part.Plane)
+    ]
+    return bool(caps) and all(
+        any(
+            cap.Axis.cross(plane.Axis).Length < 1e-6
+            and abs((cap.Position - plane.Position).dot(plane.Axis)) < 1e-4
+            for plane in planes
+        )
+        for cap in caps
+    )
+
+
 def _refuse_runaway_up_to(doc, feat, fc_mode) -> None:
     """Refuse an up-to feature that ran past the part instead of stopping at a face.
 
@@ -2158,6 +2226,11 @@ def _refuse_runaway_up_to(doc, feat, fc_mode) -> None:
     a long way and report success (live on 1.1.4: up_to_first, up_to_face and
     UpToShape all ran a 36 mm stub out to x = 227..254). The end of an up-to
     feature must lie within the part it is limited by.
+
+    Everything is compared in the Body's frame. Mixing in the sketch's GLOBAL
+    placement and the feature-local AddSubShape refused valid pads (live: a
+    stub padded up to a wall in a body started on XZ, "20.0 mm past the part";
+    a moved Body the same) and let a real runaway through in a rotated Body.
     """
     if fc_mode not in ("UpToFirst", "UpToLast", "UpToFace"):
         return
@@ -2166,8 +2239,8 @@ def _refuse_runaway_up_to(doc, feat, fc_mode) -> None:
         return
     doc.recompute()
     try:
-        added, part = feat.AddSubShape, base.Shape
-        plane = feat.Profile[0].getGlobalPlacement()
+        added, part = _in_body_frame(feat, feat.AddSubShape), base.Shape
+        plane = feat.Profile[0].Placement
         direction = plane.Rotation.multVec(FreeCAD.Vector(0, 0, 1))
         # FreeCAD turns an up-to feature toward its face whatever Reversed says,
         # so the side of the sketch plane the solid lies on is the direction
@@ -2185,21 +2258,32 @@ def _refuse_runaway_up_to(doc, feat, fc_mode) -> None:
         # exact for curved faces too, where the farthest point is no vertex
         return far - shape.distToShape(wall)[0]
 
-    limit = reach(part)
+    limiters = [part]
     with contextlib.suppress(Exception):
         link, subs = feat.UpToFace
+        body = _parent_body(feat)
         for sub in subs or [""]:
-            limit = max(limit, reach(link.Shape.getElement(sub) if sub else link.Shape))
+            target = link.Shape.getElement(sub) if sub else link.Shape
+            if body is not None and _parent_body(link) is not body and link is not body:
+                # a face of an object outside the body is in the global frame
+                target = target.copy()
+                target.Placement = body.getGlobalPlacement().inverse().multiply(target.Placement)
+            limiters.append(target)
+    limit = max(reach(shape) for shape in limiters)
     # a positive offset ends past the face on purpose
     with contextlib.suppress(Exception):
         limit += max(0.0, float(getattr(feat.Offset, "Value", feat.Offset)))
     past = reach(added) - limit
-    if past > 1e-3:
-        raise RuntimeError(
-            f"{fc_mode} found no face of the part that covers the whole profile, so FreeCAD "
-            f"extruded {past:.1f} mm past the part instead of stopping. Pad a length, or limit "
-            "it to a face that covers the whole profile."
-        )
+    if past <= 1e-3:
+        return
+    with contextlib.suppress(Exception):
+        if _ends_on_a_plane_of(added, plane, direction, limiters):
+            return
+    raise RuntimeError(
+        f"{fc_mode} found no face of the part that covers the whole profile, so FreeCAD "
+        f"extruded {past:.1f} mm past the part instead of stopping. Pad a length, or limit "
+        "it to a face that covers the whole profile."
+    )
 
 
 def _build_padlike(doc, spec, fc_type, default_name):
@@ -2216,6 +2300,7 @@ def _build_padlike(doc, spec, fc_type, default_name):
     base_vol = _body_material_volume(body)
     face_ref = _up_to_face_ref(doc, body, spec) if fc_mode == "UpToFace" else None
     feat = body.newObject(fc_type, spec.get("name") or default_name)
+    _apply_refine(feat, spec)
     feat.Profile = sketch
     # through_all is PartDesign's OWN parametric through-all, not a big numeric
     # length: a numeric stand-in only goes through while the part is thinner
@@ -2276,6 +2361,7 @@ def _build_revlike(doc, spec, fc_type, default_name):
     _refuse_self_intersecting_profile(sketch, fc_type.split("::")[-1].lower())
     _ensure_material_base(doc, body, sketch, fc_type.split("::")[-1].lower())
     feat = body.newObject(fc_type, spec.get("name") or default_name)
+    _apply_refine(feat, spec)
     feat.Profile = sketch
     _set_or_bind(feat, "Angle", spec.get("angle", 360.0))
     # Default "Y" (the sketch's V axis) is the lathe setup a profile is
@@ -2340,6 +2426,7 @@ def _build_hole(doc, spec):
     _ensure_material_base(doc, body, sketch, "hole")
     base_vol = _body_material_volume(body)
     feat = body.newObject("PartDesign::Hole", spec.get("name") or "Hole")
+    _apply_refine(feat, spec)
     feat.Profile = sketch
     feat.Threaded = False
     _set_or_bind(feat, "Diameter", spec["diameter"])
@@ -2546,6 +2633,7 @@ def _build_thickness(doc, spec):
     names = _resolve_elements(base, spec["faces"], "Face")
     _record_resolved_faces(base, names)
     feat = body.newObject("PartDesign::Thickness", spec.get("name") or "Thickness")
+    _apply_refine(feat, spec)
     if "Faces" in feat.PropertiesList:
         # FreeCAD <= 1.0: plain Base link + separate Faces LinkSub.
         feat.Base = base
@@ -2627,6 +2715,7 @@ def _build_draft(doc, spec):
             else ""
         )
     feat = body.newObject("PartDesign::Draft", spec.get("name") or "Draft")
+    _apply_refine(feat, spec)
     if "Faces" in feat.PropertiesList:
         feat.Base = base
         feat.Faces = (base, names)
@@ -2745,23 +2834,37 @@ def _add_added_nothing(feat) -> str:
         new_vol = float(feat.Shape.Volume)
     except Exception:
         return ""
-    if prev_vol <= 0 or new_vol > prev_vol + _CUT_EPS:
-        return ""
-    if new_vol < prev_vol - _CUT_EPS:
-        # An additive feature can only shrink the body when the fuse with its
-        # base failed and kept the new solid alone (live: a 1128 mm^3 foot
-        # padded onto a 71413 mm^3 part that an earlier refine had left invalid
-        # was reported as "added no material").
-        return (
-            f"{feat.Name} SHRANK the body from {round(prev_vol, 1)} to {round(new_vol, 1)} mm^3: "
-            f"the fuse with '{baseline.Name}' failed and kept only the new solid. Check that "
-            f"'{baseline.Name}' is valid (Shape.isValid()); a refine on it is the usual cause."
-        )
+    if prev_vol <= 0 or abs(new_vol - prev_vol) > _CUT_EPS:
+        return ""  # it grew; a body that SHRANK never gets here (_refuse_shrunk_body)
     return (
         f"{feat.Name} added no material (volume unchanged at {round(new_vol, 1)} mm^3): the "
         "profile extrudes into material the part already has. Check the direction "
         "(reversed=true extrudes the other way) and the sketch's plane."
     )
+
+
+def _refuse_shrunk_body(feat) -> None:
+    """Fail an additive feature that left the body SMALLER than it found it.
+
+    That only happens when the fuse with its base failed and FreeCAD kept the
+    new solid alone (live: a 1128 mm^3 foot padded onto a 71413 mm^3 part that
+    an earlier refine had left invalid). It was first reported as "added no
+    material" and then as a warning on a successful step, while the part was
+    gone; raising aborts the step and leaves the body as it was.
+    """
+    try:
+        baseline = feat.BaseFeature
+        prev_vol = float(baseline.Shape.Volume)
+        new_vol = float(feat.Shape.Volume)
+    except Exception:
+        return
+    if prev_vol > 0 and new_vol < prev_vol - _CUT_EPS:
+        raise RuntimeError(
+            f"{feat.Name} SHRANK the body from {round(prev_vol, 1)} to {round(new_vol, 1)} mm^3: "
+            f"the fuse with '{baseline.Name}' failed and kept only the new solid, so the step "
+            f"was not applied. '{baseline.Name}' is probably invalid (Shape.isValid()); "
+            "rebuilding it with refine=false is the usual fix."
+        )
 
 
 def _pad_created_disconnected_solid(feat) -> str:
@@ -3349,8 +3452,6 @@ def create_feature_gui(doc, spec):
         issues_before = model_issues(doc)
         volumes_before = body_volumes(doc)
     feat = builder(doc, spec)
-    if spec.get("refine") is not None and "Refine" in getattr(feat, "PropertiesList", []):
-        feat.Refine = bool(spec["refine"])
     # "move" directly modifies Placement and "color" only the ViewObject —
     # neither builds a feature, so the recompute/validity/volume checks below do
     # not apply. They must not either: a color op has no business failing
@@ -3455,6 +3556,8 @@ def create_feature_gui(doc, spec):
         raise RuntimeError(
             f"{ftype} produced a self-intersecting solid (volume {volume:.1f} mm^3 < 0); {hint}."
         )
+    if ftype in ("pad", "revolution"):
+        _refuse_shrunk_body(feat)
     # Settle the lazy Shape caches INSIDE this op: a read immediately after the
     # commit (the caller's measure_geometry, the connectivity audit) otherwise
     # saw an interim result — live: a datum-plane pocket reported Body volume

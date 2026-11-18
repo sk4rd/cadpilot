@@ -143,7 +143,7 @@ def dress_base_is_allowed(*, base_in_body: bool, base_is_tip: bool) -> bool:
     return (not base_in_body) or base_is_tip
 
 
-_DRESS_KEYS = ("edges", "name")
+_DRESS_KEYS = ("edges", "refine", "name")
 _PADLIKE_KEYS = (
     "length",
     "length2",
@@ -216,8 +216,8 @@ SPEC_KEYS: dict[str, frozenset[str]] = {
         "pocket": _PADLIKE_KEYS,
         "revolution": _REVLIKE_KEYS,
         "groove": _REVLIKE_KEYS,
-        "thickness": ("faces", "value", "reversed", "body", "name"),
-        "draft": ("faces", "angle", "neutral_plane", "pull_direction", "body", "name"),
+        "thickness": ("faces", "value", "reversed", "refine", "body", "name"),
+        "draft": ("faces", "angle", "neutral_plane", "pull_direction", "refine", "body", "name"),
         "datum_plane": ("plane", "offset", "body"),
         "hull": ("sketches", "margin"),
         "hole": (
