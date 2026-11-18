@@ -328,3 +328,75 @@ def test_unnamed_dimensions_are_listed_once_per_entry():
         {"type": "radius", "items": [1, 2], "value": 5},
     )
     assert ss.unnamed_dimensions(plans) == ["constraints[2] (radius)"]
+
+
+def test_rectangle_is_four_lines_with_its_constraints():
+    prims, ids, implied = ss.expand_geometry(
+        [
+            {"type": "circle", "center": [0, 0], "radius": 1},
+            {"type": "rectangle", "from": [0, 0], "to": [4, 2]},
+        ]
+    )
+    assert ids == [[0], [1, 2, 3, 4]]
+    assert [(p["from"], p["to"]) for p in prims[1:]] == [
+        ([0.0, 0.0], [4.0, 0.0]),
+        ([4.0, 0.0], [4.0, 2.0]),
+        ([4.0, 2.0], [0.0, 2.0]),
+        ([0.0, 2.0], [0.0, 0.0]),
+    ]
+    assert [p["args"] for p in implied] == [
+        ("Coincident", 1, 2, 2, 1),
+        ("Coincident", 2, 2, 3, 1),
+        ("Coincident", 3, 2, 4, 1),
+        ("Coincident", 4, 2, 1, 1),
+        ("Horizontal", 1),
+        ("Horizontal", 3),
+        ("Vertical", 2),
+        ("Vertical", 4),
+    ]
+    assert ss.origin_of(implied[0]) == {"entry": "geometry[1]", "type": "rectangle"}
+
+
+def test_polyline_open_and_closed():
+    prims, ids, implied = ss.expand_geometry(
+        [{"type": "polyline", "points": [[0, 0], [5, 0], [5, 5]], "closed": True}], base=3
+    )
+    assert ids == [[3, 4, 5]]
+    assert prims[-1]["from"] == [5.0, 5.0] and prims[-1]["to"] == [0.0, 0.0]
+    assert [p["args"] for p in implied] == [
+        ("Coincident", 3, 2, 4, 1),
+        ("Coincident", 4, 2, 5, 1),
+        ("Coincident", 5, 2, 3, 1),
+    ]
+    _, ids, implied = ss.expand_geometry([{"type": "polyline", "points": [[0, 0], [5, 0], [5, 5]]}])
+    assert ids == [[0, 1]] and len(implied) == 1
+    with pytest.raises(ValueError, match=r"geometry\[0\] \(polyline\): two consecutive points"):
+        ss.expand_geometry([{"type": "polyline", "points": [[0, 0], [0, 0], [5, 5]]}])
+
+
+def test_slot_is_two_arcs_and_two_tangent_lines():
+    prims, ids, implied = ss.expand_geometry(
+        [{"type": "slot", "from": [0, 0], "to": [10, 0], "radius": 2, "construction": True}]
+    )
+    assert ids == [[0, 1, 2, 3]]
+    assert [p["type"] for p in prims] == ["arc", "arc", "line", "line"]
+    assert all(p["construction"] for p in prims)
+    assert (prims[0]["start_angle"], prims[0]["end_angle"]) == (90.0, 270.0)
+    assert (prims[1]["start_angle"], prims[1]["end_angle"]) == (-90.0, 90.0)
+    assert prims[2]["from"] == pytest.approx([0, -2]) and prims[2]["to"] == pytest.approx([10, -2])
+    assert prims[3]["from"] == pytest.approx([10, 2]) and prims[3]["to"] == pytest.approx([0, 2])
+    assert [p["args"] for p in implied] == [
+        ("Tangent", 0, 2, 2, 1),
+        ("Tangent", 2, 2, 1, 1),
+        ("Tangent", 1, 2, 3, 1),
+        ("Tangent", 3, 2, 0, 1),
+        ("Equal", 0, 1),
+        ("Horizontal", 2),
+    ]
+
+
+def test_bad_geometry_names_its_index():
+    with pytest.raises(ValueError, match=r"geometry\[0\] \(rectangle\): 'from' and 'to'"):
+        ss.expand_geometry([{"type": "rectangle", "from": [0, 0], "to": [0, 5]}])
+    with pytest.raises(ValueError, match=r"geometry\[1\]: unknown geometry type 'ellipse'"):
+        ss.expand_geometry([{"type": "point", "at": [0, 0]}, {"type": "ellipse"}])

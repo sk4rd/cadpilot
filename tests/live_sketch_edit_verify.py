@@ -54,6 +54,11 @@ def err(res):
     return res.get("summary") or res.get("text") or ""
 
 
+def made(res):
+    """The object name a successful reply quotes: "pad 'Pad001' created ..."."""
+    return err(res).split("'")[1]
+
+
 def py(code, doc):
     r = c.execute_code(code, doc_name=doc)
     out = r.get("message") or r.get("output") or ""
@@ -330,6 +335,54 @@ def m6_names_are_checked_and_reported():
     )
 
 
+def m1_composite_geometry_is_fully_constrainable():
+    doc = "SkShapes"
+    newdoc(doc)
+    cad("variables", doc, "Params", cells={"A1": ["width", 40], "A2": ["depth", 20]})
+    res = cad(
+        "sketch",
+        doc,
+        "Plate",
+        geometry=[{"type": "rectangle", "from": [0, 0], "to": [30, 10]}],
+        constraints=[
+            {"type": "coincident", "items": [[0, "start"], [-1, "start"]]},
+            {"type": "distance_x", "items": [0], "value": "=Params.width", "name": "W"},
+            {"type": "distance_y", "items": [1], "value": "=Params.depth", "name": "H"},
+        ],
+    )
+    check(
+        "m1 rectangle + origin + two dims is fully constrained",
+        ok(res) and res.get("dof") == 0 and res.get("geometry_ids") == [[0, 1, 2, 3]],
+        str(res),
+    )
+    pad = cad("pad", doc, "Plate", length=5)
+    vol = c.measure_geometry(doc, made(pad)) if ok(pad) else {}
+    check(
+        "m1 the rectangle pads to w*h*5",
+        ok(pad) and math.isclose(vol.get("volume_mm3", 0), 40 * 20 * 5, rel_tol=1e-6),
+        f"{pad} {vol}",
+    )
+    res = cad(
+        "sketch",
+        doc,
+        "Slot",
+        geometry=[
+            {"type": "slot", "from": [0, 0], "to": [20, 0], "radius": 3},
+            {"type": "polyline", "points": [[0, 20], [10, 20], [5, 28]], "closed": True},
+        ],
+        constraints=[
+            {"type": "coincident", "items": [[0, "center"], [-1, "start"]]},
+            {"type": "distance", "items": [[0, "center"], [1, "center"]], "value": 20, "name": "L"},
+            {"type": "radius", "items": [0], "value": 3, "name": "R"},
+        ],
+    )
+    check(
+        "m1 slot + origin + length + radius is fully constrained; polyline joins close",
+        ok(res) and res.get("geometry_ids") == [[0, 1, 2, 3], [4, 5, 6]] and res.get("dof") == 6,
+        str(res),
+    )
+
+
 CHECKS = [
     m1_diagnostics_name_the_spec_entry,
     m7_lists_expand_into_one_constraint_per_item,
@@ -337,6 +390,7 @@ CHECKS = [
     m2_m3_m8_points_follow_the_geometry,
     m4_unit_strings_are_values,
     m6_names_are_checked_and_reported,
+    m1_composite_geometry_is_fully_constrainable,
 ]
 
 if __name__ == "__main__":

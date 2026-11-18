@@ -305,12 +305,24 @@ Optional: plane, offset, body, construction, external, constraints.
   face, so a profile drawn around the origin hangs off the part). A direction
   token picks the FARTHEST face facing that way, and the echo lists
   `same_direction` alternatives.
-- geometry: list of items; the list order is the GeoId used in constraints:
+- geometry: list of items; GeoIds (what constraints reference) count up in
+  list order, one per line/arc/circle/bspline/point:
     {"type": "line", "from": [x,y], "to": [x,y]}
     {"type": "arc", "center": [x,y], "radius": r, "start_angle": deg, "end_angle": deg}
     {"type": "circle", "center": [x,y], "radius": r}
     {"type": "bspline", "points": [[x,y],...], "periodic": false}
     {"type": "point", "at": [x,y]}
+  Shapes take several GeoIds and bring the constraints that make them one
+  shape (added after yours); the reply's `geometry_ids` lists each item's ids:
+    {"type": "polyline", "points": [[x,y],...], "closed": false}
+        N-1 lines (N with closed), joined end to start
+    {"type": "rectangle", "from": [x,y], "to": [x,y]}   (opposite corners)
+        4 lines: from->(to.x, from.y), ->to, ->(from.x, to.y), ->from, joined,
+        horizontal and vertical; 4 DoF left (position and size)
+    {"type": "slot", "from": [x,y], "to": [x,y], "radius": r}
+        arc around from, arc around to, line, line: tangent joints and equal
+        radii (horizontal/vertical too when axis-aligned); 4 DoF left
+  Any item takes "construction": true.
 - construction: list of GeoIds treated as construction geometry.
 - external: list of [obj_name, "EdgeN"|"VertexN"] — external geometry
   (cross-part parametric references). The i-th entry takes GeoId -(3+i) and
@@ -368,11 +380,10 @@ Optional: plane, offset, body, construction, external, constraints.
   TO the second, so [[0,"start"],[-1,"center"]] with +30 puts the origin at
   (−30, ·) — swapping the two items flips the sign. Write the constraint in the
   order you mean it.
-  A profile of N lines needs its closing point coincidences AND the
-  horizontal/vertical constraints for each axis-aligned edge (a rectangle =
-  4 lines + 4 coincidences + 2 horizontal + 2 vertical), or the solver leaves
-  rotational/positional degrees of freedom and the sketch reports
-  fully_constrained: false.
+  A profile of N separate lines needs its closing point coincidences AND the
+  horizontal/vertical constraints for each axis-aligned edge, or the solver
+  leaves rotational/positional degrees of freedom and the sketch reports
+  fully_constrained: false; polyline/rectangle/slot add their joints for you.
 - Reusing an existing name does NOT overwrite: FreeCAD de-duplicates
   ("HoleProfile" → "HoleProfile001"); the response carries the actual name,
   so reuse it from there.

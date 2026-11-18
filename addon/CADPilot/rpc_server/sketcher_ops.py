@@ -119,22 +119,23 @@ def _build_geometry_item(item: dict):
     if gtype == "point":
         return Part.Point(_vec2(item.get("at")))
     raise ValueError(
-        f"unknown geometry type {gtype!r}; supported: line, arc, circle, bspline, point"
+        f"unknown geometry type {gtype!r}; supported: {', '.join(sketch_spec.PRIMITIVES)}"
     )
 
 
-def _add_geometry(sketch, geometry: list, construction: list):
+def _add_geometry(sketch, geometry: list, construction: list | None) -> tuple[list, list]:
+    """Add the spec's geometry; returns (GeoIds per spec item, implied constraints)."""
+    prims, ids, implied = sketch_spec.expand_geometry(geometry, len(sketch.Geometry))
     construction_ids = {int(i) for i in (construction or [])}
-    for expect_id, item in enumerate(geometry):
-        if not isinstance(item, dict):
-            raise ValueError(f"geometry[{expect_id}] must be a dict, got {item!r}")
+    for prim in prims:
         try:
-            geo = _build_geometry_item(item)
-        except (TypeError, KeyError) as e:
-            raise ValueError(f"geometry[{expect_id}] ({item.get('type')}): {e}") from e
-        geo_id = sketch.addGeometry(geo, expect_id in construction_ids)
-        if geo_id != expect_id:
-            raise RuntimeError(f"internal: expected GeoId {expect_id}, FreeCAD returned {geo_id}")
+            geo = _build_geometry_item(prim)
+        except (TypeError, KeyError, ValueError) as e:
+            raise ValueError(f"geometry[{prim['entry']}] ({prim['type']}): {e}") from e
+        geo_id = sketch.addGeometry(geo, prim["construction"] or prim["id"] in construction_ids)
+        if geo_id != prim["id"]:
+            raise RuntimeError(f"internal: expected GeoId {prim['id']}, FreeCAD returned {geo_id}")
+    return ids, implied
 
 
 # --- external geometry ----------------------------------------------------------
@@ -207,15 +208,16 @@ def _geometry_kinds(sketch) -> dict:
     )
 
 
-def _add_constraints(sketch, constraints: list) -> tuple[list, list]:
-    """Add the spec's constraints.
+def _add_constraints(sketch, constraints: list, implied: list = ()) -> tuple[list, list]:
+    """Add the spec's constraints, then those its composite geometry implies.
 
+    The implied ones go last so the spec's own entries keep their order.
     Returns (origins indexed like Constraints, unnamed dimensional entries).
     """
     origins = [None] * len(sketch.Constraints)
     taken = {k.Name: f"Constraints[{i}]" for i, k in enumerate(sketch.Constraints) if k.Name}
     planned = sketch_spec.plan_constraints(constraints, _geometry_kinds(sketch), taken)
-    for plan in planned:
+    for plan in [*planned, *implied]:
         args = plan["args"]
         if plan["datum"] is None:
             con = Sketcher.Constraint(*args)
@@ -569,9 +571,9 @@ def build_sketch_gui(doc, spec):
     sketch = body.newObject("Sketcher::SketchObject", spec.get("base") or "Sketch")
 
     _attach_sketch(sketch, doc, spec)
-    _add_geometry(sketch, geometry, spec.get("construction"))
+    geometry_ids, implied = _add_geometry(sketch, geometry, spec.get("construction"))
     _add_external(sketch, doc, body, spec.get("external"))
-    origins, unnamed = _add_constraints(sketch, spec.get("constraints"))
+    origins, unnamed = _add_constraints(sketch, spec.get("constraints"), implied)
     doc.recompute()
     dof, diag = _solve(sketch, origins)
 
@@ -580,11 +582,13 @@ def build_sketch_gui(doc, spec):
         "body": body.Name,
         "dof": int(dof) if dof is not None else None,
         "fully_constrained": (dof == 0) if dof is not None else None,
-        "geometry_count": len(geometry),
-        "constraint_count": len(spec.get("constraints") or []),
+        "geometry_count": len(sketch.Geometry),
+        "constraint_count": len(sketch.Constraints),
         "external_count": len(spec.get("external") or []),
         "diagnostics": diag or None,
     }
+    if any(len(i) != 1 for i in geometry_ids):
+        _LAST_SKETCH_INFO["geometry_ids"] = geometry_ids
     if unnamed:
         _LAST_SKETCH_INFO["unnamed_dimensions"] = unnamed
     if _LAST_ATTACHMENT:

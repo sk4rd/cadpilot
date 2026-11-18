@@ -430,7 +430,7 @@ def unnamed_dimensions(planned: list[dict]) -> list[str]:
 
 def origin_of(plan: dict) -> dict:
     """What a planned constraint reports when the solver names it."""
-    out = {"entry": f"constraints[{plan['entry']}]", "type": plan["type"]}
+    out = {"entry": f"{plan.get('source', 'constraints')}[{plan['entry']}]", "type": plan["type"]}
     if plan.get("name"):
         out["name"] = plan["name"]
     return out
@@ -485,3 +485,167 @@ def diagnostics_text(mapped: dict) -> str:
     return "; ".join(
         f"{key}: {', '.join(describe_entry(e) for e in entries)}" for key, entries in mapped.items()
     )
+
+
+PRIMITIVES = ("line", "arc", "circle", "bspline", "point")
+COMPOSITES = ("polyline", "rectangle", "slot")
+
+
+def _xy(value: Any, what: str) -> tuple[float, float]:
+    if not isinstance(value, (list, tuple)) or len(value) != 2:
+        raise ValueError(f"{what} must be [x, y], got {value!r}")
+    return float(value[0]), float(value[1])
+
+
+def _line(a: tuple, b: tuple) -> dict:
+    if math.dist(a, b) < 1e-9:
+        raise ValueError(f"two consecutive points coincide at {list(a)}")
+    return {"type": "line", "from": list(a), "to": list(b)}
+
+
+def _implied(kind: str, entry: int, *args: tuple) -> list[dict]:
+    return [
+        {
+            "args": a,
+            "datum": None,
+            "expr": None,
+            "name": None,
+            "entry": entry,
+            "type": kind,
+            "source": "geometry",
+        }
+        for a in args
+    ]
+
+
+def _polyline(item: dict) -> tuple[list[dict], list[tuple]]:
+    """Lines through ``points``; ``closed`` adds the closing segment."""
+    points = item.get("points")
+    closed = bool(item.get("closed"))
+    if not isinstance(points, list) or len(points) < (3 if closed else 2):
+        raise ValueError(f"needs a 'points' list of at least {3 if closed else 2} [x, y]")
+    pts = [_xy(p, f"points[{k}]") for k, p in enumerate(points)]
+    if closed and math.dist(pts[0], pts[-1]) < 1e-9:
+        pts = pts[:-1]  # the caller repeated the first point to close it
+    segments = list(pairwise(pts)) + ([(pts[-1], pts[0])] if closed else [])
+    lines = [_line(a, b) for a, b in segments]
+    joints = [(k, 2, k + 1, 1) for k in range(len(lines) - 1)]
+    if closed:
+        joints.append((len(lines) - 1, 2, 0, 1))
+    return lines, [("Coincident", *j) for j in joints]
+
+
+def _rectangle(item: dict) -> tuple[list[dict], list[tuple]]:
+    """Corners ``from`` and ``to``: bottom, right, top, left as seen from ``from``."""
+    x0, y0 = _xy(item.get("from"), "from")
+    x1, y1 = _xy(item.get("to"), "to")
+    if abs(x1 - x0) < 1e-9 or abs(y1 - y0) < 1e-9:
+        raise ValueError("'from' and 'to' are opposite corners and must differ in x and in y")
+    corners = [(x0, y0), (x1, y0), (x1, y1), (x0, y1)]
+    lines = [_line(corners[k], corners[(k + 1) % 4]) for k in range(4)]
+    implied = [("Coincident", k, 2, (k + 1) % 4, 1) for k in range(4)]
+    implied += [("Horizontal", 0), ("Horizontal", 2), ("Vertical", 1), ("Vertical", 3)]
+    return lines, implied
+
+
+def _slot(item: dict) -> tuple[list[dict], list[tuple]]:
+    """A stadium: arcs around ``from`` and ``to`` joined by two tangent lines.
+
+    The order matches FreeCAD's slot tool: arc at ``from``, arc at ``to``,
+    then the two lines; an axis-aligned slot is also kept horizontal/vertical.
+    """
+    c1 = _xy(item.get("from"), "from")
+    c2 = _xy(item.get("to"), "to")
+    try:
+        r = float(item.get("radius"))
+    except (TypeError, ValueError):
+        raise ValueError(f"needs a numeric 'radius', got {item.get('radius')!r}") from None
+    if r <= 0:
+        raise ValueError(f"radius must be positive, got {r}")
+    dx, dy = c2[0] - c1[0], c2[1] - c1[1]
+    if math.hypot(dx, dy) < 1e-9:
+        raise ValueError("'from' and 'to' are the two arc centres and must differ")
+    theta = math.degrees(math.atan2(dy, dx))
+    nx, ny = -math.sin(math.radians(theta)), math.cos(math.radians(theta))
+    out1, in1 = (c1[0] + r * nx, c1[1] + r * ny), (c1[0] - r * nx, c1[1] - r * ny)
+    out2, in2 = (c2[0] + r * nx, c2[1] + r * ny), (c2[0] - r * nx, c2[1] - r * ny)
+    prims = [
+        {
+            "type": "arc",
+            "center": list(c1),
+            "radius": r,
+            "start_angle": theta + 90,
+            "end_angle": theta + 270,
+        },
+        {
+            "type": "arc",
+            "center": list(c2),
+            "radius": r,
+            "start_angle": theta - 90,
+            "end_angle": theta + 90,
+        },
+        _line(in1, in2),
+        _line(out2, out1),
+    ]
+    implied = [
+        ("Tangent", 0, 2, 2, 1),
+        ("Tangent", 2, 2, 1, 1),
+        ("Tangent", 1, 2, 3, 1),
+        ("Tangent", 3, 2, 0, 1),
+        ("Equal", 0, 1),
+    ]
+    if abs(dy) < 1e-9:
+        implied.append(("Horizontal", 2))
+    elif abs(dx) < 1e-9:
+        implied.append(("Vertical", 2))
+    return prims, implied
+
+
+_COMPOSITE_BUILDERS = {"polyline": _polyline, "rectangle": _rectangle, "slot": _slot}
+
+
+def _offset_args(args: tuple, base: int) -> tuple:
+    """Shift the GeoIds of a composite's local constraint (local id k -> base + k)."""
+    kind = args[0]
+    if kind in ("Coincident", "Tangent"):
+        return (kind, args[1] + base, args[2], args[3] + base, args[4])
+    return (kind, *(a + base for a in args[1:]))
+
+
+def expand_geometry(geometry: list, base: int = 0) -> tuple[list[dict], list[list[int]], list]:
+    """Spec geometry -> (primitives, GeoIds per spec item, implied constraints).
+
+    A polyline, rectangle or slot becomes several lines and arcs, numbered in
+    order from ``base``, plus the constraints that make them one shape (the
+    joints; a rectangle's horizontals and verticals; a slot's tangencies and
+    equal radii). Every primitive carries its GeoId as ``id``, the spec index
+    as ``entry`` and its ``construction`` flag; the implied constraints are
+    planned entries (see :func:`plan_constraints`) with ``source`` "geometry".
+    """
+    prims: list[dict] = []
+    ids: list[list[int]] = []
+    implied: list[dict] = []
+    for i, item in enumerate(geometry):
+        if not isinstance(item, dict):
+            raise ValueError(f"geometry[{i}] must be a dict, got {item!r}")
+        gtype = item.get("type")
+        construction = bool(item.get("construction"))
+        start = base + len(prims)
+        if gtype in PRIMITIVES:
+            parts, local = [dict(item)], []
+        elif gtype in _COMPOSITE_BUILDERS:
+            try:
+                parts, local = _COMPOSITE_BUILDERS[gtype](item)
+            except ValueError as e:
+                raise ValueError(f"geometry[{i}] ({gtype}): {e}") from e
+        else:
+            raise ValueError(
+                f"geometry[{i}]: unknown geometry type {gtype!r}; supported: "
+                f"{', '.join(PRIMITIVES + COMPOSITES)}"
+            )
+        for k, part in enumerate(parts):
+            part.update(id=start + k, entry=i, construction=construction)
+        prims.extend(parts)
+        ids.append([start + k for k in range(len(parts))])
+        implied.extend(_implied(gtype, i, *(_offset_args(a, start) for a in local)))
+    return prims, ids, implied
