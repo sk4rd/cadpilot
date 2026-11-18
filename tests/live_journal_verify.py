@@ -537,6 +537,12 @@ check(
     str(out),
 )
 panel(D, "act_accept", select=3)
+text = changes(D)
+check(
+    "J Claude is told what the user pressed in the panel",
+    "Steps panel: accepted step 3" in text,
+    text,
+)
 user(
     D,
     """
@@ -850,7 +856,9 @@ py(
 )
 print()
 if CHANGE_TEXTS:
-    print("Example of what Claude reads:\n" + CHANGE_TEXTS[0])
+    print("Example of what Claude reads:\n" + max(CHANGE_TEXTS, key=lambda t: t.count("\n- ")))
+with open(os.path.join(SHOTS, "user-changes.txt"), "w", encoding="utf-8") as out:
+    out.write("\n\n".join(CHANGE_TEXTS))
 print(f"\n{len(FAILURES)} failure(s)")
 for failure in FAILURES:
     print(" -", failure)
