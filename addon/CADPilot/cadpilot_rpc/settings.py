@@ -13,7 +13,7 @@ _DEFAULT_SETTINGS = {
     "allowed_ips": "127.0.0.1",
     "auto_start_rpc": True,
     "port": 9876,
-    "step_panel_visible": False,
+    "step_panel_visible": True,
     "log_level": "INFO",
     "log_dir": "",
     "log_ring_size": 2000,

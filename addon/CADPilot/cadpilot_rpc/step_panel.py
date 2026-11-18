@@ -1249,7 +1249,7 @@ def _load_visible() -> bool:
     try:
         from cadpilot_rpc.settings import load_settings
 
-        return bool(load_settings().get("step_panel_visible", False))
+        return bool(load_settings().get("step_panel_visible", True))
     except Exception:
         return False
 
