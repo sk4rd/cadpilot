@@ -1905,7 +1905,7 @@ class _JournalSyncObserver:
                 return
             if ctype not in sj.DIMENSIONAL_CONSTRAINTS or "value" not in pc:
                 continue
-            expr = exprs.get(f"Constraints[{i}]")
+            expr = sj.constraint_expression(exprs, i, str(getattr(live[i], "Name", "") or ""))
             new = sj.map_constraint_value(
                 ctype, pc.get("value"), getattr(live[i], "Value", None), expr
             )

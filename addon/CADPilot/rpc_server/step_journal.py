@@ -1375,6 +1375,23 @@ def map_cell_value(old: Any, live_contents: Any) -> Any:
         return UNREADABLE
 
 
+def constraint_expression(exprs: dict[str, Any], index: int, name: str = "") -> str | None:
+    """The expression bound to sketch constraint ``index``, if any.
+
+    FreeCAD keys a NAMED constraint's binding by its name
+    (``.Constraints.Width``) even when it was bound by index, and only an
+    unnamed one by index (``Constraints[3]``). Looking up the index alone read
+    a named binding as "unbound", so an edit to any other constraint of the
+    sketch rewrote the step's ``=Params.Wd`` to its current number.
+    """
+    if name:
+        expr = exprs.get(f".Constraints.{name}")
+        if expr:
+            return str(expr)
+    expr = exprs.get(f"Constraints[{index}]") or exprs.get(f".Constraints[{index}]")
+    return str(expr) if expr else None
+
+
 def map_constraint_value(ctype: str, old: Any, live_value: Any, live_expr: str | None) -> Any:
     """A dimensional sketch constraint's synced value.
 
