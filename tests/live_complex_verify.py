@@ -276,12 +276,9 @@ def scenario_enclosure():
     check("B: screenshot delivered", bool(shot), "no base64 returned")
     if shot:
         import base64
-        from pathlib import Path
 
-        p = Path("H:/My_Software/CADPilot/.live_shot.png")
-        p.write_bytes(base64.b64decode(shot))
-        check("B: screenshot non-trivial", p.stat().st_size > 3000, str(p.stat().st_size))
-        p.unlink()
+        size = len(base64.b64decode(shot))
+        check("B: screenshot non-trivial", size > 3000, str(size))
     r = c.execute_code(
         "import FreeCADGui; print('selected-after:', [o.Name for o in FreeCADGui.Selection.getSelection()])",
         doc_name=doc,

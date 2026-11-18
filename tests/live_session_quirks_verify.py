@@ -1,18 +1,23 @@
 """Live regression for what modelling a printer part (a WS7040 blower mount) ran into.
 
 One section per problem:
-  [body]    a sketch naming a Body that does not exist yet failed every plan at step 1
+  [body]    a sketch naming a Body that does not exist yet failed every plan at step 1;
+            created by a name FreeCAD rewrites, the next sketch made a second Body
   [unit]    a constraint named "SpigotR" hung the GUI thread for good (C++ exception
             through Python from the unit-name probe)
   [spacing] a negative =expression spacing in a multi pattern failed to recompute
   [refine]  refining a fuse flush with rounded corners gave an invalid shape: the pad
             after it reported "added no material" while it threw the body away, and a
-            pocket on it could not tell which way cut material, so it cut air
-  [upto]    an up-to pad whose profile no face covers ran far past the part as success
+            pocket on it could not tell which way cut material, so it cut air; with
+            refine=false passed, as the reply advises, the pocket cut air again
+  [upto]    an up-to pad whose profile no face covers ran far past the part as success;
+            the check for it refused valid pads in a body started on XZ, in a moved
+            Body and up to a tilted face smaller than the profile
   [axis]    the polar pattern's helper axis showed in every view
   [batch]   a batch step run by step_control came back as a bare success
   [journal] a fix recorded after a failed step landed behind it; failed steps could
-            not be dropped
+            not be dropped; the journal then named the failed step as the one just
+            committed, and status left out why it failed
   [midplane] every pad and pocket wrote the deprecated Midplane property
 
     CADPILOT_PORT=9879 uv run --frozen python tests/live_session_quirks_verify.py
@@ -170,6 +175,14 @@ check(
     out[:300],
 )
 
+d = newdoc("QBodyLabel")
+cad(d, "sketch", "S", plane="XY", body="Main Body", **rect(0, 0, 10, 10))
+out = cad(d, "sketch", "S2", plane="XY", body="Main Body", **rect(0, 0, 5, 5))
+bodies = fc(d, "[o.Name for o in d.Objects if o.TypeId == 'PartDesign::Body']")
+check("[body] a name FreeCAD rewrites still means one Body", bodies == "['Main_Body']", bodies)
+out = cad(d, "pad", "S", length=2, body="Main Body")
+check("[body] and a pad may name it the same way", "created successfully" in out, out[:300])
+
 # [unit] -------------------------------------------------------------------------
 d = newdoc("QUnit")
 spec = rect(0, 0, 20, 10)
@@ -285,6 +298,48 @@ check(
     f"{before} -> {after}: {out[:500]}",
 )
 
+# The reply above says to pass refine=false on the features after it. Set after
+# the builder had probed the cut direction, it made that probe read refined shapes.
+d = newdoc("QRefineExplicit")
+for step in steps:
+    props = dict(step["obj_properties"])
+    if props.get("name") == "Spine":
+        props["refine"] = False
+    cad_operation(
+        c, step["operation"], d, obj_name=step["obj_name"], obj_properties=props, auto_audit=False
+    )
+cad(d, "sketch", "FootSketch", plane="XY", **rect(-20, -14, 0, 5))
+cad(d, "pad", "FootSketch", length=3, name="Foot", refine=False)
+cad(d, "sketch", "ScrewSketch", plane="XY", **circle)
+before = float(fc(d, "d.getObject('Foot').Shape.Volume") or 0)
+out = cad(d, "pocket", "ScrewSketch", through_all=True, name="Screw", refine=False)
+after = float(fc(d, "d.getObject('Screw').Shape.Volume") or 0)
+check(
+    "[refine] with refine=false passed, the pocket finds the material too",
+    abs(before - after - 19.8156) < 0.01,
+    f"{before} -> {after}: {out[:500]}",
+)
+
+# Refined on purpose, the spine stays invalid, and the fuse of the next pad keeps
+# the new solid alone: that must fail the step, not warn on a successful one.
+d = newdoc("QRefineShrink")
+for step in steps:
+    props = dict(step["obj_properties"])
+    if props.get("name") == "Spine":
+        props["refine"] = True
+    cad_operation(
+        c, step["operation"], d, obj_name=step["obj_name"], obj_properties=props, auto_audit=False
+    )
+spine = float(fc(d, "d.getObject('Body').Shape.Volume") or 0)
+cad(d, "sketch", "FootSketch", plane="XY", **rect(-20, -14, 0, 5))
+out = cad(d, "pad", "FootSketch", length=3, name="Foot", refine=True)
+body = float(fc(d, "d.getObject('Body').Shape.Volume") or 0)
+check(
+    "[refine] a pad that would shrink the body fails and leaves it alone",
+    "SHRANK the body" in out and abs(body - spine) < 1e-6,
+    f"{spine} -> {body}: {out[:400]}",
+)
+
 # [upto] -------------------------------------------------------------------------
 d = newdoc("QUpTo")
 disc = {
@@ -349,6 +404,84 @@ check(
     fc(d, "d.getObject('CadPilotPolarAxis').Visibility") == "False",
 )
 
+# Every feature of a body started on XZ carries that sketch's rotation as its
+# Placement, and keeps AddSubShape without it.
+d = newdoc("QUpToXZ")
+cad(d, "sketch", "PlateS", plane="XZ", **rect(0, 0, 40, 5))
+cad(d, "pad", "PlateS", length=30, name="Plate")
+cad(d, "sketch", "WallS", plane="XZ", **rect(0, 5, 40, 30))
+cad(d, "pad", "WallS", length=5, name="Wall")
+cad(d, "sketch", "StubS", plane="XZ", offset=25, **rect(10, 10, 20, 20))
+out = cad(d, "pad", "StubS", pad_type="up_to_first", name="Stub")
+vol = float(fc(d, "d.getObject('Body').Shape.Volume") or 0)
+check(
+    "[upto] a stub up to a wall builds in a body started on XZ",
+    "created successfully" in out and abs(vol - 13000) < 1e-6,
+    f"{vol}: {out[:300]}",
+)
+
+for label, placement in (
+    ("moved", "App.Placement(App.Vector(0, 0, 200), App.Rotation())"),
+    ("turned", "App.Placement(App.Vector(), App.Rotation(App.Vector(0, 0, 1), 90))"),
+):
+    d = newdoc(f"QUpTo{label}")
+    cad(d, "sketch", "V", plane="XY", **disc)
+    cad(d, "pad", "V", length=18, name="Volute")
+    c.execute_code(
+        f"import FreeCAD as App\nd = App.getDocument({d!r})\n"
+        f"d.getObject('Body').Placement = {placement}\nd.recompute()",
+        doc_name=d,
+    )
+    stub["geometry"][0].update(center=[22.4, 9], radius=4)
+    stub["constraints"][0]["value"] = 4
+    stub["constraints"][2]["value"] = 9
+    cad(d, "sketch", "Fits", plane="YZ", offset=-36.3, **stub)
+    out = cad(d, "pad", "Fits", pad_type="up_to_first", name="StubFits")
+    check(
+        f"[upto] one that stops at the cylinder builds in a {label} Body",
+        "created successfully" in out,
+        out[:300],
+    )
+    stub["geometry"][0].update(center=[22.4, 13], radius=8.5)
+    stub["constraints"][0]["value"] = 8.5
+    stub["constraints"][2]["value"] = 13
+    cad(d, "sketch", "Runs", plane="YZ", offset=-36.3, **stub)
+    out = cad(d, "pad", "Runs", pad_type="up_to_first", name="StubRuns")
+    check(f"[upto] and a runaway is refused in a {label} Body", "past the part" in out, out[:300])
+
+# FreeCAD extends a planar face the profile overhangs, so this one ends past the
+# part by design: a 40x40 profile up to the 20 mm wide sloping face of a wedge.
+d = newdoc("QUpToTilted")
+wedge = {
+    "geometry": [
+        {"type": "polyline", "closed": True, "points": [[0, 0], [20, 0], [20, 30], [0, 20]]}
+    ],
+    "constraints": [
+        {"type": "coincident", "items": [[0, "start"], [-1, "start"]]},
+        {"type": "horizontal", "items": [0]},
+        {"type": "vertical", "items": [1, 3]},
+        {"type": "distance", "items": [0], "value": 20, "name": "Width"},
+        {"type": "distance", "items": [1], "value": 30, "name": "High"},
+        {"type": "distance", "items": [3], "value": 20, "name": "Low"},
+    ],
+}
+cad(d, "sketch", "WedgeS", plane="XZ", **wedge)
+cad(d, "pad", "WedgeS", length=20, name="Wedge")
+slope = fc(
+    d,
+    "[f'Face{i}' for i, f in enumerate(d.getObject('Wedge').Shape.Faces, 1)"
+    " if 0.5 < f.normalAt(0, 0).z < 0.99][0]",
+).strip("'")
+# x from -60: there the face's plane is 10 mm below the wedge's own bottom
+cad(d, "sketch", "BlockS", plane="XY", offset=60, **rect(-60, -30, 30, 10))
+out = cad(d, "pad", "BlockS", pad_type="up_to_face", up_to_face=["Wedge", slope], name="Block")
+low = float(fc(d, "d.getObject('Body').Shape.BoundBox.ZMin") or 0)
+check(
+    "[upto] a pad up to a tilted face smaller than its profile builds",
+    "created successfully" in out and abs(low + 10) < 1e-6,
+    f"zmin {low}: {out[:400]}",
+)
+
 # [batch] ------------------------------------------------------------------------
 d = newdoc("QBatch")
 step_plan_operation(
@@ -408,6 +541,20 @@ check(
     order[:2] == [("create_object", "done"), ("sketch", "failed")],
     str(order),
 )
+failed_row = next(s for s in status["steps"] if s["state"] == "failed")
+check(
+    "[journal] status says why the step failed", "PartDesign::Body" in failed_row.get("error", "")
+)
+# The retry by hand is a sketch too: the journal must name it, not the failed
+# planned sketch behind it, as the step just committed.
+cad(d, "sketch", "S", plane="XY", body="Base", **rect(0, 0, 50, 50))
+last = c.journal_op(d, {"operation": "user_changes"}).get("last_record") or {}
+check(
+    "[journal] the step just committed is the done sketch, with its undo entry",
+    last.get("state") == "done" and "sketch" in str(last.get("transaction")),
+    str(last),
+)
+status = json.loads(text(step_control_operation(c, d, "status")))
 failed = next(s["index"] for s in status["steps"] if s["state"] == "failed")
 out = text(step_control_operation(c, d, "drop", index=failed))
 check(
