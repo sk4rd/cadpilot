@@ -128,6 +128,203 @@ def _placement_info(pl):
 
 
 # ---------------------------------------------------------------------------
+# model health — what a recompute left broken
+# ---------------------------------------------------------------------------
+#
+# A recompute that breaks a DEPENDENT does not fail the op that triggered it:
+# live on 1.1.4, `variables` changing Wall/Length turned a Chamfer's edge link
+# into "?Edge8" and left it Invalid, a cell value of 0 left a sketch Invalid,
+# and both replies said success while Body.Shape kept the stale pre-change
+# volume. Ops snapshot these issues before they run and report the new ones.
+
+_LINK_SUB_TYPES = frozenset(
+    {
+        "App::PropertyLinkSub",
+        "App::PropertyLinkSubChild",
+        "App::PropertyLinkSubGlobal",
+        "App::PropertyLinkSubHidden",
+        "App::PropertyLinkSubList",
+        "App::PropertyLinkSubListChild",
+        "App::PropertyLinkSubListGlobal",
+        "App::PropertyLinkSubListHidden",
+        "App::PropertyXLinkSub",
+        "App::PropertyXLinkSubList",
+    }
+)
+
+
+def _subnames(value):
+    if isinstance(value, str):
+        yield value
+    elif isinstance(value, (list, tuple)):
+        for item in value:
+            yield from _subnames(item)
+
+
+def _status_text(obj) -> str:
+    with contextlib.suppress(Exception):
+        status = str(obj.getStatusString() or "").strip()
+        if status not in ("", "Valid", "Invalid", "Touched"):
+            return status
+    return ""
+
+
+def object_issues(obj, check_shape: bool = False) -> dict[str, str]:
+    """Problem code -> detail for one object after a recompute ({} = healthy).
+
+    ``check_shape`` also runs OCC's validity check, which is too slow to run on
+    every object and is only asked for Body tips.
+    """
+    issues: dict[str, str] = {}
+    state = [str(s) for s in getattr(obj, "State", []) or []]
+    if "Invalid" in state:
+        issues["invalid"] = "Invalid" + (f" ({_status_text(obj)})" if _status_text(obj) else "")
+    elif "Touched" in state:
+        issues["touched"] = "still Touched after the recompute (it was not rebuilt)"
+    for prop in getattr(obj, "PropertiesList", []) or []:
+        try:
+            if obj.getTypeIdOfProperty(prop) not in _LINK_SUB_TYPES:
+                continue
+            value = getattr(obj, prop)
+        except Exception:
+            continue
+        for sub in _subnames(value):
+            leaf = sub.rsplit(".", 1)[-1]
+            if leaf.startswith("?"):
+                issues[f"link:{prop}:{sub}"] = (
+                    f"its {prop} names {leaf[1:]}, which no longer exists ('{leaf}')"
+                )
+    if getattr(obj, "TypeId", "") == "Sketcher::SketchObject":
+        for attr, label in (
+            ("ConflictingConstraints", "conflicting"),
+            ("MalformedConstraints", "malformed"),
+        ):
+            with contextlib.suppress(Exception):
+                bad = list(getattr(obj, attr, []) or [])
+                if bad:
+                    issues[f"sketch:{label}"] = f"{label} constraints {bad}"
+    if check_shape and not issues:
+        with contextlib.suppress(Exception):
+            shape = obj.Shape
+            if not shape.isNull() and not shape.isValid():
+                issues["shape"] = (
+                    "its shape fails OCC's validity check (Part > Check geometry; this "
+                    "can be a false negative on fillets)"
+                )
+    return issues
+
+
+def model_issues(doc, skip=()) -> dict[str, dict[str, str]]:
+    """Object name -> issues, for every object of ``doc`` that has any.
+
+    ``skip`` names objects whose shape the caller checks itself (the feature
+    an op just built).
+    """
+    tips = {
+        tip.Name
+        for o in doc.Objects
+        if getattr(o, "TypeId", "") == "PartDesign::Body"
+        and (tip := getattr(o, "Tip", None)) is not None
+    }
+    out = {}
+    for obj in doc.Objects:
+        issues = object_issues(obj, check_shape=obj.Name in tips and obj.Name not in skip)
+        if issues:
+            out[obj.Name] = issues
+    return out
+
+
+def body_volumes(doc) -> dict[str, tuple]:
+    """Body name -> (tip name, volume), the before/after the reply reports."""
+    out = {}
+    for body in doc.Objects:
+        if getattr(body, "TypeId", "") != "PartDesign::Body":
+            continue
+        tip = getattr(body, "Tip", None)
+        volume = None
+        with contextlib.suppress(Exception):
+            shape = body.Shape
+            volume = 0.0 if shape.isNull() else float(shape.Volume)
+        out[body.Name] = (tip.Name if tip is not None else None, volume)
+    return out
+
+
+def _stale_tip(body) -> str:
+    """Why ``body`` shows a stale shape ('' = it does not)."""
+    tip = getattr(body, "Tip", None)
+    if tip is None:
+        return ""
+    state = [str(s) for s in getattr(tip, "State", []) or []]
+    if "Invalid" not in state and "Touched" not in state:
+        return ""
+    status = _status_text(tip)
+    what = (
+        "Invalid" + (f" ({status})" if status else "")
+        if "Invalid" in state
+        else "Touched (changed but not recomputed since)"
+    )
+    return (
+        f"its Tip '{tip.Name}' is {what}, so the Body's shape is the last good recompute, "
+        "NOT the current parameters"
+    )
+
+
+def recompute_report(doc, issues_before, volumes_before, skip=(), bodies=None) -> dict:
+    """What an op's recompute changed: new problems, stale bodies, volumes.
+
+    ``bodies`` limits the volume rows to those Bodies (the op's own); without
+    it every Body whose tip or volume changed, or that went stale, is listed.
+    Returns ``{"warnings": [...], "broken": [...], "model": [...]}`` with empty
+    entries left out.
+    """
+    warnings: list[str] = []
+    broken: list[str] = []
+    for name, issues in model_issues(doc, skip).items():
+        fresh = [d for code, d in issues.items() if code not in issues_before.get(name, {})]
+        obj = doc.getObject(name)
+        if obj is not None and obj.TypeId == "PartDesign::Body" and _stale_tip(obj):
+            continue  # its tip is reported below; a Body is only Touched by it
+        if fresh:
+            broken.append(name)
+            label = f"{name} ({obj.TypeId})" if obj is not None else name
+            warnings.append(f"the recompute BROKE {label}: " + "; ".join(fresh))
+    model = []
+    for name, (tip, volume) in body_volumes(doc).items():
+        body = doc.getObject(name)
+        stale = _stale_tip(body) if body is not None else ""
+        prev_tip, prev_volume = volumes_before.get(name, (None, None))
+        changed = (
+            tip != prev_tip
+            or (volume is None) != (prev_volume is None)
+            or (volume is not None and abs(volume - prev_volume) > 1e-6)
+        )
+        if bodies is not None and name not in bodies:
+            continue
+        if bodies is None and not changed and not stale:
+            continue
+        row = {
+            "body": name,
+            "tip": tip,
+            "volume_before": _r(prev_volume),
+            "volume_after": _r(volume),
+        }
+        if stale:
+            row["stale"] = True
+            tip_before = issues_before.get(tip or "", {})
+            if "invalid" not in tip_before and "touched" not in tip_before:
+                warnings.append(f"Body '{name}' shows a STALE shape: {stale}.")
+        model.append(row)
+    out: dict = {}
+    if warnings:
+        out["warnings"] = warnings
+    if broken:
+        out["broken"] = broken
+    if model:
+        out["model"] = model
+    return out
+
+
+# ---------------------------------------------------------------------------
 # measure_geometry — GLOBAL coordinates
 # ---------------------------------------------------------------------------
 
@@ -158,8 +355,30 @@ def measure_geometry(doc_name, obj_name):
         else:
             com = gshape.CenterOfMass
 
+        health = {}
+        if getattr(obj, "TypeId", "") == "PartDesign::Body":
+            tip = getattr(obj, "Tip", None)
+            health["tip"] = tip.Name if tip is not None else None
+            stale = _stale_tip(obj)
+        else:
+            issues = object_issues(obj)
+            stale = (
+                f"'{obj.Name}' is {'; '.join(issues.values())}, so its shape is the last "
+                "good recompute, NOT the current parameters"
+                if "invalid" in issues or "touched" in issues
+                else ""
+            )
+        if stale:
+            # Body.Shape keeps the last GOOD result while its tip is Invalid:
+            # live, measure_geometry returned the pre-change volume after a
+            # spreadsheet edit broke the chamfer at the tip.
+            health["stale"] = True
+            health["warning"] = (
+                f"STALE: {stale}. Fix it or undo the change before trusting these numbers."
+            )
         return {
             "success": True,
+            **health,
             "shape_type": gshape.ShapeType,
             "is_valid": bool(gshape.isValid()),
             "volume_mm3": _r(gshape.Volume),

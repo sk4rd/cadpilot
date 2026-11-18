@@ -64,7 +64,10 @@ Edit the cell afterwards and the model updates on recompute.""",
     "edit_object": """\
 edit_object — modify object properties.
 Required: obj_name, obj_properties. Same expression-binding rule as
-create_object ("=..." values bind expressions).""",
+create_object ("=..." values bind expressions). A value the object cannot
+recompute with is refused and put back; a literal written to an
+expression-bound property warns (the expression wins). What the recompute
+broke elsewhere is reported like `variables` does.""",
     "delete_object": """\
 delete_object — remove an object. Required: obj_name.""",
     "batch": """\
@@ -227,7 +230,12 @@ variables — create/update a Spreadsheet parameter table (idempotent).
 obj_name = spreadsheet name (default "Spreadsheet", may be omitted).
 Required in obj_properties: cells — maps a cell to [alias, value]; values are
 numbers, "=formula" strings, or text. Everything downstream references cells
-as =Spreadsheet.alias.""",
+as =Spreadsheet.alias.
+The reply names what the recompute BROKE downstream (warnings + `broken`): an
+Invalid feature, a link to an edge/face that no longer exists ('?Edge8'), a
+sketch that no longer solves. `model` rows give each changed Body's tip and
+volume before/after; `stale: true` means its tip failed, so the Body still
+shows the last good shape — fix the feature or undo the change.""",
     "sketch": """\
 sketch — atomic constrained sketch (Sketcher::SketchObject inside a PartDesign
 Body; the body is auto-created when absent). Geometry + constraints in ONE

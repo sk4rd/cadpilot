@@ -1,13 +1,17 @@
 """Object create/edit/delete primitives.
 
 Shared by the RPC handlers and the step-journal engine, so both paths mutate
-objects the same way. Each function returns a result dict (create) or ``True``
-(edit/delete) on success and an error string on failure.
+objects the same way. Each function returns a result dict (create, and edit
+when the recompute broke something) or ``True`` (edit/delete) on success and an
+error string on failure.
 """
+
+import contextlib
 
 import FreeCAD
 
 from rpc_server import tip_policy
+from rpc_server.geometry_query import body_volumes, model_issues, recompute_report
 from rpc_server.property_mapper import Object, set_object_property
 
 
@@ -56,17 +60,88 @@ def edit_object_gui(doc_name: str, obj: Object):
         has_expressions = any(
             isinstance(v, str) and v.startswith("=") for v in obj.properties.values()
         )
+        issues_before = model_issues(doc)
+        volumes_before = body_volumes(doc)
+        saved = _saved_values(obj_ins, obj.properties)
         set_object_property(doc, obj_ins, obj.properties)
         doc.recompute()
-        if has_expressions and "Invalid" in [str(s) for s in obj_ins.State]:
+        own = issues_before.get(obj_ins.Name, {})
+        if "Invalid" in [str(s) for s in obj_ins.State] and "invalid" not in own:
+            status = ""
+            with contextlib.suppress(Exception):
+                status = str(obj_ins.getStatusString() or "")
+            _restore_values(doc, obj_ins, saved)
+            if has_expressions:
+                return (
+                    f"Expression(s) on '{obj.name}' failed to evaluate "
+                    "(check expression syntax and referenced cells/objects)"
+                    + (f": {status}" if status not in ("", "Invalid") else ".")
+                )
             return (
-                f"Expression(s) on '{obj.name}' failed to evaluate "
-                "(check expression syntax and referenced cells/objects)."
+                f"'{obj.name}' failed to recompute with the new value(s)"
+                + (f": {status}" if status not in ("", "Invalid") else "")
+                + ". Nothing was changed."
             )
+        report = recompute_report(doc, issues_before, volumes_before, skip={obj_ins.Name})
+        overridden = _overridden_literals(obj_ins, obj.properties, saved)
+        if overridden:
+            report.setdefault("warnings", []).append(overridden)
         FreeCAD.Console.PrintMessage(f"Object '{obj.name}' updated via RPC.\n")
-        return True
+        return {"success": True, "object_name": obj_ins.Name, **report} if report else True
     except Exception as e:
         return str(e)
+
+
+def _saved_values(obj, properties: dict) -> dict:
+    """{prop: (value, expression)} for the properties an edit is about to write."""
+    bound = {path.lstrip("."): expr for path, expr in getattr(obj, "ExpressionEngine", []) or []}
+    saved = {}
+    for prop in properties:
+        if prop == "cells" or prop not in obj.PropertiesList:
+            continue
+        with contextlib.suppress(Exception):
+            saved[prop] = (getattr(obj, prop), bound.get(prop))
+    return saved
+
+
+def _restore_values(doc, obj, saved: dict) -> None:
+    """Put a failed edit back and recompute.
+
+    The caller's transaction abort reverts the values too, but it does not
+    recompute: the object stayed Invalid and its Body showed a stale shape
+    until some later op happened to recompute (live: a chamfer size the
+    geometry could not take).
+    """
+    for prop, (value, expr) in saved.items():
+        with contextlib.suppress(Exception):
+            obj.setExpression(prop, expr)
+            if expr is None:
+                setattr(obj, prop, value)
+    with contextlib.suppress(Exception):
+        doc.recompute()
+
+
+def _overridden_literals(obj, properties: dict, saved: dict) -> str:
+    """Warn when a literal was written to an expression-bound property.
+
+    The expression wins on the next recompute, so the edit silently did
+    nothing (live: Length=0 on a Pad bound to =Parameters.Th stayed 10 mm).
+    """
+    names = [
+        prop
+        for prop, value in properties.items()
+        if prop in saved
+        and saved[prop][1] is not None
+        and not (isinstance(value, str) and value.startswith("="))
+    ]
+    if not names:
+        return ""
+    exprs = ", ".join(f"{p} = {saved[p][1]}" for p in names)
+    return (
+        f"'{obj.Name}': {exprs} is bound to an expression, which overrides the literal value "
+        "you wrote, so it did not change. Change the referenced cell, or pass an '=...' "
+        "expression to rebind it."
+    )
 
 
 # Containers reference their members for grouping and placement, not because

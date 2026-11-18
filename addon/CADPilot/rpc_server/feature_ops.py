@@ -13,7 +13,7 @@ import FreeCAD
 import Part
 
 from rpc_server import sketcher_ops, tip_policy
-from rpc_server.geometry_query import body_owner
+from rpc_server.geometry_query import body_owner, body_volumes, model_issues, recompute_report
 from rpc_server.property_mapper import format_color, parse_color
 
 # Selector resolution of the most recent face-based build; read once by
@@ -1354,6 +1354,51 @@ def _require_closed_profile(sketch, op):
         )
 
 
+def _wire_crossing(wire):
+    """A point where two edges of ``wire`` meet away from a shared vertex, or None."""
+    edges = wire.Edges
+    for i, a in enumerate(edges):
+        for b in edges[i + 1 :]:
+            if not a.BoundBox.intersect(b.BoundBox):
+                continue
+            dist, pairs, _info = a.distToShape(b)
+            if dist > 1e-7:
+                continue
+            shared = [
+                v.Point
+                for v in a.Vertexes
+                if any((v.Point - w.Point).Length < 1e-7 for w in b.Vertexes)
+            ]
+            for point, _other in pairs:
+                if all((point - s).Length > 1e-6 for s in shared):
+                    return point
+    return None
+
+
+def _refuse_self_intersecting_profile(sketch, op):
+    """A closed profile that crosses itself is not one region.
+
+    FreeCAD pads it anyway: live on 1.1.4 a bow-tie outline became two
+    triangles touching at a point (2 solids, 6000 mm^3), Valid, reported as
+    success.
+    """
+    for wire in getattr(sketch.Shape, "Wires", []):
+        if not wire.isClosed():
+            continue
+        try:
+            point = _wire_crossing(wire)
+        except Exception:
+            continue
+        if point is not None:
+            local = sketch.Placement.inverse().multVec(point)
+            raise ValueError(
+                f"{op} profile '{sketch.Name}' crosses itself at sketch "
+                f"({round(local.x, 3)}, {round(local.y, 3)}): FreeCAD would split it into "
+                "separate regions and report success. Redraw the outline so that no two "
+                "edges cross."
+            )
+
+
 def _profile_sketch(doc, spec, op):
     _require(spec, "base")
     sketch = _get_obj(doc, spec["base"], "profile sketch")
@@ -1542,6 +1587,7 @@ def _build_padlike(doc, spec, fc_type, default_name):
         )
     doc.recompute()
     _require_closed_profile(sketch, fc_type)
+    _refuse_self_intersecting_profile(sketch, fc_type.split("::")[-1].lower())
     _ensure_material_base(doc, body, sketch, fc_type.split("::")[-1].lower())
     # Snapshot the material BEFORE the feature joins the body: afterwards its
     # Shape is the feature's own result (see _body_material_volume).
@@ -1601,6 +1647,7 @@ def _build_revlike(doc, spec, fc_type, default_name):
     sketch = _profile_sketch(doc, spec, fc_type)
     doc.recompute()
     _require_closed_profile(sketch, fc_type)
+    _refuse_self_intersecting_profile(sketch, fc_type.split("::")[-1].lower())
     _ensure_material_base(doc, body, sketch, fc_type.split("::")[-1].lower())
     feat = body.newObject(fc_type, spec.get("name") or default_name)
     feat.Profile = sketch
@@ -2068,6 +2115,14 @@ def describe_feature_reply(feat, spec) -> dict:
             warnings.append(note)
         else:
             out["warnings"] = [note]
+    global _MODEL_REPORT
+    report, _MODEL_REPORT = _MODEL_REPORT, {}
+    if report.get("warnings"):
+        # Breakage first: it is the headline, the op's own advisories follow.
+        out["warnings"] = report["warnings"] + list(out.get("warnings") or [])
+    for key in ("broken", "model"):
+        if report.get(key):
+            out[key] = report[key]
     return out
 
 
@@ -2452,6 +2507,12 @@ def _invalid_shape_error(feat_type, feat, detail: str | None = None) -> str:
 _SHAPE_CHECK_NOTE = ""
 
 
+# What the op's recompute did to the model (geometry_query.recompute_report):
+# new breakage, stale bodies and the Body volume before/after. Read once, by
+# describe_feature_reply.
+_MODEL_REPORT: dict = {}
+
+
 def _take_shape_check_note() -> str:
     global _SHAPE_CHECK_NOTE
     note, _SHAPE_CHECK_NOTE = _SHAPE_CHECK_NOTE, ""
@@ -2489,12 +2550,19 @@ def create_feature_gui(doc, spec):
     # Read the Shape of what this feature is built on FIRST: a lazy predecessor
     # makes the new feature compute to nothing, silently (see the helper).
     _settle_shape_caches(doc, spec)
+    global _MODEL_REPORT
+    _MODEL_REPORT = {}
+    if ftype != "color":
+        issues_before = model_issues(doc)
+        volumes_before = body_volumes(doc)
     feat = builder(doc, spec)
     # "move" directly modifies Placement and "color" only the ViewObject —
     # neither builds a feature, so the recompute/validity/volume checks below do
     # not apply. They must not either: a color op has no business failing
     # because the object it decorates is a half-built or invalid leftover.
     if ftype in ("move", "color"):
+        if ftype == "move":
+            _MODEL_REPORT = recompute_report(doc, issues_before, volumes_before)
         return feat
     doc.recompute()
     if _advance_body_tip(feat):
@@ -2593,4 +2661,9 @@ def create_feature_gui(doc, spec):
         body = _parent_body(feat)
         if body is not None:
             _ = body.Shape
+    body = _parent_body(feat)
+    own = body is not None and tip_policy.advances_tip(getattr(feat, "TypeId", ""))
+    _MODEL_REPORT = recompute_report(
+        doc, issues_before, volumes_before, skip={feat.Name}, bodies={body.Name} if own else None
+    )
     return feat
