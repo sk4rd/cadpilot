@@ -615,6 +615,41 @@ def _solve(sketch, origins) -> tuple:
 # --- entry point ------------------------------------------------------------------
 
 
+def _sketch_to_replace(doc, existing, spec):
+    """The existing sketch emptied for a rebuild, with its body; refuses without ``replace``.
+
+    A second ``sketch`` call with the same name used to make "Name001" next to
+    the original, so the caller's edit landed on a copy no feature used.
+    """
+    name = existing.Name
+    is_sketch = existing.TypeId == "Sketcher::SketchObject"
+    if not spec.get("replace"):
+        hint = (
+            f"change it with cad(operation='sketch_edit', obj_name='{name}', ...), or pass "
+            '"replace": true to rebuild it in place (same object, so features built on it '
+            "follow)"
+            if is_sketch
+            else "choose another name"
+        )
+        raise ValueError(f"'{name}' already exists in '{doc.Name}' ({existing.TypeId}); {hint}.")
+    if not is_sketch:
+        raise ValueError(f"replace: '{name}' is a {existing.TypeId}, not a sketch.")
+    body = existing.getParentGeoFeatureGroup()
+    if body is None or body.TypeId != "PartDesign::Body":
+        raise ValueError(f"replace: sketch '{name}' is not inside a PartDesign Body.")
+    if spec.get("body") and spec["body"] != body.Name:
+        raise ValueError(f"replace: sketch '{name}' lives in '{body.Name}', not '{spec['body']}'.")
+    for path, _expr in list(existing.ExpressionEngine):
+        if "Constraints" in path or "AttachmentOffset" in path:
+            existing.setExpression(path, None)
+    existing.deleteAllConstraints()
+    existing.deleteAllGeometry()
+    for i in reversed(range(len(existing.ExternalGeometry))):
+        existing.delExternal(i)
+    existing.AttachmentOffset = FreeCAD.Placement()
+    return existing, body
+
+
 def build_sketch_gui(doc, spec):
     """Build a constrained sketch atomically; returns the SketchObject.
 
@@ -628,8 +663,13 @@ def build_sketch_gui(doc, spec):
     if not isinstance(geometry, list) or not geometry:
         raise ValueError("sketch requires a non-empty 'geometry' list.")
 
-    body = _get_or_create_body(doc, spec.get("body"))
-    sketch = body.newObject("Sketcher::SketchObject", spec.get("base") or "Sketch")
+    name = spec.get("base")
+    existing = doc.getObject(name) if name else None
+    if existing is not None:
+        sketch, body = _sketch_to_replace(doc, existing, spec)
+    else:
+        body = _get_or_create_body(doc, spec.get("body"))
+        sketch = body.newObject("Sketcher::SketchObject", name or "Sketch")
 
     attachment, warnings = _attach_sketch(sketch, doc, spec, body)
     geometry_ids, implied = _add_geometry(sketch, geometry, spec.get("construction"))
@@ -650,6 +690,8 @@ def build_sketch_gui(doc, spec):
     }
     if any(len(i) != 1 for i in geometry_ids):
         _LAST_SKETCH_INFO["geometry_ids"] = geometry_ids
+    if existing is not None:
+        _LAST_SKETCH_INFO["replaced"] = True
     if unnamed:
         _LAST_SKETCH_INFO["unnamed_dimensions"] = unnamed
     # Which face/plane the sketch actually landed on, with its center and

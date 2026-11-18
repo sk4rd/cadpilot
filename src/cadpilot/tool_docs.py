@@ -274,7 +274,7 @@ Body; the body is auto-created when absent). Geometry + constraints in ONE
 transaction; the solver runs immediately.
 obj_name = sketch name (default "Sketch", may be omitted).
 Required in obj_properties: geometry.
-Optional: plane, offset, body, construction, external, constraints.
+Optional: plane, offset, body, construction, external, constraints, replace.
 
 - plane: "XY" / "XZ" / "YZ", {"face": ["ObjName", "FaceN"]} to sketch on an
   existing solid face, or {"datum": "DatumPlaneName"} to sketch on a datum
@@ -399,9 +399,11 @@ Optional: plane, offset, body, construction, external, constraints.
   horizontal/vertical constraints for each axis-aligned edge, or the solver
   leaves rotational/positional degrees of freedom and the sketch reports
   fully_constrained: false; polyline/rectangle/slot add their joints for you.
-- Reusing an existing name does NOT overwrite: FreeCAD de-duplicates
-  ("HoleProfile" → "HoleProfile001"); the response carries the actual name,
-  so reuse it from there.
+- An existing name is refused: change that sketch with sketch_edit, or pass
+  "replace": true to rebuild it in place from this spec (the same object, so
+  pads and pockets built on it follow; its old geometry, constraints and
+  external references are discarded). Without obj_name the sketch is named
+  "Sketch", "Sketch001", ...; the response carries the actual name.
 - Sketch coordinates are 2D [x, y] in mm in the plane's local frame.
 - Result: fully constrained sketches report fully_constrained: true;
   under-constrained ones succeed with a warning; conflicting/failed sketches

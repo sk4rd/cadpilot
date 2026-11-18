@@ -298,13 +298,13 @@ def m6_names_are_checked_and_reported():
         None,
         geometry=geo,
         constraints=[
-            {"type": "distance", "items": [0], "value": 10, "name": "W"},
-            {"type": "radius", "items": [1], "value": 2, "name": "W"},
+            {"type": "distance", "items": [0], "value": 10, "name": "Width"},
+            {"type": "radius", "items": [1], "value": 2, "name": "Width"},
         ],
     )
     check(
         "m6 a duplicate name names both constraint indices",
-        "constraints[1] (radius): name 'W' is already used by constraints[0]" in err(res),
+        "constraints[1] (radius): name 'Width' is already used by constraints[0]" in err(res),
         err(res),
     )
     res = cad(
@@ -312,7 +312,7 @@ def m6_names_are_checked_and_reported():
         doc,
         None,
         geometry=geo,
-        constraints=[{"type": "distance", "items": [5], "value": 10, "name": "W"}],
+        constraints=[{"type": "distance", "items": [5], "value": 10, "name": "Width"}],
     )
     check(
         "m6 a bad GeoId names the constraint index",
@@ -325,7 +325,7 @@ def m6_names_are_checked_and_reported():
         None,
         geometry=geo,
         constraints=[
-            {"type": "distance", "items": [0], "value": 10, "name": "W"},
+            {"type": "distance", "items": [0], "value": 10, "name": "Width"},
             {"type": "radius", "items": [1], "value": 2},
         ],
     )
@@ -347,8 +347,8 @@ def m1_composite_geometry_is_fully_constrainable():
         geometry=[{"type": "rectangle", "from": [0, 0], "to": [30, 10]}],
         constraints=[
             {"type": "coincident", "items": [[0, "start"], [-1, "start"]]},
-            {"type": "distance_x", "items": [0], "value": "=Params.width", "name": "W"},
-            {"type": "distance_y", "items": [1], "value": "=Params.depth", "name": "H"},
+            {"type": "distance_x", "items": [0], "value": "=Params.width", "name": "Width"},
+            {"type": "distance_y", "items": [1], "value": "=Params.depth", "name": "Depth"},
         ],
     )
     check(
@@ -441,8 +441,8 @@ def _stepped_block(doc):
         geometry=[{"type": "rectangle", "from": [0, 0], "to": [30, 20]}],
         constraints=[
             {"type": "coincident", "items": [[0, "start"], [-1, "start"]]},
-            {"type": "distance_x", "items": [0], "value": "=Params.width", "name": "W"},
-            {"type": "distance_y", "items": [1], "value": "=Params.depth", "name": "D"},
+            {"type": "distance_x", "items": [0], "value": "=Params.width", "name": "Width"},
+            {"type": "distance_y", "items": [1], "value": "=Params.depth", "name": "Depth"},
         ],
     )
     return made(cad("pad", doc, "Base", length=10))
@@ -574,6 +574,45 @@ def m7_every_reply_echoes_the_world_frame():
     )
 
 
+def _objects(doc):
+    return {o["Name"] for o in c.get_objects(doc)}
+
+
+def m2_an_existing_sketch_name_is_refused_or_replaced():
+    doc = "SkReuse"
+    newdoc(doc)
+    pad = _stepped_block(doc)
+    before = _objects(doc)
+    res = cad("sketch", doc, "Base", geometry=[LINE([0, 0], [1, 0])])
+    check(
+        "M2 sketch with an existing name is refused and points to sketch_edit",
+        not ok(res) and "sketch_edit" in err(res) and _objects(doc) == before,
+        f"{err(res)} extra={_objects(doc) - before}",
+    )
+    res = cad(
+        "sketch",
+        doc,
+        "Base",
+        replace=True,
+        geometry=[{"type": "rectangle", "from": [0, 0], "to": [10, 10]}],
+        constraints=[
+            {"type": "coincident", "items": [[0, "start"], [-1, "start"]]},
+            {"type": "distance_x", "items": [0], "value": 12, "name": "Width"},
+            {"type": "distance_y", "items": [1], "value": 12, "name": "Depth"},
+        ],
+    )
+    vol = c.measure_geometry(doc, pad).get("volume_mm3")
+    check(
+        "M2 replace: true rebuilds the same sketch and its pad follows",
+        ok(res)
+        and res.get("replaced") is True
+        and res.get("dof") == 0
+        and _objects(doc) == before
+        and math.isclose(vol or 0, 12 * 12 * 10, rel_tol=1e-6),
+        f"{res} vol={vol}",
+    )
+
+
 CHECKS = [
     m1_diagnostics_name_the_spec_entry,
     m7_lists_expand_into_one_constraint_per_item,
@@ -586,6 +625,7 @@ CHECKS = [
     m4_face_attachments_warn_that_they_are_fragile,
     m5_a_centred_face_sketch_says_it_is_fixed,
     m7_every_reply_echoes_the_world_frame,
+    m2_an_existing_sketch_name_is_refused_or_replaced,
 ]
 
 if __name__ == "__main__":
