@@ -509,6 +509,71 @@ def m5_a_centred_face_sketch_says_it_is_fixed():
     )
 
 
+def m7_every_reply_echoes_the_world_frame():
+    doc = "SkEcho"
+    newdoc(doc)
+    _stepped_block(doc)
+    cad(
+        "sketch",
+        doc,
+        "Step",
+        plane="XY",
+        offset=10,
+        geometry=[{"type": "rectangle", "from": [0, 0], "to": [10, 20]}],
+    )
+    upper = made(cad("pad", doc, "Step", length=5))
+    res = cad(
+        "sketch",
+        doc,
+        "OnStep",
+        plane={"face": [upper, "+Z"]},
+        geometry=[{"type": "circle", "center": [2, 2], "radius": 1}],
+    )
+    plane = res.get("plane", {})
+    same = plane.get("same_direction") or []
+    check(
+        "m7 a direction pick on a stepped part lists same_direction faces",
+        ok(res)
+        and plane.get("center", [0, 0, 0])[2] == 15.0
+        and any(f["center"][2] == 10.0 for f in same),
+        str(plane),
+    )
+    res = cad(
+        "sketch",
+        doc,
+        "Side",
+        plane={"face": [upper, "-Y"]},
+        geometry=[{"type": "circle", "center": [2, 2], "radius": 1}],
+    )
+    plane, live = res.get("plane", {}), inspect(doc, "Side") if ok(res) else {}
+    check(
+        "m7 a face-attached sketch reports its x/y axes and normal in world terms",
+        ok(res)
+        and plane.get("normal") == [0.0, -1.0, 0.0]
+        and plane.get("normal") == live.get("normal")
+        and plane.get("sketch_origin") == live.get("origin")
+        and {"x_axis", "y_axis"} <= set(plane),
+        f"{plane} {live}",
+    )
+    cad("datum_plane", doc, "Mid", plane="YZ", offset=5)
+    res = cad(
+        "sketch",
+        doc,
+        "OnDatum",
+        plane={"datum": "Mid"},
+        geometry=[{"type": "circle", "center": [2, 2], "radius": 1}],
+    )
+    plane = res.get("plane", {})
+    check(
+        "m7 a datum-attached sketch echoes its axes",
+        ok(res)
+        and plane.get("normal") == [1.0, 0.0, 0.0]
+        and plane.get("x_axis") == [0.0, 1.0, 0.0]
+        and plane.get("sketch_origin") == [5.0, 0.0, 0.0],
+        str(plane),
+    )
+
+
 CHECKS = [
     m1_diagnostics_name_the_spec_entry,
     m7_lists_expand_into_one_constraint_per_item,
@@ -520,6 +585,7 @@ CHECKS = [
     m3_base_planes_attach_to_the_origin_with_an_expression_offset,
     m4_face_attachments_warn_that_they_are_fragile,
     m5_a_centred_face_sketch_says_it_is_fixed,
+    m7_every_reply_echoes_the_world_frame,
 ]
 
 if __name__ == "__main__":

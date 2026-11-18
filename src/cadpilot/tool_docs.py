@@ -284,7 +284,7 @@ Optional: plane, offset, body, construction, external, constraints.
   plane made on it: XY has x->+X, y->+Y, normal +Z; XZ has x->+X, y->+Z,
   normal -Y; YZ has x->+Y, y->+Z, normal +X. So a profile drawn upward in y on
   XZ rises along +Z, and offset moves along the plane's normal (+offset on XZ
-  goes toward -Y). The result echoes x_axis/y_axis/normal for the plane.
+  goes toward -Y).
 - offset: distance along the plane's normal, at the top level or inside the
   plane dict: a number (mm), a unit string ("5 mm"), or an expression
   ("=Params.lift") bound to the attachment, so the sketch follows the
@@ -311,13 +311,15 @@ Optional: plane, offset, body, construction, external, constraints.
   its Tip's result, so an attachment naming the Body itself closes a dependency
   cycle the moment a feature built on this profile joins the body, and FreeCAD
   reports that as an unreadable shape on the new feature (not as a cycle).
-  The sketch result echoes the resolved `plane` (object, face name, center,
-  normal, centered) plus `sketch_origin` — where the sketch's origin actually
-  landed, which is NOT the reported face center unless you passed
-  `"center": true` (a face's parametric origin is a CORNER on a rectangular
-  face, so a profile drawn around the origin hangs off the part). A direction
-  token picks the FARTHEST face facing that way, and the echo lists
-  `same_direction` alternatives.
+  Every sketch result echoes `plane`: what it is attached to (base plane and
+  offset; or object, face name, center, normal, centered; or the datum and
+  its support) plus the sketch's frame in WORLD terms — `sketch_origin`,
+  `x_axis`, `y_axis`, `normal`. Read the axes before drawing on a face: a
+  side face's x can run along -Y. The origin is NOT the reported face center
+  unless you passed `"center": true` (a face's parametric origin is a CORNER
+  on a rectangular face, so a profile drawn around the origin hangs off the
+  part). A direction token picks the FARTHEST face facing that way, and the
+  echo lists the other planar faces facing that way as `same_direction`.
 - geometry: list of items; GeoIds (what constraints reference) count up in
   list order, one per line/arc/circle/bspline/point:
     {"type": "line", "from": [x,y], "to": [x,y]}

@@ -393,8 +393,10 @@ def test_face_attached_sketch_echo_says_where_its_origin_is():
     sketch origin is here" — while the origin sits on the face's parametric
     origin (a corner). Live: a centered rib profile drew around the corner and
     hung half outside the part, with the volume still adding up."""
-    src = ast.unparse(_func(SKETCHER, "_attach_sketch"))
-    assert "sketch_origin" in src and "center" in src
+    assert "sketch_origin" in _strings_in(_func(SKETCHER, "_frame_echo"))
+    assert "_frame_echo(sketch)" in ast.unparse(_func(SKETCHER, "build_sketch_gui")), (
+        "every attachment echoes the frame, not only base planes"
+    )
     assert "parametric origin" in ast.unparse(SKETCHER), "the note explains the default"
 
 

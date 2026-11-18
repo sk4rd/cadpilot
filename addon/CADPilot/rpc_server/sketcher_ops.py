@@ -330,7 +330,14 @@ def _vec3(vec) -> list:
 
 
 def _frame_echo(sketch) -> dict:
-    """The sketch's origin and axes in world coordinates (after its attachment)."""
+    """The sketch's origin and axes in world coordinates (after its attachment).
+
+    Every attachment needs it. A face's own center reads as "the sketch origin
+    is here" while the origin sits on the face's parametric origin, a corner
+    (live: a centered rib profile hung half outside the part, the volume still
+    adding up); and which world direction the sketch's x runs along on a side
+    face had to be looked up (it ran along -Y).
+    """
     placement = sketch.getGlobalPlacement()
     rot = placement.Rotation
     return {
@@ -342,14 +349,26 @@ def _frame_echo(sketch) -> dict:
 
 
 def _face_echo(obj, face_name: str) -> dict:
-    """A small report of the face a selector resolved to (name/center/normal)."""
+    """The face a selector resolved to: name, center, normal, and the other
+    planar faces facing the same way (largest first) — on a stepped part the
+    pick can be right and still not the face the caller pictured."""
     entry = {"object": obj.Name, "face": face_name}
     with contextlib.suppress(Exception):
         face = obj.Shape.getElement(face_name)
         if face is not None:
-            entry["center"] = [round(float(v), 4) for v in face.CenterOfMass]
+            entry["center"] = _vec3(face.CenterOfMass)
             if face.Surface.TypeId == "Part::GeomPlane":
-                entry["normal"] = [round(float(v), 4) for v in face.normalAt(0, 0)]
+                normal = face.normalAt(0, 0)
+                entry["normal"] = _vec3(normal)
+                same = [
+                    {"face": f"Face{i}", "center": _vec3(f.CenterOfMass), "area": round(f.Area, 4)}
+                    for i, f in enumerate(obj.Shape.Faces, start=1)
+                    if f.Surface.TypeId == "Part::GeomPlane"
+                    and not f.isSame(face)
+                    and f.normalAt(0, 0).dot(normal) > 0.999
+                ]
+                if same:
+                    entry["same_direction"] = sorted(same, key=lambda e: -e["area"])[:6]
     return entry
 
 
@@ -523,12 +542,6 @@ def _attach_sketch(sketch, doc, spec, body) -> tuple[dict, list[str]]:
                 "spreadsheet (e.g. distance_x '=Params.width / 2')."
             )
         _apply_offset(sketch, offset, offset_expr)
-        # The echo used to report only the FACE center, which a caller reads as
-        # "the sketch origin is here" — while the origin actually sits on the
-        # face's parametric origin (a corner). Say where the origin IS (live: a
-        # centered rib profile drew its rectangle around the corner and hung
-        # half of it outside the part, with the volume still adding up).
-        echo["sketch_origin"] = _vec3(sketch.Placement.Base)
         if not plane.get("center"):
             echo["note"] = (
                 "the sketch origin sits on the face's parametric origin (a corner on a "
@@ -643,12 +656,7 @@ def build_sketch_gui(doc, spec):
     # normal — a direction token on a stepped part picks the FARTHEST face
     # facing that way, and without this echo the wrong pick looked exactly
     # like success (live: a seat-face sketch landed on a wall top 92 mm up).
-    _LAST_SKETCH_INFO["plane"] = attachment
-    if "plane" in attachment:
-        # "Which way is +v" is the most surprising thing about a non-XY
-        # base plane; without the axes a caller infers it from a flipped
-        # result.
-        attachment.update(_frame_echo(sketch))
+    _LAST_SKETCH_INFO["plane"] = {**attachment, **_frame_echo(sketch)}
     if warnings:
         _LAST_SKETCH_INFO["warnings"] = warnings
     return sketch
