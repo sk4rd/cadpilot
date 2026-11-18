@@ -12,6 +12,7 @@ _DEFAULT_SETTINGS = {
     "remote_enabled": False,
     "allowed_ips": "127.0.0.1",
     "auto_start_rpc": True,
+    "port": 9875,
     "step_panel_visible": False,
     "log_level": "INFO",
     "log_dir": "",
@@ -36,6 +37,27 @@ def load_settings():
         except Exception as e:
             FreeCAD.Console.PrintWarning(f"Failed to load MCP settings: {e}\n")
     return dict(_DEFAULT_SETTINGS)
+
+
+def resolve_port(settings=None):
+    """The port to listen on: CADPILOT_PORT if set, else the saved setting."""
+    raw = os.environ.get("CADPILOT_PORT", "").strip()
+    if raw:
+        try:
+            port = int(raw)
+            if 0 < port < 65536:
+                return port
+        except ValueError:
+            pass
+        FreeCAD.Console.PrintWarning(
+            f"CADPILOT_PORT={raw!r} is not a port; using the saved setting\n"
+        )
+    if settings is None:
+        settings = load_settings()
+    try:
+        return int(settings.get("port", _DEFAULT_SETTINGS["port"]))
+    except (TypeError, ValueError):
+        return _DEFAULT_SETTINGS["port"]
 
 
 def save_settings(settings):

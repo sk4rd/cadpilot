@@ -90,14 +90,22 @@ class _TimeoutTransport(xmlrpc.client.Transport):
         return conn
 
 
+def default_port() -> int:
+    """CADPILOT_PORT if it holds a valid port, else 9875."""
+    raw = os.environ.get("CADPILOT_PORT", "").strip()
+    return int(raw) if raw.isdigit() and 0 < int(raw) < 65536 else 9875
+
+
 class FreeCADConnection:
     def __init__(
         self,
         host: str = "localhost",
-        port: int = 9875,
+        port: int | None = None,
         timeout: float = 150,
         connect_grace: float | None = None,
     ):
+        if port is None:
+            port = default_port()
         self._uri = f"http://{_resolve_connect_host(host)}:{port}"
         self._timeout = timeout
         if connect_grace is None:

@@ -19,7 +19,7 @@ except ImportError:
     from mcp.server.mcpserver import MCPServer as FastMCP
 from mcp.types import TextContent
 
-from .freecad_client import FreeCADConnection
+from .freecad_client import FreeCADConnection, default_port
 from .operations import (
     align_shapes_operation,
     assemble_operation,
@@ -142,7 +142,7 @@ mcp = FastMCP(
 def get_freecad_connection() -> FreeCADConnection:
     """Get or create a persistent FreeCAD connection"""
     if state.freecad_connection is None:
-        state.freecad_connection = FreeCADConnection(host=state.rpc_host, port=9875)
+        state.freecad_connection = FreeCADConnection(host=state.rpc_host, port=state.rpc_port)
         if not state.freecad_connection.ping():
             logger.error("Failed to ping FreeCAD")
             state.freecad_connection = None
@@ -536,7 +536,9 @@ def diagnose(ctx: Context, host: str | None = None, dismiss: bool = False) -> li
             connection = get_freecad_connection()
         except Exception as e:
             logger.info("diagnose: no connection to dismiss with (%s)", e)
-    return diagnose_operation(host or state.rpc_host, dismiss=dismiss, freecad=connection)
+    return diagnose_operation(
+        host or state.rpc_host, port=state.rpc_port, dismiss=dismiss, freecad=connection
+    )
 
 
 @mcp.tool(annotations=_mutating("Save Pattern", destructive=False))
@@ -912,6 +914,12 @@ def main():
         help="Host address of the FreeCAD RPC server to connect to (default: localhost)",
     )
     parser.add_argument(
+        "--port",
+        type=int,
+        default=default_port(),
+        help="Port of the FreeCAD RPC server (default: CADPILOT_PORT, else 9875)",
+    )
+    parser.add_argument(
         "--no-auto-audit",
         action="store_true",
         help="Disable the automatic connectivity audit after cad() mutations",
@@ -919,9 +927,10 @@ def main():
     args = parser.parse_args()
     state.only_text_feedback = args.only_text_feedback
     state.rpc_host = args.host
+    state.rpc_port = args.port
     state.auto_audit = not args.no_auto_audit
     logger.info(f"Only text feedback: {state.only_text_feedback}")
     logger.info(f"Auto connectivity audit: {state.auto_audit}")
-    logger.info(f"Connecting to FreeCAD RPC server at: {state.rpc_host}")
+    logger.info(f"Connecting to FreeCAD RPC server at: {state.rpc_host}:{state.rpc_port}")
     _maybe_start_log_forwarder()
     mcp.run()

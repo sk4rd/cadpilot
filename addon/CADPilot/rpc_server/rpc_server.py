@@ -66,7 +66,7 @@ from rpc_server.object_factory import (
 from rpc_server.property_mapper import Object
 from rpc_server.request_log import LoggedXMLRPCServer
 from rpc_server.serialize import serialize_object
-from rpc_server.settings import load_settings
+from rpc_server.settings import load_settings, resolve_port
 from rpc_server.view_manager import save_active_screenshot
 
 rpc_server_thread = None
@@ -1540,7 +1540,7 @@ class FreeCADRPC:
         return save_active_screenshot(save_path, view_name, width, height, focus_object)
 
 
-def start_rpc_server(port=9875):
+def start_rpc_server(port=None):
     global rpc_server_thread, rpc_server_instance
 
     # A start attempt IS the intent to have the endpoint up: record it before
@@ -1562,6 +1562,8 @@ def start_rpc_server(port=9875):
 
     dbglog.setup_logging()
     settings = load_settings()
+    if port is None:
+        port = resolve_port(settings)
     remote_enabled = settings.get("remote_enabled", False)
     allowed_ips = settings.get("allowed_ips", "127.0.0.1")
 
@@ -1664,7 +1666,7 @@ _RESTART_MAX_ATTEMPTS = 60  # 1 s apart; then the watchdog takes over
 _RESTART_SUPPRESS_S = _RESTART_MAX_ATTEMPTS + 30
 
 
-def restart_rpc_server(port: int = 9875) -> dict:
+def restart_rpc_server(port: int | None = None) -> dict:
     """Hot-restart the RPC server: stop, reload the addon modules, start again.
 
     Replaces the manual execute_code recipe. The reload happens HERE, in
