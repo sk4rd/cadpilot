@@ -2122,9 +2122,14 @@ def _build_padlike(doc, spec, fc_type, default_name):
     _apply_padlike_mode(feat, op, fc_mode, spec, face_ref)
     feat.Reversed = bool(spec.get("reversed", False))
     if fc_mode != "TwoLengths":
-        # FreeCAD 1.1 maps Midplane onto SideType: writing False resets a
-        # "Two sides" feature to one side (live: 5 + 3 built 5 mm only).
-        feat.Midplane = bool(spec.get("midplane", False))
+        # Never write False over a "Two sides" feature: it resets it to one side
+        # (live: 5 + 3 built 5 mm only).
+        midplane = bool(spec.get("midplane", False))
+        if "SideType" in feat.PropertiesList:
+            # 1.1 deprecates Midplane and warns on every write to it.
+            feat.SideType = "Symmetric" if midplane else "One side"
+        else:
+            feat.Midplane = midplane
     _add_note(mode_note)
     _flip_up_to_direction(doc, feat, spec, fc_mode)
     _auto_detect_cut_direction(doc, feat, spec, fc_type, base_vol)
