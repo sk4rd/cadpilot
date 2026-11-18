@@ -341,6 +341,9 @@ def datum(ctype: str, value: Any) -> tuple[float, str | None]:
 
 
 _NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+# Expression constants: '.Constraints.pi' fails to parse (live 1.1.4). Unit
+# symbols (W, h, mm, ...) fail the same way; sketcher_ops asks FreeCAD for those.
+_RESERVED_NAMES = frozenset({"e", "pi"})
 
 
 def check_name(name: Any) -> str:
@@ -351,6 +354,8 @@ def check_name(name: Any) -> str:
             f"name {text!r} must be an identifier (letters, digits, '_'; not starting with a "
             "digit) so expressions can reference it as <Sketch>.Constraints.<name>"
         )
+    if text in _RESERVED_NAMES:
+        raise ValueError(f"name {text!r} is an expression constant; pick another name")
     return text
 
 

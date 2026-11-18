@@ -329,6 +329,18 @@ def m6_names_are_checked_and_reported():
             {"type": "radius", "items": [1], "value": 2},
         ],
     )
+    res_unit = cad(
+        "sketch",
+        doc,
+        None,
+        geometry=geo,
+        constraints=[{"type": "distance", "items": [0], "value": 10, "name": "W"}],
+    )
+    check(
+        "m6 a unit-symbol name is refused",
+        "name 'W' is a unit symbol" in err(res_unit),
+        err(res_unit),
+    )
     check(
         "m6 the reply lists unnamed dimensions",
         res.get("unnamed_dimensions") == ["constraints[1] (radius)"],

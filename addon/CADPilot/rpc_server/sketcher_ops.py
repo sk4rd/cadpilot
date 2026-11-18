@@ -199,6 +199,23 @@ def _geometry_kinds(sketch) -> dict:
     )
 
 
+def refuse_unit_name(name: str, where: str) -> None:
+    """Refuse a constraint name FreeCAD's expressions read as a unit (W, h, mm, deg).
+
+    The constraint itself is fine, but its expression path '.Constraints.W'
+    fails to parse, so it can be neither bound nor referenced — and replacing
+    the sketch later died on it (live 1.1.4).
+    """
+    try:
+        FreeCAD.Units.Quantity(f"1 {name}")
+    except Exception:
+        return
+    raise ValueError(
+        f"{where}: name {name!r} is a unit symbol in FreeCAD's expressions, so "
+        f"'.Constraints.{name}' cannot be parsed; pick another name (e.g. '{name}_len')"
+    )
+
+
 def _add_constraints(sketch, constraints: list, implied: list = ()) -> tuple[list, list]:
     """Add the spec's constraints, then those its composite geometry implies.
 
@@ -209,6 +226,8 @@ def _add_constraints(sketch, constraints: list, implied: list = ()) -> tuple[lis
     taken = {k.Name: f"Constraints[{i}]" for i, k in enumerate(sketch.Constraints) if k.Name}
     planned = sketch_spec.plan_constraints(constraints, _geometry_kinds(sketch), taken)
     for plan in [*planned, *implied]:
+        if plan["name"]:
+            refuse_unit_name(plan["name"], f"constraints[{plan['entry']}] ({plan['type']})")
         args = plan["args"]
         if plan["datum"] is None:
             con = Sketcher.Constraint(*args)

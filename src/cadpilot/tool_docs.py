@@ -352,7 +352,9 @@ Optional: plane, offset, body, construction, external, constraints, replace.
   it by that name in FreeCAD's constraint list, other features can reference
   it as Sketch.Constraints.Width, and sketch_edit sets it by name. The reply
   lists `unnamed_dimensions` when some are missing. Names must be unique in
-  the sketch; a duplicate is refused with both constraint indices.
+  the sketch (a duplicate is refused with both constraint indices) and must
+  not be a unit symbol or constant ("W", "h", "mm", "pi"), which FreeCAD's
+  expressions cannot reference.
   Point references are [geo_id, "start"|"end"|"center"|"mid"], checked
   against the geometry: a line has start/end, a circle only center, an arc
   start/end/center ("mid" = center on round geometry), a point any keyword.

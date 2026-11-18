@@ -321,6 +321,11 @@ def test_constraint_names_are_identifiers_and_unique():
         )
 
 
+def test_expression_constants_are_not_names():
+    with pytest.raises(ValueError, match="'pi' is an expression constant"):
+        _plan({"type": "distance", "items": [0], "value": 5, "name": "pi"})
+
+
 def test_unnamed_dimensions_are_listed_once_per_entry():
     plans = _plan(
         {"type": "horizontal", "items": [0]},
