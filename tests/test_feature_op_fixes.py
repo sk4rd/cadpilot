@@ -382,3 +382,10 @@ def test_draft_neutral_plane_is_never_a_drafted_face():
     default = _src("_default_neutral_plane")
     assert "abs(normal.dot(n)) > 1e-06" in default, "perpendicular to every drafted face"
     assert "'-Z'" in ast.unparse(_FEATURE).split("_NEUTRAL_PREFERENCE =")[1][:40]
+
+
+def test_a_pad_that_adds_nothing_warns():
+    describe = _src("describe_feature")
+    assert "_add_added_nothing(feat)" in describe
+    helper = _src("_add_added_nothing")
+    assert "BaseFeature" in helper and "_CUT_EPS" in helper and "added no material" in helper

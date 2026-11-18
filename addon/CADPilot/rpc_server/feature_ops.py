@@ -2456,6 +2456,31 @@ def _cut_removed_nothing(feat) -> str:
     )
 
 
+def _add_added_nothing(feat) -> str:
+    """Warn when an additive feature added no material.
+
+    A pad that extrudes into material the part already has (the wrong
+    direction, or a profile inside the solid) still "succeeds" with the volume
+    unchanged — the pocket's no-op warning had no additive twin (live: a pad
+    pointed into the plate reported plain success).
+    """
+    try:
+        baseline = getattr(feat, "BaseFeature", None)
+        if baseline is None:
+            return ""
+        prev_vol = float(baseline.Shape.Volume)
+        new_vol = float(feat.Shape.Volume)
+    except Exception:
+        return ""
+    if prev_vol <= 0 or new_vol > prev_vol + _CUT_EPS:
+        return ""
+    return (
+        f"{feat.Name} added no material (volume unchanged at {round(new_vol, 1)} mm^3): the "
+        "profile extrudes into material the part already has. Check the direction "
+        "(reversed=true extrudes the other way) and the sketch's plane."
+    )
+
+
 def _pad_created_disconnected_solid(feat) -> str:
     """Warn when an additive feature left the Body with a floating solid.
 
@@ -2652,6 +2677,10 @@ def describe_feature(feat, spec) -> dict:
                 f"{feat.Name} length {length} is negative: FreeCAD reads that as the "
                 "opposite direction (it is not an error), and the geometry went that way."
             )
+    if op in ("pad", "revolution"):
+        message = _add_added_nothing(feat)
+        if message:
+            warnings.append(message)
     if op == "pad":
         message = _pad_created_disconnected_solid(feat)
         if message:
