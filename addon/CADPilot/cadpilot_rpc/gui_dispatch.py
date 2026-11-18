@@ -477,6 +477,42 @@ def _flush_gui_events(delay_ms: int = 20) -> None:
         app.processEvents(flags, delay_ms)
 
 
+def _drain_on_stack() -> bool:
+    """True when this tick runs inside a drain, i.e. a task is pumping events."""
+    frame = sys._getframe(2)
+    while frame is not None:
+        code = frame.f_code
+        if code.co_name == "process_gui_tasks" and code.co_filename.endswith("gui_dispatch.py"):
+            return True
+        frame = frame.f_back
+    return False
+
+
+def _recover_dead_drain() -> None:
+    """Clear the busy flag of a drain that is no longer running.
+
+    FreeCAD can throw a C++ exception straight through the Python stack (seen on
+    1.1.4: ``Units.Quantity("1 SpigotR")`` raised "Unit mismatch in plus
+    operation", reported only as "Unhandled Base::Exception caught in
+    GUIApplication::notify"). No ``finally`` runs, so ``_processing`` stayed True
+    with nothing on the stack, every later tick returned at the re-entrancy
+    guard, and each call timed out "behind another call" until FreeCAD was
+    restarted.
+    """
+    global _processing
+    logger.error(
+        "a GUI task ended without returning (a C++ exception escaped Python after %.1fs); "
+        "its caller got no reply. Clearing the busy flag so the queue runs again",
+        time.monotonic() - _processing_since,
+    )
+    _processing = False
+    app = QtWidgets.QApplication.instance()
+    if app is not None and app.overrideCursor() is not None:
+        app.restoreOverrideCursor()
+    with contextlib.suppress(Exception):
+        FreeCADGui.getMainWindow().statusBar().clearMessage()
+
+
 def process_gui_tasks() -> None:
     """Drain queued GUI-thread callables (wake signal and heartbeat tick).
 
@@ -513,7 +549,9 @@ def process_gui_tasks() -> None:
                 exc_info=True,
             )
     if _processing:
-        return  # re-entrant call from processEvents inside a task; skip
+        if _drain_on_stack():
+            return  # re-entrant call from processEvents inside a task; skip
+        _recover_dead_drain()
 
     try:
         if _rpc_request_queue.empty():

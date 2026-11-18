@@ -335,6 +335,21 @@ def test_heartbeat_survives_a_task_that_outlasts_its_tick(dispatch):
     assert not heartbeat.active, "stopping the server stops the heartbeat"
 
 
+def test_a_drain_that_died_in_cpp_does_not_wedge_the_queue(dispatch):
+    """Live: Units.Quantity("1 SpigotR") threw a C++ exception straight through
+    the Python stack inside a task. The drain's finally never ran, _processing
+    stayed True with nothing running, and every later call timed out "waiting
+    behind another call" until FreeCAD restarted."""
+    mod, _state = dispatch
+    mod._processing = True  # what the unwound drain left behind
+    mod._processing_since = time.monotonic() - 300
+    ran = []
+    mod._rpc_request_queue.put(lambda: ran.append("next call"))
+    mod.process_gui_tasks()
+    assert ran == ["next call"]
+    assert mod._processing is False
+
+
 def _give_the_stub_an_application(mod):
     """The guard probe reads widget state only when an application exists."""
     app = mod.QtWidgets.QApplication
