@@ -36,6 +36,7 @@ from .core import (
     set_anchors_operation,
     step_control_operation,
     step_plan_operation,
+    user_changes_text,
     verify_assembly_operation,
 )
 
@@ -77,5 +78,6 @@ __all__ = [
     "set_anchors_operation",
     "step_control_operation",
     "step_plan_operation",
+    "user_changes_text",
     "verify_assembly_operation",
 ]

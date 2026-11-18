@@ -56,6 +56,10 @@ class StepRecord:
     note: str = ""
     result: str = ""
     duration_ms: int = 0
+    # Why a DONE step is no longer in the model ("" = it is): the user undid
+    # it. The observer sets it when it sees the undo, because once a new
+    # commit clears the redo stack nothing else remembers that it happened.
+    stale: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -80,6 +84,7 @@ class StepRecord:
             note=data.get("note", ""),
             result=data.get("result", ""),
             duration_ms=int(data.get("duration_ms", 0)),
+            stale=data.get("stale", ""),
         )
 
 
@@ -548,7 +553,11 @@ def steps_without_undo(records: list[StepRecord], index: int) -> list[int]:
 
 
 def undo_trust_span(
-    stack_names: list[str], records: list[StepRecord], upto_index: int, undo_count: int
+    stack_names: list[str],
+    records: list[StepRecord],
+    upto_index: int,
+    undo_count: int,
+    skip: set[int] | frozenset[int] = frozenset(),
 ) -> int:
     """How many of the rollback's newest transactions ``stack_names`` still holds.
 
@@ -577,7 +586,10 @@ def undo_trust_span(
     expected = [
         rec.transaction
         for rec in reversed(records)
-        if rec.index > upto_index and rec.state == STATE_DONE and rec.transaction
+        if rec.index > upto_index
+        and rec.state == STATE_DONE
+        and rec.transaction
+        and rec.index not in skip
     ]
     span = 0
     # strict=False: the stack is legitimately SHORTER than the span when FreeCAD
@@ -758,6 +770,8 @@ def row_text(rec: StepRecord) -> str:
                 label = f"{first} · {label.split(' · ', 1)[1]}"
             else:
                 label = f"{first} · {label}"
+    if (rec.params or {}).get("user_edited"):
+        label += " (edited by hand)"
     if rec.error:
         label += f"  — {rec.error}"
     return label
@@ -906,7 +920,9 @@ def done_count(records: list[StepRecord]) -> int:
     return sum(1 for r in records if r.state == STATE_DONE)
 
 
-def plan_rollback(records: list[StepRecord], to_index: int) -> dict[str, Any]:
+def plan_rollback(
+    records: list[StepRecord], to_index: int, skip: set[int] | frozenset[int] = frozenset()
+) -> dict[str, Any]:
     """What it takes to put the model back at ``to_index``.
 
     ``undo_count`` — how many FreeCAD transactions to undo. Only records that
@@ -920,10 +936,13 @@ def plan_rollback(records: list[StepRecord], to_index: int) -> dict[str, Any]:
                      execute_code (mutated=False) is not one of them.
     ``accepted``   — reviewed indices in that range: rolling back across them
                      discards someone's approval, so the caller must force.
+    ``skip`` are steps the user already undid or deleted (stale): they go
+    back to planned with the rest, but their transactions are not on the undo
+    stack any more, so they claim no undo.
     """
     affected = [r for r in records if r.state == STATE_DONE and r.index > to_index]
     return {
-        "undo_count": sum(1 for r in affected if r.transaction),
+        "undo_count": sum(1 for r in affected if r.transaction and r.index not in skip),
         "affected": [r.index for r in affected],
         "blocking": [r.index for r in affected if not r.atomic and r.mutated],
         "accepted": [r.index for r in affected if r.accepted],
@@ -933,21 +952,24 @@ def plan_rollback(records: list[StepRecord], to_index: int) -> dict[str, Any]:
 # --- review semantics --------------------------------------------------------
 
 
-def plan_reject(records: list[StepRecord], index: int) -> dict[str, Any] | None:
+def plan_reject(
+    records: list[StepRecord], index: int, skip: set[int] | frozenset[int] = frozenset()
+) -> dict[str, Any] | None:
     """What rejecting step ``index`` destroys: everything from it onward.
 
     Uniform semantics, mirroring "a new commit invalidates the planned tail":
     transaction-bearing done steps in the range are undone, planned ones
     dropped — the tail was authored against step ``index`` existing, so
     keeping it would replay steps against a world they were not designed
-    for. None = no such step.
+    for. ``skip`` are steps the user already undid (see plan_rollback). None =
+    no such step.
     """
     if not any(r.index == index for r in records):
         return None
     drop = [r for r in records if r.index >= index]
     done = [r for r in drop if r.state == STATE_DONE]
     return {
-        "undo_count": sum(1 for r in done if r.transaction),
+        "undo_count": sum(1 for r in done if r.transaction and r.index not in skip),
         "drop": [r.index for r in drop],
         "blocking": [r.index for r in done if not r.atomic and r.mutated],
         "accepted": [r.index for r in done if r.accepted],
@@ -963,25 +985,66 @@ def set_accepted(records: list[StepRecord], index: int, on: bool = True) -> Step
     return rec
 
 
+def merge_params(
+    old: dict[str, Any], new: dict[str, Any], prefix: str = ""
+) -> tuple[dict[str, Any], list[str]]:
+    """Deep-merge ``new`` into ``old``; also returns the dotted keys it replaced.
+
+    Nested dicts merge key by key, so ``{"obj_properties": {"length": 12}}``
+    changes the length and keeps every other property, including the ones the
+    user's edits synced in. Any other value (a list, a number) replaces the old
+    one, and ``None`` removes the key. A replaced key is one that held a
+    different value before.
+    """
+    merged = dict(old or {})
+    replaced: list[str] = []
+    for key, value in (new or {}).items():
+        path = f"{prefix}{key}"
+        if value is None:
+            if key in merged:
+                merged.pop(key)
+                replaced.append(path)
+            continue
+        current = merged.get(key)
+        if isinstance(current, dict) and isinstance(value, dict):
+            merged[key], inner = merge_params(current, value, f"{path}.")
+            replaced.extend(inner)
+            continue
+        if key in merged and current != value:
+            replaced.append(path)
+        merged[key] = value
+    return merged, replaced
+
+
 def update_planned(
     records: list[StepRecord],
     index: int,
     params: dict[str, Any] | None = None,
     label: str = "",
-) -> StepRecord | None:
+    replace: bool = False,
+) -> tuple[StepRecord, list[str]] | None:
     """Edit a not-yet-committed step in place. None = done or unknown step.
 
-    Top-level shallow merge (same rule as reexecute): ``obj_properties`` is
-    replaced wholesale, so callers send the full property dict.
+    ``params`` deep-merge into the step (see ``merge_params``), so a caller
+    sends only what it changes; ``replace`` swaps them wholesale instead, for
+    an editor that holds the complete dict (a key it deleted must go). Returns
+    the record and the keys whose values were replaced.
     """
     rec = next((r for r in records if r.index == index), None)
     if rec is None or rec.state not in (STATE_PLANNED, STATE_FAILED):
         return None
+    replaced: list[str] = []
     if params:
-        rec.params = {**(rec.params or {}), **params}
+        if replace:
+            replaced = sorted(
+                k for k in rec.params or {} if (rec.params or {}).get(k) != params.get(k)
+            )
+            rec.params = dict(params)
+        else:
+            rec.params, replaced = merge_params(rec.params or {}, params)
     if label:
         rec.label = label
-    return rec
+    return rec, replaced
 
 
 def set_label(records: list[StepRecord], index: int, label: str) -> StepRecord | None:
@@ -1031,23 +1094,6 @@ def insert_steps(
     return added
 
 
-def invalidates_plan(records: list[StepRecord], objects_after: list[str]) -> bool:
-    """Whether a mutation should discard the not-yet-executed planning tail.
-
-    A cad() commit always does: the document moved under steps that were
-    authored against the old state. An execute_code call is recorded here
-    too, but it is very often a read — inspecting the model must not silently
-    delete a plan — so it only invalidates the tail when the object set
-    actually changed, compared against the last committed step's fingerprint.
-    With nothing to compare against, keep the plan.
-    """
-    previous = next(
-        (r.objects_after for r in reversed(records) if r.state == STATE_DONE and r.objects_after),
-        [],
-    )
-    return bool(previous) and list(objects_after) != list(previous)
-
-
 def last_atomic_done(records: list[StepRecord]) -> StepRecord | None:
     """The most recent completed step that owns an undo transaction.
 
@@ -1070,7 +1116,83 @@ def rewind(records: list[StepRecord], count: int) -> list[StepRecord]:
         rec.state = STATE_PLANNED
         rec.transaction = ""
         rec.error = ""
+        rec.stale = ""
     return back
+
+
+def _record_diffs(records: list[StepRecord]) -> list[tuple[StepRecord, set[str], set[str]]]:
+    """(record, objects it created, objects it removed) for every mutating done step."""
+    out: list[tuple[StepRecord, set[str], set[str]]] = []
+    prev_after: set[str] = set()
+    for rec in records:
+        if rec.state != STATE_DONE:
+            continue
+        after = set(rec.objects_after or [])
+        if getattr(rec, "mutated", True):
+            before = set(rec.objects_before) if rec.objects_before else prev_after
+            out.append((rec, after - before, before - after))
+        if rec.objects_after:
+            prev_after = after
+    return out
+
+
+def creator_of(records: list[StepRecord], name: str) -> StepRecord | None:
+    """The done step that created object ``name`` (the latest, if several did)."""
+    owner = None
+    for rec, created, _removed in _record_diffs(records):
+        if name in created:
+            owner = rec
+    return owner
+
+
+def stale_steps(
+    records: list[StepRecord],
+    undo_names: list[str],
+    redo_names: list[str],
+    present: list[str],
+) -> list[dict[str, Any]]:
+    """Done steps whose work the model no longer has: ``{index, reason, missing}``.
+
+    A step is stale when the user undid it (its transaction sits on the redo
+    stack, or the observer saw the undo and noted it on the record), or when
+    objects it created are gone and no later journal step removed them (the
+    user deleted them). Checked for EVERY done step: anchoring on the last
+    step alone missed a deleted Pocket under a later step, and cleared itself
+    as soon as Claude committed anything.
+    """
+    live = set(present)
+    undo, redo = set(undo_names), set(redo_names)
+    diffs = _record_diffs(records)
+    out: list[dict[str, Any]] = []
+    for pos, (rec, created, _removed) in enumerate(diffs):
+        removed_later: set[str] = set()
+        for _later, _c, gone in diffs[pos + 1 :]:
+            removed_later |= gone
+        missing = sorted(created - live - removed_later)
+        reason = ""
+        if rec.transaction and rec.transaction in redo and rec.transaction not in undo:
+            reason = "undone by the user (Ctrl+Z)"
+        elif rec.stale:
+            reason = rec.stale
+        elif missing:
+            reason = "deleted by the user: " + ", ".join(missing)
+        if reason:
+            out.append({"index": rec.index, "reason": reason, "missing": missing})
+    return out
+
+
+def drop_step(records: list[StepRecord], index: int) -> StepRecord | None:
+    """Forget one done step without touching the model; None = no such done step.
+
+    For the user's undo or deletion of a step's work: the model already lost
+    it, so the journal follows instead of re-creating it on the next rollback.
+    """
+    rec = next((r for r in records if r.index == index), None)
+    if rec is None or rec.state != STATE_DONE:
+        return None
+    records.remove(rec)
+    reindex(records)
+    return rec
 
 
 # --- manual-edit sync (pure half) ---------------------------------------------
@@ -1081,29 +1203,246 @@ def rewind(records: list[StepRecord], count: int) -> list[StepRecord]:
 # lives here: which object/step owns which property (tracked_objects), and
 # what a live value maps back to (map_cell_value / map_constraint_value).
 
-# Feature op -> {object property: spec key}. Only properties the builder
-# actually consumes are mapped, so a synced value is always a valid spec key —
-# including ones the caller did not pass originally (a pad built with the
-# default length must still pick up a GUI Length edit, or replay reverts it).
-# Richer values (edge selectors, links, boolean tool compounds) stay unsynced.
+
+@dataclass(frozen=True)
+class SyncRule:
+    """How one live feature property maps back onto the op's spec.
+
+    ``kind`` names the converter (``sync_patch``) and the engine's reader:
+    ``value`` (a scalar), ``int``, ``spacings`` (a float list, FreeCAD's all -1 meaning "uniform"),
+    ``pattern_mode`` (a linear pattern's Spacing/Extent mode), ``pad_mode``
+    (a pad/pocket's Type, SideType and Midplane together: ``pad_type``,
+    ``through_all``, ``midplane``), ``link_sub`` (a ``[object, subelement]``
+    reference),
+    ``names`` (the extra originals beyond the step's own base), ``axis``,
+    ``mirror_plane``, ``z_offset`` (a pure-z AttachmentOffset) and
+    ``edge_size`` (a uniform Part fillet/chamfer size).
+    ``default`` is what the builder does when the key is absent, so a live
+    value equal to it writes nothing. ``only`` limits the rule to object
+    TypeIds; ``when`` to objects whose (property, value) matches.
+    """
+
+    key: str
+    kind: str = "value"
+    default: Any = None
+    only: tuple[str, ...] = ()
+    when: tuple[str, Any] | None = None
+
+
+#: A sync_patch value that removes the key from the spec.
+REMOVE = object()
+
+# Type, SideType and Midplane are one decision in the spec (pad_type plus the
+# through_all/midplane flags, and the keys only one mode reads), so all three
+# map through the same rule and its converter reads them together.
+_PAD_MODE = SyncRule("pad_type", "pad_mode", default="length")
+_PADLIKE = {
+    "Length": SyncRule("length", default=10.0),
+    "Length2": SyncRule("length2", when=("SideType", "Two sides")),
+    "Offset": SyncRule("offset", default=0),
+    "Reversed": SyncRule("reversed", default=False),
+    "Midplane": _PAD_MODE,
+    "SideType": _PAD_MODE,
+    "Type": _PAD_MODE,
+    "UpToFace": SyncRule("up_to_face", "link_sub", when=("Type", "UpToFace")),
+}
+_LINEAR = ("PartDesign::LinearPattern",)
+_POLAR = ("PartDesign::PolarPattern",)
+
+# Feature op -> {object property: rule}. Every property the op's builder reads
+# back from its spec is listed, including keys the caller did not pass (a pad
+# built with the default length must still pick up a GUI Length edit, or replay
+# reverts it); a new spec key is one line here (plus a reader in the engine for
+# a new kind). An expression bound to the property syncs as "=expr" whatever the
+# kind. Boolean tool compounds and edge selectors stay unsynced.
 # FreeCAD >= 1.1 moved Part-level fillet/chamfer sizes into per-edge Edges
 # tuples, so both names are claimed (only the one that exists fires).
-FEATURE_SYNC: dict[str, dict[str, str]] = {
-    "fillet": {"Radius": "radius", "Edges": "radius"},
-    "chamfer": {"Size": "size", "Edges": "size"},
-    "pad": {"Length": "length", "Reversed": "reversed", "Midplane": "midplane"},
-    "pocket": {"Length": "length", "Reversed": "reversed", "Midplane": "midplane"},
-    "revolution": {"Angle": "angle", "Reversed": "reversed"},
-    "groove": {"Angle": "angle", "Reversed": "reversed"},
-    "thickness": {"Value": "value", "Reversed": "reversed"},
-    "draft": {"Angle": "angle"},
-    "loft": {"Solid": "solid", "Ruled": "ruled"},
-    "sweep": {"Solid": "solid"},
+FEATURE_SYNC: dict[str, dict[str, SyncRule]] = {
+    "fillet": {"Radius": SyncRule("radius"), "Edges": SyncRule("radius", "edge_size")},
+    "chamfer": {"Size": SyncRule("size"), "Edges": SyncRule("size", "edge_size")},
+    "pad": _PADLIKE,
+    "pocket": _PADLIKE,
+    "revolution": {
+        "Angle": SyncRule("angle", default=360.0),
+        "Reversed": SyncRule("reversed", default=False),
+    },
+    "groove": {
+        "Angle": SyncRule("angle", default=360.0),
+        "Reversed": SyncRule("reversed", default=False),
+    },
+    "thickness": {"Value": SyncRule("value"), "Reversed": SyncRule("reversed", default=False)},
+    "draft": {"Angle": SyncRule("angle")},
+    "loft": {"Solid": SyncRule("solid", default=True), "Ruled": SyncRule("ruled", default=False)},
+    "sweep": {"Solid": SyncRule("solid", default=True)},
+    "pattern": {
+        "Occurrences": SyncRule("count", "int"),
+        "Angle": SyncRule("angle", default=360.0, only=_POLAR),
+        "Mode": SyncRule("mode", "pattern_mode", default="spacing", only=_LINEAR),
+        "Offset": SyncRule("spacing", only=_LINEAR, when=("Mode", "Spacing")),
+        "Length": SyncRule("length", only=_LINEAR, when=("Mode", "Extent")),
+        "Spacings": SyncRule("spacings", "spacings", only=_LINEAR, when=("Mode", "Spacing")),
+        "Reversed": SyncRule("reversed", default=False),
+        "Originals": SyncRule("originals", "names", default=[]),
+        "Direction": SyncRule("axis", "axis", only=_LINEAR),
+        "Axis": SyncRule("axis", "axis", only=_POLAR),
+    },
+    "mirror": {
+        "MirrorPlane": SyncRule("plane", "mirror_plane", default="XY"),
+        "Originals": SyncRule("originals", "names", default=[]),
+    },
     # A datum plane / attached sketch offset is a pure-z AttachmentOffset;
-    # the engine reader refuses anything more general (rotation, x/y shift).
-    "datum_plane": {"AttachmentOffset": "offset"},
-    "sketch": {"AttachmentOffset": "offset"},
+    # the converter refuses anything more general (rotation, x/y shift).
+    "datum_plane": {"AttachmentOffset": SyncRule("offset", "z_offset", default=0)},
+    "sketch": {"AttachmentOffset": SyncRule("offset", "z_offset", default=0)},
 }
+
+
+def feature_rule(op: str, prop: str) -> SyncRule | None:
+    return FEATURE_SYNC.get(op, {}).get(prop)
+
+
+# Type enum <-> the spec's pad_type; ThroughAll is the spec's through_all flag.
+PAD_TYPES = {
+    "Length": "length",
+    "TwoLengths": "two_lengths",
+    "UpToFirst": "up_to_first",
+    "UpToLast": "up_to_last",
+    "UpToFace": "up_to_face",
+    "UpToShape": "up_to_shape",
+}
+
+_ORIGIN_TOKENS = {
+    "X_Axis": "X",
+    "Y_Axis": "Y",
+    "Z_Axis": "Z",
+    "H_Axis": "H",
+    "V_Axis": "V",
+    "N_Axis": "N",
+    "XY_Plane": "XY",
+    "XZ_Plane": "XZ",
+    "YZ_Plane": "YZ",
+}
+
+
+def _link_token(link: Any) -> str | None:
+    """("X_Axis" role of a body origin, or a sketch's "H_Axis" sub) -> "X"/"H"."""
+    if not isinstance(link, dict):
+        return None
+    sub = (link.get("subs") or [""])[0]
+    return _ORIGIN_TOKENS.get(sub) or _ORIGIN_TOKENS.get(str(link.get("role") or ""))
+
+
+def sync_patch(
+    rule: SyncRule, live: Any, expr: str | None = None, base: str = ""
+) -> dict[str, Any] | None:
+    """Spec keys (and values) that reproduce ``live``; None = no representation.
+
+    ``live`` is what the engine read (a scalar, a list, or for links a dict
+    ``{"name", "subs", "role", "type"}``); ``expr`` the property's binding,
+    which wins in every kind, as ``"=expr"``. A value of ``REMOVE`` deletes the
+    key (a pocket that is no longer through-all). ``base`` is the step's own
+    object, which the spec names apart from its extra originals.
+    """
+    if expr:
+        return {rule.key: "=" + _normalize_expression(str(expr))}
+    kind = rule.kind
+    if kind in ("value", "edge_size"):
+        return None if live is None else {rule.key: live}
+    if kind == "int":
+        try:
+            return {rule.key: int(live)}
+        except (TypeError, ValueError):
+            return None
+    if kind == "spacings":
+        if not isinstance(live, (list, tuple)):
+            return None
+        if all(float(v) == -1 for v in live):
+            return {rule.key: REMOVE}
+        return {rule.key: [_num(v) for v in live]}
+    if kind == "pad_mode":
+        return _pad_mode_patch(rule.key, live)
+    if kind == "pattern_mode":
+        if live not in ("Spacing", "Extent"):
+            return None
+        if live == "Extent":
+            return {rule.key: "extent", "spacings": REMOVE}
+        return {rule.key: "spacing"}
+    if kind == "link_sub":
+        if not live:
+            return {rule.key: REMOVE}
+        sub = (live.get("subs") or [""])[0]
+        return {rule.key: [live.get("name"), sub] if sub else live.get("name")}
+    if kind == "names":
+        if not isinstance(live, (list, tuple)):
+            return None
+        return {rule.key: [n for n in live if n != base]}
+    if kind == "axis":
+        token = _link_token(live)
+        return None if token is None else {rule.key: token}
+    if kind == "mirror_plane":
+        if not live:
+            return None
+        token = _link_token(live)
+        if token in ("XY", "XZ", "YZ"):
+            return {rule.key: token, "face": REMOVE}
+        sub = (live.get("subs") or [""])[0]
+        if sub.startswith("Face"):
+            return {"face": [live.get("name"), sub], rule.key: REMOVE}
+        if "Plane" in str(live.get("type") or ""):
+            return {rule.key: {"datum": live.get("name")}, "face": REMOVE}
+        return None
+    if kind == "z_offset":
+        if not isinstance(live, (list, tuple)) or len(live) != 4:
+            return None
+        x, y, z, angle = (float(v) for v in live)
+        if abs(x) > 1e-9 or abs(y) > 1e-9 or abs(angle) > 1e-9:
+            return None
+        return {rule.key: _num(z)}
+    return None
+
+
+def _pad_mode_patch(key: str, live: Any) -> dict[str, Any] | None:
+    """A pad/pocket's Type + SideType + Midplane as the spec's mode keys.
+
+    ``live`` is ``{"type", "side", "midplane"}``. The spec reads each mode's
+    own keys only (up_to_face with up_to_face, length2 with two_lengths), so a
+    mode change removes the keys the new mode would refuse.
+    """
+    if not isinstance(live, dict):
+        return None
+    side = str(live.get("side") or "")
+    fc_type = str(live.get("type") or "")
+    if side == "Two sides" or fc_type == "TwoLengths":
+        return {key: "two_lengths", "through_all": REMOVE, "midplane": REMOVE, "up_to_face": REMOVE}
+    patch: dict[str, Any] = {
+        "midplane": True if side == "Symmetric" or live.get("midplane") else REMOVE,
+        "length2": REMOVE,
+    }
+    if fc_type == "ThroughAll":
+        patch.update({"through_all": True, key: REMOVE, "up_to_face": REMOVE})
+        return patch
+    token = PAD_TYPES.get(fc_type)
+    if token is None:
+        return None
+    patch.update({key: REMOVE if token == "length" else token, "through_all": REMOVE})
+    if token != "up_to_face":
+        patch["up_to_face"] = REMOVE
+    return patch
+
+
+def patch_value_matches(rule: SyncRule, key: str, current: Any, value: Any) -> bool:
+    """Whether the spec's ``current`` already says ``value`` (absent = default)."""
+    if current is None:
+        if value is REMOVE:
+            return True
+        current = rule.default if key == rule.key else False
+    if value is REMOVE:
+        return False
+    return _same_value(current, value)
+
+
+# Ops that change an existing sketch's geometry or constraints in place.
+SKETCH_EDIT_OPS = frozenset({"sketch_edit"})
 
 # Ops whose obj_name names the object they CREATE (not a base), so the object
 # is tracked by name even when the before/after diff is empty (an idempotent
@@ -1305,7 +1644,7 @@ def tracked_objects(records: list[StepRecord]) -> dict[str, dict[str, Any]]:
             else:
                 names = {str(params.get("obj_name") or "")}
         else:
-            claims = dict(FEATURE_SYNC.get(op, {}))
+            claims = {prop: rule.key for prop, rule in FEATURE_SYNC.get(op, {}).items()}
             names = set(rec.objects_after) - set(rec.objects_before)
             if op in NEW_OBJECT_OPS:
                 names |= {str(params.get("obj_name") or "")}
@@ -1334,6 +1673,14 @@ def tracked_objects(records: list[StepRecord]) -> dict[str, dict[str, Any]]:
         entry = tracked.setdefault(name, {"props": {}, "sheet": None, "sketch": None, "move": None})
         entry["move"] = (idx, sub)
         entry["props"].pop("Placement", None)
+    # A later step that reshapes the sketch owns its structure from then on:
+    # its replay runs on top of the sketch step's, so a hand edit made after it
+    # belongs there, not in the sketch step's spec.
+    for rec in records:
+        if rec.state == STATE_DONE and rec.operation in SKETCH_EDIT_OPS:
+            entry = tracked.get(str((rec.params or {}).get("obj_name") or ""))
+            if entry is not None and entry["sketch"] is not None:
+                entry["sketch"] = (rec.index, None)
     return tracked
 
 
@@ -1375,6 +1722,23 @@ def map_cell_value(old: Any, live_contents: Any) -> Any:
         return UNREADABLE
 
 
+def constraint_expression(exprs: dict[str, Any], index: int, name: str = "") -> str | None:
+    """The expression bound to sketch constraint ``index``, if any.
+
+    FreeCAD keys a NAMED constraint's binding by its name
+    (``.Constraints.Width``) even when it was bound by index, and only an
+    unnamed one by index (``Constraints[3]``). Looking up the index alone read
+    a named binding as "unbound", so an edit to any other constraint of the
+    sketch rewrote the step's ``=Params.Wd`` to its current number.
+    """
+    if name:
+        expr = exprs.get(f".Constraints.{name}")
+        if expr:
+            return str(expr)
+    expr = exprs.get(f"Constraints[{index}]") or exprs.get(f".Constraints[{index}]")
+    return str(expr) if expr else None
+
+
 def map_constraint_value(ctype: str, old: Any, live_value: Any, live_expr: str | None) -> Any:
     """A dimensional sketch constraint's synced value.
 
@@ -1392,3 +1756,514 @@ def map_constraint_value(ctype: str, old: Any, live_value: Any, live_expr: str |
     if ctype == "angle":
         value = math.degrees(value)
     return _num(value)
+
+
+# --- what the user changed ------------------------------------------------------
+#
+# The engine's observer turns the user's GUI work into events, one per document,
+# for two readers: Claude (every RPC reply carries the events since its last call)
+# and the steps panel's log. Each reader drains its own copy. Kinds:
+#
+#   edit    {step, label, what, old, new}   a value synced into a step's params
+#   sketch  {step, label, object, detail}   geometry/constraints added or removed
+#   undo    {transaction, step, label, added, removed}   Ctrl+Z (redo likewise)
+#   added   {objects, types}                objects the user created
+#   removed {objects}                       objects the user deleted
+#   stale   {step, label, detail}           a done step the model no longer has
+#   panel   {action, index, ok, detail}     a Steps-panel button the user pressed
+
+
+def _same_value(a: Any, b: Any) -> bool:
+    if isinstance(a, bool) or isinstance(b, bool):
+        return a is b
+    if isinstance(a, (int, float)) and isinstance(b, (int, float)):
+        return abs(float(a) - float(b)) <= 1e-9
+    return a == b
+
+
+def append_change(log: list[dict[str, Any]], event: dict[str, Any]) -> None:
+    """Append ``event``, folding it into the previous one where that reads better.
+
+    A drag or a typed value fires one edit per keystroke, and an edit followed
+    by its own Ctrl+Z is no change at all: repeated edits of one value keep the
+    first ``old`` and the last ``new`` and vanish when the two agree. An undo,
+    a panel action or a stale notice is a boundary nothing folds across.
+    Consecutive additions or deletions become one entry, and an object added
+    and then deleted again cancels out.
+    """
+    kind = event.get("kind")
+    if kind == "edit":
+        key = (event.get("step"), event.get("what"))
+        for pos in range(len(log) - 1, -1, -1):
+            prev = log[pos]
+            if prev.get("kind") not in ("edit", "sketch", "added", "removed"):
+                break
+            if prev.get("kind") == "edit" and (prev.get("step"), prev.get("what")) == key:
+                prev["new"] = event.get("new")
+                if _same_value(prev.get("old"), prev.get("new")):
+                    del log[pos]
+                return
+    last = log[-1] if log else None
+    if last is not None and kind == "removed" and last.get("kind") == "added":
+        gone = set(event.get("objects") or [])
+        pairs = list(zip(last.get("objects") or [], last.get("types") or [], strict=False))
+        kept = [(name, typ) for name, typ in pairs if name not in gone]
+        if len(kept) < len(pairs):
+            cancelled = {name for name, _ in pairs} & gone
+            last["objects"] = [name for name, _ in kept]
+            last["types"] = [typ for _, typ in kept]
+            if not kept:
+                log.pop()
+            leftover = [n for n in event.get("objects") or [] if n not in cancelled]
+            if leftover:
+                append_change(log, {**event, "objects": leftover})
+            return
+    if last is not None and kind in ("added", "removed") and last.get("kind") == kind:
+        last["objects"] = list(last.get("objects") or []) + list(event.get("objects") or [])
+        if kind == "added":
+            last["types"] = list(last.get("types") or []) + list(event.get("types") or [])
+        return
+    log.append(dict(event))
+
+
+def _value_text(value: Any) -> str:
+    if value is None:
+        return "(unset)"
+    if isinstance(value, float):
+        return f"{value:g}"
+    return str(value)
+
+
+def describe_change(event: dict[str, Any]) -> str:
+    """One line for an event: the panel log shows it, tests read it."""
+    kind = event.get("kind")
+    step = event.get("step")
+    where = f"step {step}" + (f" ({event['label']})" if event.get("label") else "") if step else ""
+    if kind == "edit":
+        old, new = _value_text(event.get("old")), _value_text(event.get("new"))
+        return f"{where}: {event.get('what')} {old} -> {new}"
+    if kind == "sketch":
+        return f"{where}: sketch {event.get('object')} {event.get('detail')}"
+    if kind in ("undo", "redo"):
+        verb = "undid" if kind == "undo" else "redid"
+        target = where or f"'{event.get('transaction')}'"
+        bits = []
+        if event.get("removed"):
+            bits.append("removed " + ", ".join(event["removed"]))
+        if event.get("added"):
+            bits.append("restored " + ", ".join(event["added"]))
+        return f"{verb} {target}" + (f" ({'; '.join(bits)})" if bits else "")
+    if kind == "added":
+        pairs = zip(event.get("objects") or [], event.get("types") or [], strict=False)
+        return "added " + ", ".join(f"{n} ({t})" if t else n for n, t in pairs)
+    if kind == "removed":
+        return "deleted " + ", ".join(event.get("objects") or [])
+    if kind == "stale":
+        return f"{where} is no longer in the model: {event.get('detail')}"
+    if kind == "panel":
+        state = "" if event.get("ok", True) else " (failed)"
+        detail = f": {event['detail']}" if event.get("detail") else ""
+        return f"Steps panel: {event.get('action')}{state}{detail}"
+    return str(event)
+
+
+def panel_action_text(spec: dict[str, Any]) -> str:
+    """What a Steps-panel button did, in words ("rolled back to step 3")."""
+    op = str(spec.get("operation") or "")
+    index = spec.get("index")
+    params = spec.get("params") or {}
+    if op == "rollback_to":
+        return f"rolled back to step {index}" if index else "rolled back to the start"
+    if op == "replay":
+        return "replayed the journal from the start"
+    if op == "reject":
+        return f"rejected step {index} and everything after it"
+    if op == "reexecute":
+        return f"re-ran step {index} with edited parameters"
+    if op == "accept":
+        return f"{'accepted' if params.get('on', True) else 'unaccepted'} step {index}"
+    if op == "update":
+        return f"edited the parameters of step {index}"
+    if op == "run_next":
+        return "ran the next planned step"
+    if op == "run_all":
+        return "ran all planned steps"
+    if op == "drop":
+        return f"dropped step {index} (accepted the change to the model)"
+    if op == "snapshot":
+        note = params.get("note")
+        return "took a snapshot" + (f" ({note})" if note else "")
+    return op.replace("_", " ") + (f" step {index}" if index else "")
+
+
+# --- the user's own sketch edits ------------------------------------------------
+#
+# A sketch step's spec maps onto the live sketch by index, so the moment the
+# user adds or deletes geometry or constraints the two diverge and a replay
+# would rebuild the ORIGINAL sketch. The engine reads the live sketch as plain
+# data (geometry dicts, constraint dicts, construction flags, external refs)
+# and the helpers below turn it back into the spec the builder takes, or say
+# what it cannot express.
+
+GEO_UNDEF = -2000
+_POS_NAMES = {1: "start", 2: "end", 3: "center"}
+_SPEC_TYPES = {v: k for k, v in CONSTRAINT_TYPE_MAP.items()}
+
+
+def sketch_signature(
+    geometry: list[dict[str, Any]],
+    construction: list[bool],
+    constraints: list[dict[str, Any]],
+    external: list[Any],
+) -> str:
+    """A short fingerprint of a sketch's STRUCTURE (not its dimensions).
+
+    Geometry kinds, construction flags, every constraint's type and the
+    elements it references, and the external references: what a structural
+    edit changes and a value edit or a solve does not.
+    """
+    import hashlib
+
+    shape = [
+        [g.get("type") for g in geometry],
+        [bool(x) for x in construction],
+        [
+            [
+                c.get("type"),
+                c.get("first"),
+                c.get("first_pos"),
+                c.get("second"),
+                c.get("second_pos"),
+                c.get("third"),
+                c.get("third_pos"),
+                bool(c.get("driving", True)),
+                bool(c.get("active", True)),
+            ]
+            for c in constraints
+        ],
+        [list(e) for e in external],
+    ]
+    return hashlib.sha1(json.dumps(shape).encode("utf-8")).hexdigest()[:16]
+
+
+def _r(value: float) -> int | float:
+    return _num(round(float(value), 6))
+
+
+def _pt(p: Any) -> list[int | float]:
+    return [_r(p[0]), _r(p[1])]
+
+
+def _spec_geometry(g: dict[str, Any]) -> dict[str, Any] | None:
+    kind = g.get("type")
+    if kind == "LineSegment":
+        return {"type": "line", "from": _pt(g["start"]), "to": _pt(g["end"])}
+    if kind == "Circle":
+        return {"type": "circle", "center": _pt(g["center"]), "radius": _r(g["radius"])}
+    if kind == "ArcOfCircle" and float(g.get("axis_z", 1)) > 0:
+        return {
+            "type": "arc",
+            "center": _pt(g["center"]),
+            "radius": _r(g["radius"]),
+            "start_angle": _r(math.degrees(g["first"])),
+            "end_angle": _r(math.degrees(g["last"])),
+        }
+    if kind == "Point":
+        return {"type": "point", "at": _pt(g["at"])}
+    return None
+
+
+def _point_item(geo: int, pos: int) -> list[Any] | None:
+    if geo == -1:
+        return [-1, "start"]
+    name = _POS_NAMES.get(int(pos))
+    return [geo, name] if name else None
+
+
+def _spec_items(c: dict[str, Any]) -> list[Any] | None:
+    """The builder's ``items`` for a live constraint, or None when it has none."""
+    ctype = c.get("type")
+    f, fp = int(c.get("first", GEO_UNDEF)), int(c.get("first_pos", 0))
+    s, sp = int(c.get("second", GEO_UNDEF)), int(c.get("second_pos", 0))
+    t, tp = int(c.get("third", GEO_UNDEF)), int(c.get("third_pos", 0))
+    p1 = _point_item(f, fp) if fp else None
+    p2 = _point_item(s, sp) if sp else None
+    if ctype == "Coincident":
+        return [p1, p2] if p1 and p2 else None
+    if ctype in ("Horizontal", "Vertical"):
+        return [f] if s == GEO_UNDEF and not fp else None
+    if ctype in ("Tangent", "Perpendicular"):
+        if t != GEO_UNDEF:
+            return None
+        if not fp and not sp:
+            return [f, s]
+        return [p1, p2] if p1 and p2 else None
+    if ctype in ("Parallel", "Equal"):
+        return [f, s] if not fp and not sp else None
+    if ctype == "Symmetric":
+        if not (p1 and p2):
+            return None
+        if tp:
+            p3 = _point_item(t, tp)
+            return [p1, p2, p3] if p3 else None
+        return [p1, p2, t]
+    if ctype == "Distance":
+        if s == GEO_UNDEF:
+            return [f] if not fp else None
+        if p1 and p2:
+            return [p1, p2]
+        if p1 and not sp:
+            return [p1, s]
+        return None
+    if ctype in ("DistanceX", "DistanceY"):
+        if s == GEO_UNDEF:
+            return [p1] if p1 else ([f] if not fp else None)
+        return [p1, p2] if p1 and p2 else None
+    if ctype == "Radius":
+        return [f] if not fp else None
+    if ctype == "Angle":
+        if t != GEO_UNDEF or fp or sp:
+            return None
+        return [f] if s == GEO_UNDEF else [f, s]
+    return None
+
+
+def sketch_spec_from_live(
+    geometry: list[dict[str, Any]],
+    construction: list[bool],
+    constraints: list[dict[str, Any]],
+    exprs: dict[str, Any],
+) -> tuple[dict[str, Any], list[str]]:
+    """The live sketch as the builder's spec, and what the spec cannot hold.
+
+    Returns ``({"geometry", "constraints", "construction"}, unsupported)``.
+    ``unsupported`` names each element with no spec form (a point-on-object
+    constraint, a reference dimension, an ellipse, ...); when it is non-empty
+    the spec is incomplete and the caller keeps the sketch some other way.
+    Dimensions keep their expression bindings and names.
+    """
+    unsupported: list[str] = []
+    spec_geo: list[dict[str, Any]] = []
+    for i, g in enumerate(geometry):
+        item = _spec_geometry(g)
+        if item is None:
+            unsupported.append(f"geometry {i} ({g.get('type')})")
+            continue
+        spec_geo.append(item)
+    spec_cons: list[dict[str, Any]] = []
+    for i, c in enumerate(constraints):
+        ctype = _SPEC_TYPES.get(str(c.get("type")))
+        items = _spec_items(c) if ctype else None
+        if (
+            ctype is None
+            or items is None
+            or not c.get("driving", True)
+            or not c.get("active", True)
+        ):
+            label = c.get("name") or f"#{i}"
+            unsupported.append(f"constraint {label} ({c.get('type')})")
+            continue
+        entry: dict[str, Any] = {"type": ctype, "items": items}
+        if ctype in DIMENSIONAL_CONSTRAINTS:
+            expr = constraint_expression(exprs, i, str(c.get("name") or ""))
+            value = map_constraint_value(ctype, None, c.get("value"), expr)
+            entry["value"] = None if value is UNREADABLE else value
+        if c.get("name"):
+            entry["name"] = str(c["name"])
+        spec_cons.append(entry)
+    spec = {
+        "geometry": spec_geo,
+        "constraints": spec_cons,
+        "construction": [i for i, flag in enumerate(construction) if flag],
+    }
+    return spec, unsupported
+
+
+def describe_sketch_edit(old: dict[str, Any], new: dict[str, Any]) -> str:
+    """ "geometry 2 -> 3, constraints 4 -> 5 (+UserHeight)" for a change notice."""
+    bits = []
+    for key in ("geometry", "constraints"):
+        before, after = len(old.get(key) or []), len(new.get(key) or [])
+        if before != after:
+            bits.append(f"{key} {before} -> {after}")
+    old_names = {c.get("name") for c in old.get("constraints") or [] if c.get("name")}
+    new_names = {c.get("name") for c in new.get("constraints") or [] if c.get("name")}
+    names = [f"+{n}" for n in sorted(new_names - old_names)]
+    names += [f"-{n}" for n in sorted(old_names - new_names)]
+    if (old.get("construction") or []) != (new.get("construction") or []):
+        bits.append("construction lines changed")
+    text = ", ".join(bits) or "constraints rearranged"
+    return text + (f" ({', '.join(names)})" if names else "")
+
+
+# --- what a rollback will do (the dry run) -----------------------------------------
+
+
+def _touched_objects(rec: StepRecord) -> set[str]:
+    """Objects a step changed without creating them, as far as its params say."""
+    params = rec.params or {}
+    if rec.operation not in ("edit_object", "move", "color", "batch", "set_anchors"):
+        return set()
+    names = {str(params.get("moved_object") or params.get("obj_name") or "")}
+    for sub in params.get("ops") or []:
+        if isinstance(sub, dict) and sub_operation(sub) in ("edit_object", "move", "color"):
+            names.add(str(sub.get("moved_object") or sub.get("obj_name") or ""))
+    return {n for n in names if n}
+
+
+# Ops whose whole effect is the objects they create: undoing one is removing
+# those objects (the engine re-points a Body's Tip afterwards).
+_CREATING_OPS = frozenset(
+    {
+        "create_object",
+        "sketch",
+        "pad",
+        "pocket",
+        "revolution",
+        "groove",
+        "fillet",
+        "chamfer",
+        "thickness",
+        "draft",
+        "loft",
+        "sweep",
+        "boolean",
+        "mirror",
+        "pattern",
+        "datum_plane",
+        "hull",
+    }
+)
+
+
+def _only_creates(rec: StepRecord, created: set[str]) -> bool:
+    params = rec.params or {}
+    if rec.operation == "variables":
+        return str(params.get("obj_name") or "") in created
+    if rec.operation == "batch":
+        return all(
+            isinstance(sub, dict) and sub_operation(sub) in _CREATING_OPS
+            for sub in params.get("ops") or []
+        )
+    return rec.operation in _CREATING_OPS
+
+
+def plan_restore(
+    records: list[StepRecord],
+    to_index: int,
+    span: int,
+    present: list[str],
+    stale: set[int] | frozenset[int] = frozenset(),
+) -> dict[str, Any]:
+    """How ``rollback_to(to_index)`` puts the model back, decided before acting.
+
+    ``span`` is how many of the journal's newest transactions the undo stack
+    can pop (``undo_trust_span``), ``stale`` the steps the user already took
+    out. Native undo pops ``span``; whatever it cannot reach is fixed from the
+    FIRST step that is actually wrong, never from step 1:
+
+    * objects created by steps after the target that the undo cannot reach
+      are removed directly (``leftover``);
+    * a journal object the target state needs that is gone (deleted by the
+      user, or kept away by a step the undo cannot reach), an object such a
+      step edited, and a stale step at or before the target make its creating
+      step the first wrong one: from there the journal rebuilds (``remove``
+      what those steps built, re-run them up to the target).
+
+    ``mode``: ``native`` (the undo is enough), ``removed`` (the steps the
+    undo cannot reach only created objects, and removing them is exact),
+    ``rebuild``, or ``partial`` when what is left cannot be restored exactly
+    (a step that edited objects in ways the journal cannot see, or a step in
+    the rebuild range that cannot be re-run).
+    """
+    live = set(present)
+    after = [
+        r for r in records if r.state == STATE_DONE and r.index > to_index and r.index not in stale
+    ]
+    with_tx = [r for r in after if r.transaction]
+    popped = {r.index for r in with_tx[len(with_tx) - span :]} if span else set()
+    unreached = [r for r in after if r.index not in popped and (r.transaction or r.mutated)]
+    diffs = {rec.index: (created, removed) for rec, created, removed in _record_diffs(records)}
+    built = set(created_since(records, 0))
+    leftover = sorted({n for r in unreached for n in diffs.get(r.index, (set(), set()))[0]} & live)
+    expected = set(objects_after_index(records, to_index)) & built
+    # Objects steps after the target removed come back only with their undo.
+    restored_by_undo = {n for i in popped for n in diffs.get(i, (set(), set()))[1]}
+    missing = sorted(n for n in expected if n not in live and n not in restored_by_undo)
+    touched = sorted({n for r in unreached for n in _touched_objects(r)} & built - set(leftover))
+    wrong: list[int] = []
+    reasons: list[str] = []
+    for name in missing + touched:
+        owner = creator_of(records, name)
+        if owner is not None and owner.index <= to_index:
+            wrong.append(owner.index)
+    wrong += [i for i in stale if i <= to_index]
+    if unreached:
+        reasons.append(f"the undo stack cannot reach step(s) {[r.index for r in unreached]}")
+    if missing:
+        reasons.append(f"object(s) {missing} that step {to_index} should have are gone")
+    if touched:
+        reasons.append(f"object(s) {touched} were edited by step(s) the undo cannot reach")
+    rebuild_from = min(wrong) if wrong else None
+    rerun = [
+        r.index
+        for r in records
+        if rebuild_from is not None
+        and rebuild_from <= r.index <= to_index
+        and r.state in (STATE_DONE, STATE_FAILED)
+    ]
+    blocked = unrecoverable_steps(records, to_index)
+    blocked = [i for i in blocked if rebuild_from is not None and i >= rebuild_from]
+    if rebuild_from is None:
+        exact = all(_only_creates(r, diffs.get(r.index, (set(), set()))[0]) for r in unreached)
+        mode = "native" if not unreached else ("removed" if exact else "partial")
+        remove = leftover
+    elif blocked:
+        mode = "partial"
+        remove = leftover
+        reasons.append(f"step(s) {blocked} cannot be re-run, so the model cannot be rebuilt")
+    else:
+        mode = "rebuild"
+        remove = sorted((set(created_since(records, rebuild_from - 1)) & live) | set(leftover))
+    return {
+        "mode": mode,
+        "undo": span,
+        "rebuild_from": rebuild_from if mode == "rebuild" else None,
+        "rerun": rerun if mode == "rebuild" else [],
+        "remove": remove,
+        "undone_objects": sorted(
+            {n for i in popped for n in diffs.get(i, (set(), set()))[0]} & live
+        ),
+        "leftover": leftover,
+        "missing": missing,
+        "unreached": [r.index for r in unreached],
+        "reasons": reasons,
+    }
+
+
+def restore_summary(plan: dict[str, Any], user_dependents: list[str]) -> str:
+    """The dry run in words, for the panel's confirm dialog and the reply."""
+    lines = []
+    if plan.get("undo"):
+        lines.append(f"Undo {plan['undo']} transaction(s) natively.")
+    if plan["mode"] == "rebuild":
+        steps = plan["rerun"]
+        span = f"{steps[0]}..{steps[-1]}" if len(steps) > 1 else str(steps[0]) if steps else "-"
+        lines.append(
+            f"Then rebuild from step {plan['rebuild_from']}: remove "
+            f"{len(plan['remove'])} object(s) and re-run step(s) {span}."
+        )
+    elif plan["remove"]:
+        lines.append(
+            f"Then remove {len(plan['remove'])} object(s) directly: {', '.join(plan['remove'])}."
+        )
+    if plan["mode"] == "partial":
+        lines.append("Property changes those steps made cannot be restored.")
+    if user_dependents:
+        lines.append(
+            f"Your own object(s) {', '.join(user_dependents)} depend on what goes away and "
+            "would break."
+        )
+    if not lines:
+        lines.append("Nothing to undo.")
+    return " ".join(lines)

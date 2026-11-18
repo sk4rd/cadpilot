@@ -731,14 +731,22 @@ Review loop (the point of the panel: plan, release, review, fix):
                 authored against step `index` existing). params.reason is
                 logged. Reject never stops at accepted steps: it is the
                 deliberate act of destruction
-  update        edit a PLANNED/FAILED step without running it: params merge
-                top-level (obj_properties is replaced wholesale — send the
-                full dict), params.label renames the row. params.label alone
+  drop          forget done step `index` WITHOUT touching the model: the
+                user undid it (Ctrl+Z) or deleted its objects, and this
+                accepts that (a rollback or replay would re-create it).
+                Refused for a step that is still in the model unless
+                force=true. `status` lists such steps under `stale`, and
+                `drift` is true while any exist
+  update        edit a PLANNED/FAILED step without running it: params
+                deep-merge (send only what changes; a null value removes
+                the key; the reply's `replaced` lists the keys whose values
+                changed), params.label renames the row. params.label alone
                 also renames a DONE step (a label is presentation, not
                 history: it is the only way to fix a wrong row without
                 re-running the step)
   reexecute     roll back to just before `index`, then run it with `params`
-                merged in (params.label renames the step). The planned tail
+                deep-merged in, like update (params.label renames the step;
+                `replaced` lists what changed). The planned tail
                 survives (reject drops it), but the DONE steps after `index`
                 are rolled back to planned and must be released again — the
                 reply says so in `rewound` and `warning`, and a re-run needs a
@@ -747,12 +755,16 @@ Review loop (the point of the panel: plan, release, review, fix):
 Housekeeping:
   rollback_to   put the model back at step `index` (0 = before every recorded
                 step); records stay and go back to planned. The undo result is
-                VERIFIED, not assumed: when the undo stack cannot reach the
-                target (or manual edits sit interleaved on it) the journal
-                REBUILDS instead — removes what the journal built, re-runs
-                steps 1..index — and reports `restored: native | rebuild |
-                partial` plus `warnings`; objects that predate the journal
-                are never removed
+                VERIFIED, not assumed: what the undo stack cannot reach is
+                removed directly when those steps only created objects, and
+                otherwise REBUILT from the first wrong step (never from step
+                1); the reply says `restored: native | removed | rebuild |
+                partial`, `rebuild_from`, `removed`, `notes` and `warnings`.
+                params.dry_run=true returns that plan without acting (also for
+                reject). Objects that predate the journal are never removed,
+                and when the user's own objects depend on what would go away
+                (`user_dependents`) rollback and reject refuse without
+                force=true
   insert        add steps (params.steps) after `index`; the planned tail is
                 insert/append-only — to change history, reject and re-plan
   clear_plan    drop not-yet-executed steps (never touches the model)
@@ -767,7 +779,8 @@ Housekeeping:
                 records
 
 Every mutating action's reply carries a compact `journal` snapshot (counts,
-drift flag, per-step index/state/label/error/accepted) — one call tells you
+drift flag, per-step index/state/label/error/accepted, and `stale` for a done
+step the user undid or deleted) — one call tells you
 the new state; use status only when you need the full params.
 
 `rollback_to`/`reexecute`/`replay` refuse to cross a non-atomic step unless

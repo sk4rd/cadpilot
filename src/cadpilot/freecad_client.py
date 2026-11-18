@@ -131,6 +131,11 @@ class FreeCADConnection:
         self._late_completions: list[dict[str, Any]] = []
         self._late_lock = threading.Lock()
         self.server = self._make_proxy(timeout)
+        # What the user changed in FreeCAD, as the addon's replies carried it
+        # ({document: [event, ...]}), until the tool layer hands it to the model.
+        self._user_changes: dict[str, list[dict[str, Any]]] = {}
+        self._changes_lock = threading.Lock()
+        self._call = threading.local()
 
     def _make_proxy(self, timeout: float) -> xmlrpc.client.ServerProxy:
         return xmlrpc.client.ServerProxy(
@@ -177,7 +182,9 @@ class FreeCADConnection:
         warned = False
         while True:
             try:
-                return self._invoke_once(method, *args)
+                result = self._invoke_once(method, *args)
+                self._capture_user_changes(result)
+                return result
             except ConnectionRefusedError as e:
                 if time.monotonic() >= deadline:
                     raise ConnectionRefusedError(
@@ -265,6 +272,28 @@ class FreeCADConnection:
                 if shot:
                     res["screenshot"] = shot
             return res
+
+    def _capture_user_changes(self, result: Any) -> None:
+        if not isinstance(result, dict) or "user_changes" not in result:
+            return
+        changes = result.pop("user_changes") or {}
+        self._call.carried = True
+        with self._changes_lock:
+            for doc, events in changes.items():
+                self._user_changes.setdefault(str(doc), []).extend(events or [])
+
+    def begin_tool_call(self) -> None:
+        """Start one tool call: did any reply in it carry the user's changes?"""
+        self._call.carried = False
+
+    def replies_carried_user_changes(self) -> bool:
+        return bool(getattr(self._call, "carried", False))
+
+    def take_user_changes(self) -> dict[str, list[dict[str, Any]]]:
+        """The user's changes the replies have carried so far, and forget them."""
+        with self._changes_lock:
+            out, self._user_changes = self._user_changes, {}
+        return out
 
     def disconnect(self) -> None:
         # Transport.close() clears cached HTTP connections if one was opened.

@@ -648,3 +648,76 @@ def test_persistence_failure_degrades_to_a_warning(fake_freecad, isolated_home, 
     assert "created" in text  # the mutation itself succeeded
     assert "could not be persisted" in text  # the persistence loss is visible
     assert sess.step_count == 1
+
+
+# --- the session is a view of the journal -------------------------------------
+
+
+class _Journal:
+    """A journal_op stand-in that answers like the addon's journal."""
+
+    def __init__(self, fake):
+        self.fake = fake
+        self.records: list[dict] = []
+        self.rolled_back_to: int | None = None
+        fake.journal_op = self.journal_op
+
+    def commit(self, operation, name):
+        index = len(self.records) + 1
+        self.records.append(
+            {
+                "index": index,
+                "state": "done",
+                "operation": operation,
+                "label": name,
+                "executable": True,
+                "transaction": f"CADPilot: #{index} {operation} {name}",
+            }
+        )
+
+    def journal_op(self, doc_name, spec):
+        self.fake._record("journal_op", doc_name, spec)
+        op = spec.get("operation")
+        if op == "user_changes":
+            last = self.records[-1] if self.records else None
+            return {"success": True, "count": len(self.records), "last_record": last}
+        if op == "status":
+            return {"success": True, "count": len(self.records), "steps": self.records}
+        if op == "rollback_to":
+            self.rolled_back_to = spec["index"]
+            for r in self.records:
+                if r["index"] > spec["index"]:
+                    r.update(state="planned", transaction="")
+            return {"success": True, "undone": 2, "restored": "native", "removed": []}
+        return {"success": True}
+
+
+def test_a_session_step_records_its_journal_step_and_undo_entry(fake_freecad, isolated_home):
+    journal = _Journal(fake_freecad)
+    sess = _start_session(fake_freecad)
+    journal.commit("create_object", "Box")
+    fake_freecad.result_overrides["create_object"] = {"success": True, "object_name": "Box"}
+    cad_operation(fake_freecad, "create_object", "Doc", obj_type="Part::Box", obj_name="Box")
+    step = sess.steps[0]
+    assert step.journal_index == 1
+    assert step.transaction == "CADPilot: #1 create_object Box"
+
+
+def test_session_rollback_goes_through_the_journal_by_transaction_name(fake_freecad, isolated_home):
+    journal = _Journal(fake_freecad)
+    sess = _start_session(fake_freecad)
+    for name in ("A", "B"):
+        journal.commit("create_object", name)
+        cad_operation(fake_freecad, "create_object", "Doc", obj_type="Part::Box", obj_name=name)
+    # The panel ran a step the session never saw, and the user rejected an
+    # earlier one: indices moved, transaction names did not.
+    journal.commit("create_object", "FromThePanel")
+    journal.records.insert(0, {"index": 0, "state": "done", "operation": "variables"})
+    for i, r in enumerate(journal.records, 1):
+        r["index"] = i
+    resp = session_rollback_operation(fake_freecad, 1)
+    payload = _json(resp)
+    assert payload["success"] is True and payload["journal_step"] == 2
+    assert journal.rolled_back_to == 2
+    assert [s.step_number for s in sess.steps] == [1]
+    assert not any(c[0] == "undo_transactions" for c in fake_freecad.calls)

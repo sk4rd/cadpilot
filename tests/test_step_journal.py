@@ -494,10 +494,15 @@ def test_set_accepted_only_marks_done_steps():
 def test_update_planned_merges_params_and_label():
     rec = sj.build_record(_step(), 1, sj.STATE_PLANNED, OPS)
     rec.params = {"obj_name": "Box", "obj_properties": {"Length": 10}}
-    assert sj.update_planned([rec], 1, {"obj_properties": {"Length": 20}}, "bigger") is rec
-    assert rec.params["obj_properties"] == {"Length": 20}  # replaced wholesale
-    assert rec.params["obj_name"] == "Box"  # top-level merge
+    rec.params = {"obj_name": "Box", "obj_properties": {"Length": 10, "Width": 4}}
+    out = sj.update_planned([rec], 1, {"obj_properties": {"Length": 20}}, "bigger")
+    assert out == (rec, ["obj_properties.Length"])
+    assert rec.params["obj_properties"] == {"Length": 20, "Width": 4}  # deep merge
+    assert rec.params["obj_name"] == "Box"
     assert rec.label == "bigger"
+    out = sj.update_planned([rec], 1, {"obj_properties": {"Length": 5}}, replace=True)
+    assert out == (rec, ["obj_name", "obj_properties"])
+    assert rec.params == {"obj_properties": {"Length": 5}}
 
 
 def test_update_planned_rejects_done_and_unknown():
@@ -526,20 +531,26 @@ def test_plan_rollback_reports_accepted():
     assert sj.plan_rollback(recs, 0)["accepted"] == [2]
 
 
-def test_invalidates_plan_only_when_objects_changed():
+def test_only_a_mutating_execute_code_drops_the_plan():
     """A read-only execute_code must not destroy a pending plan.
 
     Recording an execute_code commit used to drop the planned tail
-    unconditionally, so merely inspecting the model silently deleted the plan
-    the user was about to release.
+    unconditionally, and then whenever the object set differed from the
+    journal's last snapshot, which an object the user added by hand also
+    made true. The snippet's own ``changed`` flag decides.
     """
-    recs = [sj.build_record(_step(), 1, sj.STATE_DONE, OPS)]
-    recs[0].objects_after = ["Box"]
-    recs += [sj.build_record(_step("pad"), 2, sj.STATE_PLANNED, OPS)]
-
-    assert sj.invalidates_plan(recs, ["Box"]) is False  # inspection only
-    assert sj.invalidates_plan(recs, ["Box", "Cut"]) is True  # model moved
-    assert sj.invalidates_plan([], ["Box"]) is False  # nothing to compare against
+    tree = ast.parse((_ADDON / "rpc_server" / "step_engine.py").read_text(encoding="utf-8"))
+    func = next(
+        n
+        for n in ast.walk(tree)
+        if isinstance(n, ast.FunctionDef) and n.name == "append_execute_code"
+    )
+    guards = [
+        n
+        for n in ast.walk(func)
+        if isinstance(n, ast.If) and any("drop_planned" in ast.unparse(s) for s in n.body)
+    ]
+    assert guards and all(ast.unparse(g.test) == "changed" for g in guards)
 
 
 # --- manual-edit sync (pure half) -------------------------------------------
@@ -602,7 +613,7 @@ def test_tracked_objects_feature_claims_builder_keys_even_when_unpassed():
     props = sj.tracked_objects(recs)["Pad"]["props"]
     assert props["Length"] == (1, "length", None)
     assert props["Reversed"] == (1, "reversed", None)
-    assert props["Midplane"] == (1, "midplane", None)
+    assert props["Midplane"] == (1, "pad_type", None)  # one rule with Type and SideType
 
 
 def test_tracked_objects_variables_claims_the_sheet_even_when_idempotent():

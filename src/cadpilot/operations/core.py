@@ -1,3 +1,4 @@
+import contextlib
 import logging
 from typing import Any
 
@@ -63,6 +64,115 @@ def _set_last_doc(doc_name: str | None) -> None:
     global _last_doc_name
     if doc_name:
         _last_doc_name = doc_name
+
+
+# --- what the user changed in FreeCAD ------------------------------------------
+#
+# The addon records the user's own GUI work per document (values the journal
+# synced, Ctrl+Z/Ctrl+Y, objects added or deleted, Steps-panel buttons) and
+# hands it to the next RPC reply. This is the model's only view of it, so every
+# tool reply leads with it.
+
+USER_CHANGES_HEADING = "User changes since your last call"
+
+
+def _change_value(value: Any) -> str:
+    if value is None:
+        return "(unset)"
+    if isinstance(value, float):
+        return f"{value:g}"
+    return str(value)
+
+
+def _change_step(event: dict[str, Any]) -> str:
+    step = event.get("step")
+    if not step:
+        return ""
+    label = event.get("label")
+    return f"step {step}" + (f" ({label})" if label else "")
+
+
+def _change_line(event: dict[str, Any]) -> str:
+    kind = event.get("kind")
+    step = _change_step(event)
+    if kind == "edit":
+        old, new = _change_value(event.get("old")), _change_value(event.get("new"))
+        return f"{step}: {event.get('what')} {old} -> {new}"
+    if kind == "sketch":
+        return f"{step}: edited sketch {event.get('object')} by hand ({event.get('detail')})"
+    if kind in ("undo", "redo"):
+        verb = "Ctrl+Z undid" if kind == "undo" else "Ctrl+Y redid"
+        what = step or f"their own edit '{event.get('transaction') or '?'}'"
+        bits = []
+        if event.get("removed"):
+            bits.append("removed " + ", ".join(event["removed"]))
+        if event.get("added"):
+            bits.append("restored " + ", ".join(event["added"]))
+        line = f"{verb} {what}" + (f" ({'; '.join(bits)})" if bits else "")
+        if step and kind == "undo":
+            line += (
+                f" - the model no longer has it; step_control drop {event['step']} accepts "
+                "that, a rollback or replay would re-create it"
+            )
+        return line
+    if kind == "added":
+        pairs = zip(event.get("objects") or [], event.get("types") or [], strict=False)
+        return "added " + ", ".join(f"{n} ({t})" if t else n for n, t in pairs)
+    if kind == "removed":
+        return "deleted " + ", ".join(event.get("objects") or [])
+    if kind == "stale":
+        return (
+            f"{step} is no longer in the model ({event.get('detail')}); step_control drop "
+            f"{event.get('step')} accepts that"
+        )
+    if kind == "panel":
+        state = "" if event.get("ok", True) else " - it failed"
+        detail = f" ({event['detail']})" if event.get("detail") else ""
+        return f"Steps panel: {event.get('action')}{detail}{state}"
+    return str(event)
+
+
+def format_user_changes(changes: dict[str, list[dict[str, Any]]]) -> str:
+    """The block every tool reply leads with when the user changed something.
+
+    Compact on purpose (one line per change), and explicit about what the
+    journal already did, because the model's next move depends on it: synced
+    values are in the step's parameters, so a re-run keeps them.
+    """
+    docs = {doc: events for doc, events in (changes or {}).items() if events}
+    if not docs:
+        return ""
+    lines = [f"## {USER_CHANGES_HEADING}"]
+    for doc, events in docs.items():
+        lines.append(f"Document '{doc}':")
+        lines.extend(f"- {_change_line(e)}" for e in events)
+    if any(e.get("kind") == "edit" for events in docs.values() for e in events):
+        lines.append(
+            "The step journal already holds the edited values: build on them and do not "
+            "set them back."
+        )
+    return "\n".join(lines)
+
+
+def user_changes_text(freecad: FreeCADConnection, doc_name: str | None = None) -> str:
+    """Collect what the user changed for this tool call's reply, formatted.
+
+    The addon attaches the changes to journal replies; for any other call one
+    explicit fetch picks them up. Never raises: a failed fetch only means the
+    changes wait for the next call.
+    """
+    try:
+        if not freecad.replies_carried_user_changes():
+            target = doc_name or get_last_doc_name()
+            if not target:
+                target = next(iter(freecad.list_documents() or []), None)
+            if target:
+                # Any open document routes the request; the reply covers all.
+                freecad.journal_op(target, {"operation": "user_changes"})
+        return format_user_changes(freecad.take_user_changes())
+    except Exception as e:
+        logger.debug(f"user changes unavailable: {e}")
+        return ""
 
 
 def create_document_operation(
@@ -204,6 +314,7 @@ def execute_code_operation(
                         "step_control(doc_name=…) instead)"
                     )
                 else:
+                    record = _journal_record(freecad, sess.doc_name, "execute_code") or {}
                     step = sess.add_step(
                         "execute_code",
                         f"execute_code: {code[:80]}",
@@ -215,6 +326,8 @@ def execute_code_operation(
                         # always reported a mismatch.
                         objects_after=_normalize_object_names(res.get("objects", [])),
                         atomic=True,
+                        journal_index=record.get("index"),
+                        transaction=str(record.get("transaction") or ""),
                     )
                     persist_note = persist_session(sess)
                     step_note = (
@@ -525,6 +638,27 @@ def _auto_connectivity_audit(freecad: FreeCADConnection, doc_name: str) -> str:
         return ""
 
 
+def _journal_record(
+    freecad: FreeCADConnection | None, doc_name: str, operation: str
+) -> dict[str, Any] | None:
+    """The addon journal's newest record, when it is the step just committed.
+
+    Its index and exact undo-entry name are what a session rollback goes by.
+    The same reply carries the user's changes, so the tool layer need not ask
+    again. None on an older addon or a mismatch.
+    """
+    if freecad is None:
+        return None
+    try:
+        res = freecad.journal_op(doc_name, {"operation": "user_changes"})
+    except Exception:
+        return None
+    last = res.get("last_record") if isinstance(res, dict) and res.get("success") else None
+    if not isinstance(last, dict) or last.get("operation") != operation:
+        return None
+    return last
+
+
 def _record_step_if_tracked(
     operation: str,
     doc_name: str,
@@ -533,6 +667,7 @@ def _record_step_if_tracked(
     params_summary: str,
     summary: str,
     res: dict[str, Any],
+    freecad: FreeCADConnection | None = None,
 ) -> str:
     """Record a session step when the active session tracks this document.
 
@@ -544,6 +679,7 @@ def _record_step_if_tracked(
         return ""
     if sess.doc_name != doc_name:
         return f" [not recorded: active session '{sess.name}' tracks document '{sess.doc_name}']"
+    record = _journal_record(freecad, doc_name, operation) or {}
     step = sess.add_step(
         operation,
         description or default_desc,
@@ -556,9 +692,12 @@ def _record_step_if_tracked(
         # session rollback pop one transaction too many, and the object-set check
         # could not see it because only properties had moved.
         atomic=bool(res.get("undoable", res.get("transaction", True))),
+        journal_index=record.get("index"),
+        transaction=str(record.get("transaction") or ""),
     )
     persist_note = persist_session(sess)
-    return f" [step #{step.step_number} of session '{sess.name}']" + (
+    where = f", journal step {step.journal_index}" if step.journal_index else ""
+    return f" [step #{step.step_number} of session '{sess.name}'{where}]" + (
         f" {persist_note}" if persist_note else ""
     )
 
@@ -732,6 +871,7 @@ def cad_operation(
             params_summary,
             summary,
             res,
+            freecad=freecad,
         )
 
     if operation == "batch":
@@ -777,6 +917,9 @@ def session_start_operation(
     except Exception as e:
         logger.warning(f"session_start: could not read the document's objects: {e!s}")
     sess = new_session(name or f"Modeling {doc_name}", doc_name, initial_objects=initial)
+    with contextlib.suppress(Exception):
+        count = freecad.journal_op(doc_name, {"operation": "user_changes"}).get("count")
+        sess.journal_start = int(count) if count is not None else None
     set_current_session(sess)
     _set_last_doc(doc_name)
     persist_session(sess)
@@ -822,7 +965,7 @@ def session_status_operation(freecad: FreeCADConnection) -> ToolResponse:
     # The addon keeps its own step journal for the GUI panel, and the panel can
     # roll back and re-run steps without the MCP server — so the two logs drift
     # apart. Report that instead of silently trusting this one.
-    journal = _journal_snapshot(freecad, sess.doc_name) if doc_open else None
+    journal = _journal_view(freecad, sess) if doc_open else None
     journal_risks: list[str] = []
     # Only the journal-vs-undo-stack drift check is actionable: the journal
     # is document-lifetime (it counts pre-session work and read-only
@@ -830,10 +973,11 @@ def session_status_operation(freecad: FreeCADConnection) -> ToolResponse:
     # so the two step counts legitimately differ on nearly every document —
     # comparing them is a permanent false positive.
     if journal and journal.get("drift"):
+        gone = ", ".join(f"step {s['index']} ({s['reason']})" for s in journal.get("stale") or [])
         journal_risks.append(
-            "The addon step journal no longer matches FreeCAD's undo stack "
-            "(the model was undone or redone outside cad() — e.g. from the "
-            "CADPilot Steps panel or Ctrl+Z). Prefer step_control for rollback."
+            f"Journal step(s) are no longer in the model: {gone or 'see step_control status'}. "
+            "step_control drop accepts the user's change; a rollback or replay would "
+            "re-create them."
         )
 
     lines = [
@@ -842,8 +986,9 @@ def session_status_operation(freecad: FreeCADConnection) -> ToolResponse:
     if journal:
         lines.append(
             f"Addon journal: {journal.get('done', 0)} done, "
-            f"{journal.get('planned', 0)} planned"
-            + (" - drift from the undo stack (WARNING)" if journal.get("drift") else "")
+            f"{journal.get('planned', 0)} planned, {journal.get('session_steps', 0)} since "
+            "the session began"
+            + (" - steps no longer in the model (WARNING)" if journal.get("drift") else "")
         )
     if suggestions:
         lines.append("\n**Next steps:**")
@@ -932,6 +1077,9 @@ def session_rollback_operation(
                 "state_matches_log": None,
             }
         )
+    delegated = _session_rollback_via_journal(freecad, sess, to_step, force)
+    if delegated is not None:
+        return delegated
     # Read the addon journal BEFORE undoing: the panel can roll back / re-run
     # behind the session log's back, and an undo rewinds the journal too — so a
     # post-undo read would hide exactly the drift this check exists to catch.
@@ -1012,12 +1160,7 @@ def session_rollback_operation(
         current_names = _normalize_object_names(res.get("objects", []))
         state_matches = current_names == expected
         if not state_matches:
-            created = sorted(set(current_names) - set(expected))
-            warnings.append(
-                "Post-rollback object list differs from the recorded step fingerprint — the "
-                "document was likely edited outside cad(), or undo did not reach the target "
-                f"state. Still present but not expected: {created}."
-            )
+            warnings.append(_fingerprint_mismatch(current_names, expected))
     elif to_step == 0:
         warnings.append(
             "The session has no recorded starting object set (it predates that field, or the "
@@ -1050,6 +1193,116 @@ def session_rollback_operation(
             "display_text": head + (" WARNING: " + " ".join(warnings) if warnings else ""),
         }
     )
+
+
+def _fingerprint_mismatch(current: list[str], expected: list[str]) -> str:
+    extra = sorted(set(current) - set(expected))
+    missing = sorted(set(expected) - set(current))
+    return (
+        "Post-rollback object list differs from the recorded step fingerprint — the "
+        "document was likely edited outside cad(), or undo did not reach the target "
+        f"state. Still present but not expected: {extra}. Expected but missing: {missing}."
+    )
+
+
+def _session_rollback_via_journal(
+    freecad: FreeCADConnection, sess: Any, to_step: int, force: bool
+) -> ToolResponse | None:
+    """Roll the session back through the addon journal; None = cannot, count instead.
+
+    The journal checks the exact undo-entry names before popping, rebuilds what
+    the stack cannot reach, and stays reconciled. The session's own count could
+    not do any of that: once the panel or step_control had moved the undo
+    stack, popping "n session steps" undid the wrong ones. The target is the
+    journal record just before the first session step being removed, found by
+    its transaction name (indices shift when steps are rejected or dropped).
+    """
+    removed_steps = sess.steps[to_step:]
+    if not removed_steps or any(s.journal_index is None for s in removed_steps):
+        return None
+    status = _journal_status_rows(freecad, sess.doc_name)
+    if status is None:
+        return None
+    by_tx = {row["transaction"]: row["index"] for row in status if row.get("transaction")}
+    found = [by_tx[s.transaction] for s in removed_steps if s.transaction in by_tx]
+    warnings: list[str] = []
+    if not found:
+        removed = sess.truncate_to(to_step)
+        persist_session(sess)
+        return json_response(
+            {
+                "success": True,
+                "rolled_back_to": sess.step_count,
+                "undone_transactions": 0,
+                "removed_steps": [s.step_number for s in removed],
+                "warnings": [
+                    "None of these session steps is in the step journal any more (the user "
+                    "rejected, dropped or undid them), so only the session log was truncated."
+                ],
+            }
+        )
+    target = min(found) - 1
+    try:
+        res = freecad.journal_op(
+            sess.doc_name, {"operation": "rollback_to", "index": target, "force": force}
+        )
+    except Exception as e:
+        return text_response(f"Rollback failed: {e!s}")
+    if not res.get("success"):
+        return text_response(
+            f"Rollback refused by the step journal (journal step {target}): {res.get('error')}"
+        )
+    removed = sess.truncate_to(to_step)
+    # FreeCAD's redo would bring these transactions back behind the journal's
+    # back (its records are planned again); re-running them is the redo.
+    sess.redo_buffer = []
+    persist_session(sess)
+    warnings.extend(res.get("warnings") or [])
+    expected = (
+        list(sess.steps[to_step - 1].objects_after)
+        if to_step > 0
+        else (list(sess.initial_objects) if sess.initial_objects is not None else None)
+    )
+    state_matches = None
+    objects: list[str] = []
+    with contextlib.suppress(Exception):
+        objects = sorted(o["Name"] for o in freecad.get_objects(sess.doc_name))
+    if expected is not None and objects:
+        state_matches = objects == sorted(expected)
+        if not state_matches:
+            warnings.append(_fingerprint_mismatch(objects, expected))
+    restored = res.get("restored")
+    head = (
+        f"Rolled back to session step {sess.step_count} (journal step {target}, "
+        f"restored: {restored}). Removed: {[s.step_number for s in removed]}. They are "
+        f"planned steps in the journal again: step_control run_to re-runs them."
+    )
+    return json_response(
+        {
+            "success": True,
+            "rolled_back_to": sess.step_count,
+            "journal_step": target,
+            "undone_transactions": res.get("undone", 0),
+            "restored": restored,
+            "removed_objects": res.get("removed") or [],
+            "removed_steps": [s.step_number for s in removed],
+            "state_matches_log": state_matches,
+            "notes": res.get("notes") or [],
+            "warnings": warnings,
+            "display_text": head + (" WARNING: " + " ".join(warnings) if warnings else ""),
+        }
+    )
+
+
+def _journal_status_rows(freecad: FreeCADConnection, doc_name: str) -> list[dict] | None:
+    try:
+        res = freecad.journal_op(doc_name, {"operation": "status", "params": {"summary": True}})
+    except Exception:
+        return None
+    if not isinstance(res, dict) or not res.get("success"):
+        return None
+    rows = res.get("steps")
+    return rows if isinstance(rows, list) else None
 
 
 def session_redo_operation(freecad: FreeCADConnection, n: int = 1) -> ToolResponse:
@@ -1125,6 +1378,7 @@ _STEP_ACTIONS = (
     "reexecute",
     "accept",
     "reject",
+    "drop",
     "update",
     "insert",
     "replay",
@@ -1133,6 +1387,39 @@ _STEP_ACTIONS = (
     "reset",
     "status",
 )
+
+
+def _journal_view(freecad: FreeCADConnection, sess: Any) -> dict[str, Any] | None:
+    """The journal as session status shows it: counts, not the records.
+
+    The session is a view of the journal: steps run from the panel or with
+    step_control are journal steps of this session too, so the counts come
+    from the journal (records since the session began), and the full records
+    with their params, kilobytes per step, stay with step_control status.
+    """
+    res = _journal_snapshot(freecad, sess.doc_name)
+    if res is None:
+        return None
+    rows = res.get("records") or []
+    start = sess.journal_start or 0
+    # Read-only inspections are journal rows too, but not modeling steps.
+    mine = [
+        r
+        for r in rows
+        if r.get("index", 0) > start and r.get("state") == "done" and r.get("mutated", True)
+    ]
+    return {
+        "count": res.get("count", len(rows)),
+        "done": res.get("done", 0),
+        "planned": res.get("planned", 0),
+        "drift": bool(res.get("drift")),
+        "stale": res.get("stale") or [],
+        "session_steps": len(mine),
+        "recent": [
+            {"index": r.get("index"), "operation": r.get("operation"), "label": r.get("label")}
+            for r in mine[-5:]
+        ],
+    }
 
 
 def _journal_snapshot(freecad: FreeCADConnection, doc_name: str) -> dict[str, Any] | None:
@@ -1422,11 +1709,24 @@ def session_complete_operation(
         except Exception as e:
             save_warning = str(e)
 
+    steps = [f"{s.step_number}. {s.operation} — {s.description}" for s in sess.steps]
+    rows = _journal_status_rows(freecad, sess.doc_name) or []
+    journal_steps = [
+        f"{r['index']}. {r['operation']} — {r['label']}"
+        for r in rows
+        if r.get("index", 0) > (sess.journal_start or 0)
+        and r.get("state") == "done"
+        and r.get("executable")
+    ]
+    if len(journal_steps) > len(steps):
+        # Steps released from the panel or with step_control never reached the
+        # session log; the journal has every one of them.
+        steps = journal_steps
     try:
         pattern = add_pattern(
             name=sess.name,
             description=description or f"Modeling workflow for document '{sess.doc_name}'",
-            steps=[f"{s.step_number}. {s.operation} — {s.description}" for s in sess.steps],
+            steps=steps,
             tags=tags,
             source="session",
         )
@@ -1444,7 +1744,7 @@ def session_complete_operation(
         {
             "success": True,
             "session_id": sess.session_id,
-            "steps_recorded": sess.step_count,
+            "steps_recorded": len(steps),
             "pattern_id": pattern["pattern_id"] if pattern else None,
             "saved_file": saved_file,
             "save_warning": save_warning,
@@ -1735,6 +2035,7 @@ def align_shapes_operation(
             f"'{target_obj_name}' {target_element}[{target_element_index}]",
             f"aligned '{obj_name}' to '{target_obj_name}' ({mode})",
             res,
+            freecad=freecad,
         )
         if step_note:
             res = {**res, "step_note": step_note}
@@ -1792,6 +2093,7 @@ def set_anchors_operation(
             f"'{obj_name}' anchors={list(anchors.keys())}",
             summary,
             res,
+            freecad=freecad,
         )
     response = json_response({"summary": summary, **res})
     return response
@@ -1831,6 +2133,7 @@ def assemble_operation(
             f"{len(mates)} mates tol={tolerance}",
             summary,
             res,
+            freecad=freecad,
         )
     response = json_response({"summary": summary, **res})
     return response

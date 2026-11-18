@@ -63,7 +63,13 @@ _SCREENSHOT_TAIL = ("screenshot", "doc_name")
 # that rule a method whose wire call fails to parse (a dynamic name, a splat)
 # would silently drop out of every check below and narrow the contract back to
 # "whatever the extractor happens to see".
-_NON_WIRE_METHODS = {"disconnect"}
+_NON_WIRE_METHODS = {
+    "disconnect",
+    # Bookkeeping for the user-change log the addon's replies carry.
+    "begin_tool_call",
+    "replies_carried_user_changes",
+    "take_user_changes",
+}
 
 
 @dataclass

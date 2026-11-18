@@ -23,7 +23,9 @@ in :func:`_status` surfaces the case where someone undid work by hand.
 from __future__ import annotations
 
 import contextlib
+import json
 import math
+import threading
 import time
 from typing import Any
 
@@ -138,7 +140,11 @@ def _undo_cap() -> int:
 
 
 def _undo_trust(
-    doc, records: list[sj.StepRecord], upto_index: int, undo_count: int
+    doc,
+    records: list[sj.StepRecord],
+    upto_index: int,
+    undo_count: int,
+    skip: set[int] | frozenset[int] = frozenset(),
 ) -> tuple[int, str]:
     """How much of this span the undo stack can revert, and why it falls short.
 
@@ -160,7 +166,7 @@ def _undo_trust(
     guessing between a reopen and an off-journal edit.
     """
     names = _real_undo_names(doc)
-    span = sj.undo_trust_span(names, records, upto_index, undo_count)
+    span = sj.undo_trust_span(names, records, upto_index, undo_count, skip)
     if span >= undo_count:
         return span, ""
     if span == 0:
@@ -187,6 +193,30 @@ def _object_names(doc) -> list[str]:
         return sorted(o.Name for o in doc.Objects)
     except Exception:
         return []
+
+
+def stale_steps(doc, records: list[sj.StepRecord] | None = None) -> list[dict[str, Any]]:
+    """Done steps whose work is gone from the model (see sj.stale_steps)."""
+    return sj.stale_steps(
+        read_journal(doc) if records is None else records,
+        _real_undo_names(doc),
+        _real_redo_names(doc),
+        _object_names(doc),
+    )
+
+
+def _stale_refusal(stale: list[dict[str, Any]], upto: int, verb: str) -> str:
+    """Why ``verb`` must not silently re-create steps the user took out, or ""."""
+    hit = [s for s in stale if s["index"] <= upto]
+    if not hit:
+        return ""
+    what = "; ".join(f"step {s['index']}: {s['reason']}" for s in hit)
+    first = hit[0]["index"]
+    return (
+        f"{verb} would re-create work the user took out of the model ({what}). Accept the "
+        f"user's change with drop (step_control drop {first}), or pass force=true to "
+        "re-create it"
+    )
 
 
 def _transaction_name(rec: sj.StepRecord) -> str:
@@ -269,6 +299,10 @@ class _EngineQuiet:
 
     def __enter__(self) -> _EngineQuiet:
         global _ENGINE_ACTIVE
+        if _ENGINE_ACTIVE == 0:
+            # A user edit still waiting for its deferred read must be recorded
+            # against the state the user left, not the one this window writes.
+            flush_deferred_syncs()
         _ENGINE_ACTIVE += 1
         return self
 
@@ -284,6 +318,54 @@ class _EngineQuiet:
         # step's obj_properties — the exact bleed this window exists to prevent).
         _ENGINE_ACTIVE = max(0, _ENGINE_ACTIVE - 1)
         return False
+
+
+_SKETCH_PROPS = ("Constraints", "ExpressionEngine", "Geometry")
+_DEFERRED: dict[tuple[str, str], bool] = {}
+_FLUSH_SCHEDULED = False
+
+
+def _defer_sketch_sync(doc_name: str, obj_name: str) -> None:
+    global _FLUSH_SCHEDULED
+    _DEFERRED[(doc_name, obj_name)] = True
+    if _FLUSH_SCHEDULED:
+        return
+    try:
+        from PySide import QtCore
+    except ImportError:
+        flush_deferred_syncs()
+        return
+    _FLUSH_SCHEDULED = True
+    QtCore.QTimer.singleShot(0, _flush_from_timer)
+
+
+def _flush_from_timer() -> None:
+    global _FLUSH_SCHEDULED
+    _FLUSH_SCHEDULED = False
+    if _ENGINE_ACTIVE > 0:
+        # A nested event loop inside an engine window; the window's exit
+        # leaves the edit pending and the next window (or tick) settles it.
+        if _DEFERRED:
+            _defer_sketch_sync(*next(iter(_DEFERRED)))
+        return
+    flush_deferred_syncs()
+
+
+def flush_deferred_syncs() -> None:
+    """Run the sketch syncs that user edits queued (see _defer_sketch_sync)."""
+    if not _DEFERRED:
+        return
+    pending = list(_DEFERRED)
+    _DEFERRED.clear()
+    observer = getattr(FreeCAD, _OBSERVER_ATTR, None)
+    if observer is None:
+        return
+    for doc_name, obj_name in pending:
+        with contextlib.suppress(Exception):
+            doc = FreeCAD.getDocument(doc_name)
+            obj = doc.getObject(obj_name)
+            if obj is not None:
+                observer.sync_sketch(doc, obj)
 
 
 def engine_quiet() -> _EngineQuiet:
@@ -387,6 +469,22 @@ def _stack_op(doc, n: int, undo: bool) -> dict[str, Any]:
     }
 
 
+def commit_transaction(doc) -> None:
+    """Commit, and close FreeCAD's application-wide active transaction too.
+
+    A transaction that recorded no change commits nothing and leaves its name
+    active, so the user's next change made without a transaction of its own
+    (a console edit, a script) was filed under CADPilot's name and left open.
+    """
+    doc.commitTransaction()
+    with contextlib.suppress(Exception):
+        active = FreeCAD.getActiveTransaction()
+        # Only our own: the user may be inside a sketch edit in another
+        # document, whose transaction must not be committed under them.
+        if active and str(active[0]).startswith(TX_PREFIX):
+            FreeCAD.closeActiveTransaction(False, int(active[1]))
+
+
 # --- recording ---------------------------------------------------------------
 
 
@@ -417,12 +515,15 @@ def record_commit(
         # position — slicing from planned_tail_start would remove nothing and
         # a stale plan would survive the commit.
         sj.drop_planned(records)
+        params = dict(params or {})
+        if operation == "sketch" or operation in sj.SKETCH_EDIT_OPS:
+            _note_sketch_signature(doc, params, objects_before or [], objects_after or [])
         rec = sj.StepRecord(
             index=len(records) + 1,
             state=sj.STATE_DONE,
             operation=operation,
             label=label or operation,
-            params=dict(params or {}),
+            params=params,
             transaction=transaction,
             atomic=atomic,
             executable=operation in EXECUTABLE_OPS if executable is None else executable,
@@ -506,9 +607,10 @@ def append_execute_code(
         records = read_journal(doc)
         after = _object_names(doc)
         # A read-only execute_code — inspecting the model, the common case —
-        # must NOT destroy a pending plan; only a call that actually moved the
-        # object set invalidates it (see sj.invalidates_plan).
-        if sj.invalidates_plan(records, after):
+        # must NOT destroy a pending plan. The snippet's own undo entry is the
+        # test: comparing object sets against the journal's last snapshot also
+        # counted every object the USER had added since, and dropped the plan.
+        if changed:
             sj.drop_planned(records)
         # The inspection is APPENDED at the very end, even behind a pending
         # plan. Inserting it before the tail shifted every planned step's
@@ -649,7 +751,13 @@ def _execute_one(doc, operation: str, params: dict[str, Any]) -> dict[str, Any]:
     if operation in FEATURE_TYPES:
         spec = {"type": operation, "base": params.get("obj_name"), **props}
         try:
-            return {"success": True, "object_name": create_feature_gui(doc, spec).Name}
+            feat = create_feature_gui(doc, spec)
+            if params.get("live_sketch"):
+                target = doc.getObject(str(params.get("obj_name") or ""))
+                if getattr(feat, "TypeId", "") == "Sketcher::SketchObject":
+                    target = feat
+                _restore_live_sketch(doc, target, params["live_sketch"])
+            return {"success": True, "object_name": feat.Name}
         except Exception as e:
             return {"success": False, "error": f"{type(e).__name__}: {e}"}
     if operation == "set_anchors":
@@ -793,11 +901,14 @@ def _run_record_locked(doc, records: list[sj.StepRecord], rec: sj.StepRecord) ->
         return res
 
     rec.state = sj.STATE_DONE
+    rec.stale = ""
     rec.transaction = tx
     rec.objects_before = before
     rec.objects_after = _object_names(doc)
     rec.error = ""
     rec.result = str(res.get("object_name") or "")[:200]
+    if rec.operation == "sketch" or rec.operation in sj.SKETCH_EDIT_OPS:
+        _note_sketch_signature(doc, rec.params, rec.objects_before, rec.objects_after)
     write_journal(doc, records)
     logger.info(
         "committed transaction %r (%d objects, %d journal records)",
@@ -805,7 +916,7 @@ def _run_record_locked(doc, records: list[sj.StepRecord], rec: sj.StepRecord) ->
         len(rec.objects_after),
         len(records),
     )
-    doc.commitTransaction()
+    commit_transaction(doc)
     with _EngineQuiet(), contextlib.suppress(Exception):
         doc.recompute()
     # Self-correction for a re-run whose op ended up changing nothing (an
@@ -830,7 +941,7 @@ def _run_record_locked(doc, records: list[sj.StepRecord], rec: sj.StepRecord) ->
 # --- op dispatch -------------------------------------------------------------
 
 
-def apply_op(doc, spec: dict[str, Any]) -> dict[str, Any]:
+def apply_op(doc, spec: dict[str, Any], deliver: bool = True) -> dict[str, Any]:
     """Single entry point for the panel and the RPC handler.
 
     Wraps :func:`_apply_op` so every journal operation — however it returns —
@@ -840,9 +951,15 @@ def apply_op(doc, spec: dict[str, Any]) -> dict[str, Any]:
     Every mutating result carries a compact ``journal`` snapshot, so a caller
     (the MCP client especially) sees the resulting state in the same call and
     does not need a follow-up status round-trip.
+
+    ``deliver`` hands the caller what the user changed since the last delivery
+    (``user_changes``, every document). The RPC handler is Claude; the panel
+    passes False, because its own button presses must not swallow the record
+    Claude is owed.
     """
     operation = str(spec.get("operation") or "")
     started = time.monotonic()
+    flush_deferred_syncs()
     try:
         result = _apply_op(doc, spec)
     finally:
@@ -851,23 +968,49 @@ def apply_op(doc, spec: dict[str, Any]) -> dict[str, Any]:
         logger.info("journal %s finished in %.1fms", operation, (time.monotonic() - started) * 1000)
     if not result.get("success"):
         logger.warning("journal %s failed: %s", operation, result.get("error"))
-    if operation != "status":
+    if operation not in ("status", "user_changes"):
         with contextlib.suppress(Exception):
             result["journal"] = _compact_journal(doc)
+    if deliver:
+        changes = take_user_changes()
+        if changes:
+            result["user_changes"] = changes
     return result
+
+
+def note_panel_action(doc, spec: dict[str, Any], result: dict[str, Any] | None) -> None:
+    """Tell Claude about a Steps-panel button the user pressed."""
+    res = result or {}
+    detail = ""
+    if res.get("restored"):
+        detail = f"restored: {res['restored']}"
+    removed = res.get("removed") or []
+    if removed:
+        detail = (detail + "; " if detail else "") + "removed " + ", ".join(removed)
+    if not res.get("success", False) and res.get("error"):
+        detail = str(res["error"])[:200]
+    note_user_change(
+        doc.Name,
+        {
+            "kind": "panel",
+            "action": sj.panel_action_text(spec),
+            "ok": bool(res.get("success")),
+            "detail": detail,
+        },
+        panel=False,
+    )
 
 
 def _compact_journal(doc) -> dict[str, Any]:
     """The steps list without params — small enough to attach to every reply."""
     records = read_journal(doc)
-    names = _undo_names(doc)
-    last = sj.last_atomic_done(records)
+    stale = {s["index"]: s["reason"] for s in stale_steps(doc, records)}
     return {
         "count": len(records),
         "done": sj.done_count(records),
         "planned": sj.pending_count(records),
         "accepted": sum(1 for r in records if r.accepted),
-        "drift": bool(last and last.transaction not in names),
+        "drift": bool(stale),
         "steps": [
             {
                 "index": r.index,
@@ -876,6 +1019,8 @@ def _compact_journal(doc) -> dict[str, Any]:
                 "label": r.label,
                 "accepted": r.accepted,
                 **({"error": r.error} if r.error else {}),
+                **({"user_edited": True} if (r.params or {}).get("user_edited") else {}),
+                **({"stale": stale[r.index]} if r.index in stale else {}),
             }
             for r in records
         ],
@@ -888,6 +1033,26 @@ def _apply_op(doc, spec: dict[str, Any]) -> dict[str, Any]:
 
     if operation == "status":
         return _status(doc, records, spec)
+    if operation == "user_changes":
+        # Nothing to do here: apply_op attaches the changes to every reply.
+        # The last record is what a session step needs to know which journal
+        # step (and which undo entry) the call it just made became.
+        last = records[-1] if records else None
+        return {
+            "success": True,
+            "document": doc.Name,
+            "count": len(records),
+            "last_record": (
+                {
+                    "index": last.index,
+                    "state": last.state,
+                    "operation": last.operation,
+                    "transaction": last.transaction,
+                }
+                if last is not None
+                else None
+            ),
+        }
     if operation == "set_plan":
         steps = list(spec.get("steps") or [])
         # A planned snippet MUST carry its code: op name alone would be accepted
@@ -923,7 +1088,13 @@ def _apply_op(doc, spec: dict[str, Any]) -> dict[str, Any]:
     if operation == "run_to":
         return _run_steps(doc, records, limit=None, upto=int(spec.get("index") or 0))
     if operation == "rollback_to":
-        return _rollback(doc, records, int(spec.get("index") or 0), bool(spec.get("force")))
+        return _rollback(
+            doc,
+            records,
+            int(spec.get("index") or 0),
+            bool(spec.get("force")),
+            bool((spec.get("params") or {}).get("dry_run") or spec.get("dry_run")),
+        )
     if operation == "reexecute":
         return _reexecute(
             doc,
@@ -931,7 +1102,33 @@ def _apply_op(doc, spec: dict[str, Any]) -> dict[str, Any]:
             int(spec.get("index") or 0),
             spec.get("params") or {},
             bool(spec.get("force")),
+            bool(spec.get("replace")),
         )
+    if operation == "drop":
+        index = int(spec.get("index") or 0)
+        stale = {s["index"]: s for s in stale_steps(doc, records)}
+        rec = next((r for r in records if r.index == index and r.state == sj.STATE_DONE), None)
+        if rec is None:
+            return {"success": False, "error": f"no done step {index} to drop"}
+        if index not in stale and not spec.get("force"):
+            return {
+                "success": False,
+                "error": (
+                    f"step {index} is still in the model; drop only forgets a step the user "
+                    "undid or deleted (pass force=true to forget it anyway, or reject it to "
+                    "undo it)"
+                ),
+            }
+        sj.drop_step(records, index)
+        write_journal(doc, records)
+        logger.info("dropped step %d (%s)", index, rec.label)
+        return {
+            "success": True,
+            "dropped": index,
+            "label": rec.label,
+            "reason": stale.get(index, {}).get("reason", "forced"),
+            "count": len(records),
+        }
     if operation == "accept":
         rec = sj.set_accepted(
             records, int(spec.get("index") or 0), bool((spec.get("params") or {}).get("on", True))
@@ -953,11 +1150,15 @@ def _apply_op(doc, spec: dict[str, Any]) -> dict[str, Any]:
             int(spec.get("index") or 0),
             bool(spec.get("force")),
             str((spec.get("params") or {}).get("reason") or ""),
+            bool((spec.get("params") or {}).get("dry_run") or spec.get("dry_run")),
         )
     if operation == "update":
         params = dict(spec.get("params") or {})
         label = str(params.pop("label", "") or "")
-        rec = sj.update_planned(records, int(spec.get("index") or 0), params, label)
+        updated = sj.update_planned(
+            records, int(spec.get("index") or 0), params, label, bool(spec.get("replace"))
+        )
+        rec, replaced = updated if updated is not None else (None, [])
         if rec is None and label and not params:
             # A label is presentation, not history: renaming a DONE step is a
             # legitimate fix of a wrong row, and it cannot invalidate the step's
@@ -973,7 +1174,7 @@ def _apply_op(doc, spec: dict[str, Any]) -> dict[str, Any]:
                 ),
             }
         write_journal(doc, records)
-        return {"success": True, "index": rec.index, "label": rec.label}
+        return {"success": True, "index": rec.index, "label": rec.label, "replaced": replaced}
     if operation == "insert":
         steps = list(spec.get("steps") or (spec.get("params") or {}).get("steps") or [])
         if not steps:
@@ -1026,22 +1227,18 @@ def _apply_op(doc, spec: dict[str, Any]) -> dict[str, Any]:
 def _status(
     doc, records: list[sj.StepRecord], spec: dict[str, Any] | None = None
 ) -> dict[str, Any]:
-    names = _undo_names(doc)
-    # Anchor on the last ATOMIC step: a trailing non-atomic execute_code record
-    # carries no transaction, so using the last completed record outright would
-    # compare "" against the undo stack and always report clean.
-    last = sj.last_atomic_done(records)
-    # The last executed step's transaction should still be on the undo stack.
-    # If it is not, work was undone (or redone past) behind the journal's back
-    # — Ctrl+Z in the GUI — and counts derived from the log are suspect.
-    drift = bool(last and last.transaction not in names)
+    # Every done step is checked, not just the last one: a deleted Pocket under
+    # a later step went unnoticed, and a check anchored on the newest step
+    # cleared itself the moment Claude committed anything after a Ctrl+Z.
+    stale = stale_steps(doc, records)
     out: dict[str, Any] = {
         "success": True,
         "document": doc.Name,
         "count": len(records),
         "done": sj.done_count(records),
         "planned": sj.pending_count(records),
-        "drift": drift,
+        "drift": bool(stale),
+        "stale": stale,
         "meta": read_meta(doc),
     }
     # Read-only options, so the tool signature (and its docstring budget) stays
@@ -1060,6 +1257,7 @@ def _status(
                 "accepted": r.accepted,
                 "executable": r.executable,
                 "result": r.result,
+                "transaction": r.transaction,
             }
             for r in records
         ]
@@ -1250,7 +1448,7 @@ def _remove_objects_locked(doc, names: list[str]) -> list[str]:
             # leave a usable document behind.
             if repair_body_tips(doc):
                 doc.recompute()
-        doc.commitTransaction()
+        commit_transaction(doc)
     except Exception:
         with contextlib.suppress(Exception):
             doc.abortTransaction()
@@ -1258,10 +1456,81 @@ def _remove_objects_locked(doc, names: list[str]) -> list[str]:
     return removed
 
 
-def _rollback(doc, records, to_index: int, force: bool) -> dict[str, Any]:
+def _is_container(obj) -> bool:
+    # A Body or group lists its members in Group: removing a member shrinks
+    # it, nothing breaks, so it is no dependent.
+    with contextlib.suppress(Exception):
+        return bool(obj.hasExtension("App::GroupExtension"))
+    return False
+
+
+def user_dependents(doc, names: list[str], built: set[str]) -> list[str]:
+    """Objects the journal did not build that depend on any of ``names``.
+
+    Removing or undoing their base leaves them broken (a user's chamfer left
+    outside its Body with Base=None, Invalid), so a rollback or reject that
+    would do it must say so and wait for force.
+    """
+    targets = set(names)
+    out: set[str] = set()
+    for name in names:
+        obj = doc.getObject(name)
+        if obj is None:
+            continue
+        for dep in getattr(obj, "InListRecursive", None) or []:
+            if dep.Name in targets or dep.Name in built or _is_container(dep):
+                continue
+            out.add(dep.Name)
+    return sorted(out)
+
+
+def rollback_plan(doc, records: list[sj.StepRecord], to_index: int) -> dict[str, Any]:
+    """The dry run of ``rollback_to(to_index)``: how, and what goes away.
+
+    ``mode`` (native / rebuild / partial), the transactions undone, the step
+    a rebuild starts from and the steps it re-runs, the objects removed, and
+    ``user_dependents``: the user's own objects that would break. The panel's
+    confirm dialog shows ``summary``; the RPC returns all of it for
+    ``params.dry_run``.
+    """
+    stale = stale_steps(doc, records)
+    stale_ids = {s["index"] for s in stale}
+    gone = {i for i in stale_ids if i > to_index}
+    plan = sj.plan_rollback(records, to_index, gone)
+    span, why = _undo_trust(doc, records, to_index, plan["undo_count"], gone)
+    restore = sj.plan_restore(records, to_index, span, _object_names(doc), stale_ids)
+    built = set(sj.created_since(records, 0))
+    deps = user_dependents(doc, restore["remove"] + restore["undone_objects"], built)
+    if why:
+        restore["reasons"].insert(0, why)
+    return {
+        **restore,
+        "undo_count": plan["undo_count"],
+        "blocking": plan["blocking"],
+        "accepted": plan["accepted"],
+        "stale": stale,
+        "user_dependents": deps,
+        "summary": sj.restore_summary(restore, deps),
+    }
+
+
+def _dependents_refusal(deps: list[str], what: str) -> str:
+    return (
+        f"{what} would break the user's own object(s) {deps}: they depend on objects it "
+        "removes. Pass force=true to go ahead anyway, or let the user move or delete them "
+        "first"
+    )
+
+
+def _rollback(doc, records, to_index: int, force: bool, dry_run: bool = False) -> dict[str, Any]:
     if to_index < 0 or to_index > len(records):
         return {"success": False, "error": f"step {to_index} out of range 0-{len(records)}"}
-    plan = sj.plan_rollback(records, to_index)
+    plan = rollback_plan(doc, records, to_index)
+    if dry_run:
+        return {"success": True, "dry_run": True, **plan}
+    refusal = _stale_refusal(plan["stale"], to_index, f"rolling back to step {to_index}")
+    if refusal and not force:
+        return {"success": False, "error": refusal, "stale": plan["stale"]}
     if plan["blocking"] and not force:
         return {
             "success": False,
@@ -1278,147 +1547,206 @@ def _rollback(doc, records, to_index: int, force: bool) -> dict[str, Any]:
                 "pass force=true to roll back across them"
             ),
         }
-    span, undo_why = _undo_trust(doc, records, to_index, plan["undo_count"])
-    res = undo_n(doc, span)
+    if plan["user_dependents"] and not force:
+        return {
+            "success": False,
+            "error": _dependents_refusal(
+                plan["user_dependents"], f"rolling back to step {to_index}"
+            ),
+            "dry_run": plan,
+        }
+    # rollback_plan checked the span name by name (_undo_trust): the entries
+    # popped here are exactly the journal's own, newest first.
+    res = undo_n(doc, plan["undo"])
     # doc.undo() does NOT rewind the journal — the property is document-level and
     # FreeCAD only tracks undo for objects. This reconciliation is what makes
     # the log match the model again, so it runs on every rollback, not just as a
     # fallback.
     records = read_journal(doc)
-    warnings: list[str] = []
-    restored = "native"
-    removed: list[str] = []
-    # The count alone cannot certify the undo: the stack is shared with the GUI,
-    # and a manual edit interleaved on it pops under this rollback's name while
-    # the journal's own transaction stays applied. The object sets tell the
-    # truth, so verify them before promising "native".
+    stale_ids = {s["index"] for s in plan["stale"]}
     present = set(_object_names(doc))
+    # Verify what the undo did instead of trusting the count: whatever the
+    # rolled-back steps created must be gone (or be among the leftovers the
+    # plan removes), whatever the target needs must be present (or be rebuilt).
     leftover = sorted(set(sj.created_since(records, to_index)) & present)
-    expected = set(sj.objects_after_index(records, to_index))
-    journal_built = set(sj.created_since(records, 0))
-    missing = sorted(n for n in expected if n not in present and n in journal_built)
-    # Steps the undo stack cannot reach. Even when some transactions did come
-    # off, these keep their changes, which is the "rollback reported success but
-    # the objects are still there" bug.
-    stranded = sj.steps_without_undo(records, to_index)
-
-    triggers: list[str] = []
-    if undo_why:
-        # A capped stack is the common cause (MaxUndoSize), and the text names
-        # it: the old wording blamed a reopen or an off-journal edit for a stack
-        # whose surviving entries matched the journal exactly.
-        triggers.append(undo_why)
-    elif res["count"] < span:
-        triggers.append(
-            f"the undo stack held only {res['count']}/{plan['undo_count']} of the "
-            "journal's transactions"
-        )
-    if stranded:
-        triggers.append(f"step(s) {stranded} own no undo entry")
-    if leftover:
-        # Only guess at an off-journal edit when the stack was otherwise
-        # complete: with a short span the cap already explains the leftovers,
-        # and the old wording blamed the user for FreeCAD's own eviction.
-        cause = "" if undo_why else " (off-journal edits on the undo stack?)"
-        triggers.append(f"object(s) {leftover} from the rolled-back steps are still present{cause}")
-    if missing:
-        triggers.append(f"object(s) {missing} that step {to_index} should have are gone")
-
-    if triggers:
-        reason = "; ".join(triggers)
-        if not sj.unrecoverable_steps(records, to_index):
-            # Everything up to the target can be re-created from the journal, so
-            # rebuild: clear what the journal built, then run 1..to_index again.
-            # This is a true restore, unlike a partial undo.
-            removed = _remove_objects(doc, sj.created_since(records, 0))
-            records = read_journal(doc)
-            # Failed records belong in the re-run too: their transaction aborted,
-            # so re-running them is safe, and skipping them would run a later
-            # step against a missing dependency.
-            for rec in records:
-                if rec.state in (sj.STATE_DONE, sj.STATE_FAILED):
-                    rec.state = sj.STATE_PLANNED
-                    rec.transaction = ""
-                    rec.error = ""
-            write_journal(doc, records)
-            run = _run_steps(doc, records, limit=None, upto=to_index)
-            records = read_journal(doc)
-            restored = "rebuild"
-            warnings.append(
-                f"{reason}. The model was rebuilt from the journal instead: "
-                f"{len(removed)} object(s) removed and steps 1..{to_index} re-run."
-            )
-            stranded = []
-            if not run.get("success"):
-                return {
-                    "success": False,
-                    "error": f"the rebuild stopped early: {run.get('error') or 'unknown error'}",
-                    "undone": res["count"],
-                    "restored": restored,
-                    "removed": removed,
-                    "stranded": stranded,
-                    "done": sj.done_count(records),
-                    "count": len(records),
-                    "warnings": warnings,
-                }
+    built = set(sj.created_since(records, 0))
+    expected = set(sj.objects_after_index(records, to_index)) & built
+    missing = sorted(n for n in expected if n not in present)
+    remove = sorted(set(plan["remove"]) | set(leftover))
+    rebuild_from = plan["rebuild_from"]
+    surprise = sorted(set(missing) - set(plan["missing"]) - set(plan["remove"]))
+    for name in surprise:
+        owner = sj.creator_of(records, name)
+        if owner is not None and owner.index <= to_index:
+            rebuild_from = min(rebuild_from or owner.index, owner.index)
+    mode = plan["mode"]
+    if rebuild_from is not None and mode != "rebuild":
+        if sj.unrecoverable_steps(records, to_index):
+            mode = "partial"
+            rebuild_from = None
         else:
-            # Those steps can be neither undone nor re-run (their operation or
-            # code was never recorded), so remove the objects they introduced.
-            # Property changes they made cannot be restored.
-            removal = sj.created_since(records, to_index)
-            removed = _remove_objects(doc, removal)
-            records = read_journal(doc)
-            restored = "partial"
-            warnings.append(
-                f"{reason}. Their objects were removed ({len(removed)} object(s)), but "
-                "property changes they made (placements, dimensions) cannot be restored. "
-                "Replay the journal, or rebuild from scratch, if you need an exact state."
-            )
-            still = sorted(set(removal) & set(_object_names(doc)))
-            if still:
-                warnings.append(
-                    f"object(s) {still} could not be removed and are still in the document"
-                )
-
-    # How many DONE records the rollback affected — NOT done_count - to_index,
-    # which assumes 1..to_index are all done and so under-rewinds (leaving
-    # records marked done whose transactions were already undone) whenever a
-    # FAILED or PLANNED record sits in between.
-    extra = sj.done_after_index(records, to_index)
-    replanned: list[int] = []
-    if extra > 0:
-        sj.rewind(records, extra)
-    # A failed record was never applied, so it must go back to planned too —
-    # otherwise the cursor steps over it and runs the rest of the plan against a
-    # dependency that was never created (see sj.replan_failed). The rebuild path
-    # above has always done this; the native path did not.
-    replanned = sj.replan_failed(records, to_index)
-    if extra > 0 or replanned:
-        with contextlib.suppress(Exception):
-            write_journal(doc, records)
+            mode = "rebuild"
+    if rebuild_from is not None:
+        remove = sorted(set(remove) | (set(sj.created_since(records, rebuild_from - 1)) & present))
+    if res["count"] < plan["undo"]:
+        plan["reasons"].append(
+            f"the undo stack held only {res['count']}/{plan['undo']} of the journal's transactions"
+        )
+    late_deps = sorted(set(user_dependents(doc, remove, built)) - set(plan["user_dependents"]))
+    if late_deps and not force:
+        _rewind_after(doc, records, to_index)
+        return {
+            "success": False,
+            "error": (
+                f"the undo took {res['count']} transaction(s), but finishing the rollback "
+                + _dependents_refusal(late_deps, "")[1:]
+            ),
+            "undone": res["count"],
+        }
+    removed = _remove_objects(doc, remove)
+    records = read_journal(doc)
+    notes: list[str] = []
+    warnings: list[str] = []
+    reason = "; ".join(plan["reasons"])
+    if mode == "rebuild":
+        for rec in records:
+            if rebuild_from <= rec.index <= to_index and rec.state in (
+                sj.STATE_DONE,
+                sj.STATE_FAILED,
+            ):
+                # Failed records belong in the re-run too: their transaction
+                # aborted, so re-running them is safe, and skipping them would
+                # run a later step against a missing dependency.
+                rec.state = sj.STATE_PLANNED
+                rec.transaction = ""
+                rec.error = ""
+                rec.stale = ""
+        write_journal(doc, records)
+        run = _run_steps(doc, records, limit=None, upto=to_index)
+        records = read_journal(doc)
+        notes.append(
+            f"{reason}. Rebuilt from step {rebuild_from}: {len(removed)} object(s) removed "
+            f"and steps {rebuild_from}..{to_index} re-run."
+        )
+        if not run.get("success"):
+            _rewind_after(doc, records, to_index)
+            return {
+                "success": False,
+                "error": f"the rebuild stopped early: {run.get('error') or 'unknown error'}",
+                "undone": res["count"],
+                "restored": mode,
+                "rebuild_from": rebuild_from,
+                "removed": removed,
+                "done": sj.done_count(read_journal(doc)),
+                "count": len(records),
+                "notes": notes,
+            }
+    elif mode == "removed":
+        notes.append(
+            f"{reason}. Those steps only created objects, so removing them restores step "
+            f"{to_index} exactly: {', '.join(removed) or 'nothing left to remove'}."
+        )
+    elif removed or mode == "partial":
+        warnings.append(
+            f"{reason}. Their objects were removed directly ({len(removed)} object(s)), but "
+            "property changes they made (placements, dimensions) cannot be restored. "
+            "Replay the journal if you need an exact state."
+        )
+    still = sorted(set(remove) & set(_object_names(doc)) - set(removed))
+    if still:
+        warnings.append(f"object(s) {still} could not be removed and are still in the document")
+    if plan["user_dependents"]:
+        warnings.append(
+            f"forced: the user's own object(s) {plan['user_dependents']} depended on what was "
+            "removed and may now be broken"
+        )
+    replanned = _rewind_after(doc, records, to_index)
     return {
         "success": True,
         "undone": res["count"],
-        "restored": restored,
+        "restored": mode,
+        "rebuild_from": rebuild_from,
         "removed": removed,
-        "stranded": stranded,
+        "stranded": [] if mode == "rebuild" else plan["unreached"],
         "replanned": replanned,
+        "skipped_stale": sorted(i for i in stale_ids if i > to_index),
         "done": sj.done_count(records),
         "count": len(records),
+        "notes": notes,
         "warnings": warnings,
     }
 
 
-def _reject(doc, records, index: int, force: bool, reason: str) -> dict[str, Any]:
+def _rewind_after(doc, records, to_index: int) -> list[int]:
+    """Put every record after ``to_index`` back to planned; returns the failed ones.
+
+    Counts the DONE records the rollback affected — NOT done_count - to_index,
+    which assumes 1..to_index are all done and so under-rewinds whenever a
+    FAILED or PLANNED record sits in between. A failed record was never
+    applied, so it goes back to planned too (see sj.replan_failed): otherwise
+    the cursor steps over it and runs the rest of the plan against a
+    dependency that was never created.
+    """
+    extra = sj.done_after_index(records, to_index)
+    if extra > 0:
+        sj.rewind(records, extra)
+    replanned = sj.replan_failed(records, to_index)
+    if extra > 0 or replanned:
+        with contextlib.suppress(Exception):
+            write_journal(doc, records)
+    return replanned
+
+
+def reject_plan(doc, records: list[sj.StepRecord], index: int) -> dict[str, Any] | None:
+    """The dry run of ``reject(index)``: what is undone, removed, and who breaks."""
+    gone = {s["index"] for s in stale_steps(doc, records) if s["index"] >= index}
+    plan = sj.plan_reject(records, index, gone)
+    if plan is None:
+        return None
+    span, why = _undo_trust(doc, records, index - 1, plan["undo_count"], gone)
+    present = set(_object_names(doc))
+    doomed = sorted(set(sj.created_since(records, index - 1)) & present)
+    deps = user_dependents(doc, doomed, set(sj.created_since(records, 0)))
+    removed_directly = len(doomed) if span < plan["undo_count"] else 0
+    summary = (
+        f"Undo {span} transaction(s) and forget {len(plan['drop'])} step(s); "
+        f"{len(doomed)} object(s) go away"
+        + (f", {removed_directly} of them removed directly" if removed_directly else "")
+        + "."
+        + (f" Your own object(s) {', '.join(deps)} depend on them and would break." if deps else "")
+    )
+    return {
+        **plan,
+        "undo": span,
+        "undo_why": why,
+        "gone": sorted(gone),
+        "remove": doomed,
+        "user_dependents": deps,
+        "summary": summary,
+    }
+
+
+def _reject(
+    doc, records, index: int, force: bool, reason: str, dry_run: bool = False
+) -> dict[str, Any]:
     """Undo and forget everything from ``index`` onward (see sj.plan_reject).
 
     Reject is the deliberate act of destruction, so — unlike rollback/replay —
-    it does not stop at accepted steps; it only refuses to cross non-atomic
-    ones without force, where undo itself is unreliable.
+    it does not stop at accepted steps; it refuses to cross non-atomic ones
+    without force, where undo itself is unreliable, and to break the user's
+    own objects that depend on what it removes.
     """
-    plan = sj.plan_reject(records, index)
+    plan = reject_plan(doc, records, index)
     if plan is None:
         return {"success": False, "error": f"no step {index}"}
+    if dry_run:
+        return {"success": True, "dry_run": True, **plan}
+    if plan["user_dependents"] and not force:
+        return {
+            "success": False,
+            "error": _dependents_refusal(plan["user_dependents"], f"rejecting step {index}"),
+            "dry_run": plan,
+        }
     if plan["blocking"] and not force:
         return {
             "success": False,
@@ -1427,7 +1755,7 @@ def _reject(doc, records, index: int, force: bool, reason: str) -> dict[str, Any
                 f"{sj.blocking_text(records, plan['blocking'])}; pass force=true"
             ),
         }
-    span, undo_why = _undo_trust(doc, records, index - 1, plan["undo_count"])
+    span, undo_why = plan["undo"], plan["undo_why"]
     res = undo_n(doc, span)
     records = read_journal(doc)
     warnings: list[str] = []
@@ -1487,7 +1815,7 @@ def _reject(doc, records, index: int, force: bool, reason: str) -> dict[str, Any
 
 
 def _reexecute(
-    doc, records, index: int, params: dict[str, Any], force: bool = False
+    doc, records, index: int, params: dict[str, Any], force: bool = False, replace: bool = False
 ) -> dict[str, Any]:
     params = dict(params or {})
     # A label is presentation, so it is applied to the record and never merged
@@ -1498,96 +1826,68 @@ def _reexecute(
         return {"success": False, "error": f"no step {index}"}
     if not rec.executable:
         return {"success": False, "error": f"step {index} ('{rec.operation}') is not re-executable"}
-    plan = sj.plan_rollback(records, index - 1)
-    if plan["blocking"] and not force:
-        # force is honored here like _rollback and _reject honor it, and the
-        # message names it: the panel only offers a force retry when the error
-        # text says "force=true", so this dead end left the user with no way
-        # forward at all. The verification below still refuses if the undo
-        # cannot be trusted, and points at rollback_to.
+    # A re-run needs the model exactly at step index-1: the rollback's own
+    # verification (and its rebuild from the first wrong step) provides it,
+    # including when the user's edits sit on the undo stack. A partial restore
+    # is no base, so it is refused before anything is touched.
+    plan = rollback_plan(doc, records, index - 1)
+    if plan["mode"] == "partial":
         return {
             "success": False,
             "error": (
-                f"cannot re-run step {index}: non-atomic step(s) {plan['blocking']} sit in the "
-                "way; pass force=true to re-run anyway, or run rollback_to first"
+                f"cannot re-run step {index}: {'; '.join(plan['reasons'])}, and step(s) before "
+                "it cannot be re-run to rebuild the model; replay the journal or reject the step"
             ),
         }
-    if plan["accepted"] and not force:
-        return {
-            "success": False,
-            "error": (
-                f"re-running step {index} rolls back across accepted step(s) "
-                f"{plan['accepted']}; pass force=true"
-            ),
-        }
-    # Re-running a step is only sound on a clean base: if the undo came up
-    # short, popped the wrong transactions (off-journal edits on the stack), or
-    # was skipped as untrustworthy, re-running would duplicate objects under
-    # deduplicated names instead of failing. Verify the stack and object sets
-    # first and point at rollback_to, which can rebuild, instead.
-    #
-    # A span the stack cannot fully cover is a REFUSAL, not a partial undo:
-    # popping the reachable part and then bailing out would leave the document
-    # rolled back AND un-rerun, which is further from what the caller asked for
-    # than not touching it at all.
-    _span, undo_why = _undo_trust(doc, records, index - 1, plan["undo_count"])
-    if undo_why:
-        return {
-            "success": False,
-            "error": (
-                f"cannot re-run step {index}: {undo_why}; "
-                "run rollback_to first, it can rebuild the model"
-            ),
-        }
-    res = undo_n(doc, plan["undo_count"])
+    after = sj.done_after_index(records, index)
+    back = _rollback(doc, records, index - 1, force)
+    if not back.get("success"):
+        error = str(back.get("error") or "")
+        if error.startswith(f"rolling back to step {index - 1}"):
+            error = f"re-running step {index}" + error[len(f"rolling back to step {index - 1}") :]
+        return {**back, "error": error or f"cannot re-run step {index}"}
     records = read_journal(doc)
-    if res["count"] < plan["undo_count"]:
-        return {
-            "success": False,
-            "error": (
-                f"only {res['count']}/{plan['undo_count']} transactions could be undone "
-                "(the FreeCAD undo stack was shorter than the journal); "
-                "run rollback_to first, it can rebuild the model"
-            ),
-        }
-    present = set(_object_names(doc))
-    leftover = sorted(set(sj.created_since(records, index - 1)) & present)
-    if leftover:
-        return {
-            "success": False,
-            "error": (
-                f"undo did not restore step {index - 1} cleanly: object(s) {leftover} from "
-                "later steps are still present (off-journal edits on the undo stack?); "
-                "run rollback_to first, it can rebuild the model"
-            ),
-        }
     rec = next((r for r in records if r.index == index), None)
     if rec is None:
         return {"success": False, "error": f"step {index} disappeared during rollback"}
-    extra = sj.done_after_index(records, index - 1)
-    if extra > 0:
-        sj.rewind(records, extra)
     rec.state = sj.STATE_PLANNED
-    # Its transaction was just undone (or rewound by the line above), so the
-    # record owns no undo entry until the re-run commits one: a stale name would
-    # sit in the journal as a transaction the stack cannot supply, which breaks
-    # the rollback trust check at that position.
+    # Its transaction was just undone, so the record owns no undo entry until
+    # the re-run commits one: a stale name would sit in the journal as a
+    # transaction the stack cannot supply, which breaks the rollback trust
+    # check at that position.
     rec.transaction = ""
-    rec.params = {**(rec.params or {}), **(params or {})}
+    # Merged, not swapped: the step's params carry the user's synced edits,
+    # and a caller passing {"obj_properties": {"reversed": true}} used to drop
+    # every other property with them.
+    if replace and params:
+        replaced = sorted(k for k in rec.params or {} if (rec.params or {}).get(k) != params.get(k))
+        rec.params = dict(params)
+    else:
+        rec.params, replaced = sj.merge_params(rec.params or {}, params or {})
     if label:
         rec.label = label
     write_journal(doc, records)
     res = run_record(doc, records, rec)
-    out = {**res, "index": index, "count": len(records), "done": sj.done_count(records)}
-    if extra > 0:
+    out = {
+        **res,
+        "index": index,
+        "count": len(records),
+        "done": sj.done_count(records),
+        "replaced": replaced,
+        "restored": back.get("restored"),
+        "removed": back.get("removed"),
+        "notes": back.get("notes") or [],
+        "warnings": back.get("warnings") or [],
+    }
+    if after > 0:
         # A re-run happens on a clean base, so the steps after it are undone and
         # returned to `planned`. That is by design, but it used to happen
         # silently: the reply carried a done-count and nothing else, so a caller
         # watched its later model disappear (live: "the model was down to the
-        # first step").
-        out["rewound"] = extra
+        # first step"). The step itself is not one of them.
+        out["rewound"] = after
         note = (
-            f"re-running step {index} rolled the {extra} step(s) after it back to "
+            f"re-running step {index} rolled the {after} step(s) after it back to "
             "planned: their work is undone and they must be released again "
             "(step_control run_all or run_to)."
         )
@@ -1613,15 +1913,44 @@ def _reexecute(
 # under _EngineQuiet — a tool's change is its own step, and echoing it into
 # an earlier step's params made reject/replay inconsistent.
 
-_SYNC_EVENTS: list[dict[str, Any]] = []
+# Per document, two copies of what the user did (see sj.append_change for the
+# event kinds): Claude's, drained by the next RPC reply, and the panel's,
+# drained by its log. The RPC thread may read Claude's copy, hence the lock.
+_CHANGES_LOCK = threading.Lock()
+_USER_CHANGES: dict[str, list[dict[str, Any]]] = {}
+_PANEL_EVENTS: dict[str, list[dict[str, Any]]] = {}
+_CHANGES_CAP = 200
 
 
-def pop_sync_events(doc_name: str) -> list[dict[str, Any]]:
-    """Take (and clear) the queued manual-edit notices for one document."""
-    mine = [e for e in _SYNC_EVENTS if e["doc"] == doc_name]
-    if mine:
-        _SYNC_EVENTS[:] = [e for e in _SYNC_EVENTS if e["doc"] != doc_name]
-    return mine
+def note_user_change(doc_name: str, event: dict[str, Any], panel: bool = True) -> None:
+    """Record something the user did to ``doc_name`` for Claude (and the panel)."""
+    event = {**event, "time": time.strftime("%H:%M:%S")}
+    with _CHANGES_LOCK:
+        stores = (_USER_CHANGES, _PANEL_EVENTS) if panel else (_USER_CHANGES,)
+        for store in stores:
+            log = store.setdefault(doc_name, [])
+            sj.append_change(log, dict(event))
+            del log[:-_CHANGES_CAP]
+
+
+def take_user_changes() -> dict[str, list[dict[str, Any]]]:
+    """Every document's changes since the last call, and forget them."""
+    with _CHANGES_LOCK:
+        out = {name: list(events) for name, events in _USER_CHANGES.items() if events}
+        _USER_CHANGES.clear()
+    return out
+
+
+def pop_panel_events(doc_name: str) -> list[dict[str, Any]]:
+    """The panel's copy of one document's changes since its last refresh."""
+    with _CHANGES_LOCK:
+        return _PANEL_EVENTS.pop(doc_name, [])
+
+
+def _record_for_transaction(doc, name: str) -> sj.StepRecord | None:
+    if not name.startswith(TX_PREFIX):
+        return None
+    return next((r for r in read_journal(doc) if r.transaction == name), None)
 
 
 def _num(value: float) -> int | float:
@@ -1719,6 +2048,151 @@ def _placement_brief(d) -> str:
     return f"pos({pos}) rot {_num(rot.get('Angle', 0))}deg@({ax})"
 
 
+def _link_json(value) -> dict[str, Any] | None:
+    """A PropertyLinkSub value as sj.sync_patch reads it."""
+    if not value:
+        return None
+    target, subs = (value[0], value[1]) if isinstance(value, tuple) else (value, [])
+    if target is None:
+        return None
+    if isinstance(subs, str):
+        subs = [subs]
+    return {
+        "name": target.Name,
+        "subs": [str(x) for x in subs or []] or [""],
+        "role": str(getattr(target, "Role", "") or ""),
+        "type": str(getattr(target, "TypeId", "") or ""),
+    }
+
+
+def _read_live(obj, prop: str, kind: str):
+    """A feature property's live value, in the shape its sync rule's kind takes."""
+    value = getattr(obj, prop, None)
+    if kind in ("link_sub", "axis", "mirror_plane"):
+        return _link_json(value)
+    if kind == "names":
+        return [o.Name for o in value or [] if o is not None]
+    if kind == "spacings":
+        return list(value) if value is not None else None
+    if kind == "pad_mode":
+        return {
+            "type": str(getattr(obj, "Type", "") or ""),
+            "side": str(getattr(obj, "SideType", "") or ""),
+            "midplane": bool(getattr(obj, "Midplane", False)),
+        }
+    if kind == "pattern_mode":
+        return str(value) if value is not None else None
+    if kind == "edge_size":
+        return _uniform_edge_size(value)
+    if kind == "z_offset":
+        if value is None:
+            return None
+        return (value.Base.x, value.Base.y, value.Base.z, value.Rotation.Angle)
+    return _json_scalar(value)
+
+
+def _live_sketch(obj) -> tuple[list[dict], list[bool], list[dict], list[list[str]]]:
+    """A sketch's geometry, construction flags, constraints and external refs, as data."""
+    geometry: list[dict[str, Any]] = []
+    for g in obj.Geometry:
+        kind = type(g).__name__
+        item: dict[str, Any] = {"type": kind}
+        if kind == "LineSegment":
+            item.update(start=[g.StartPoint.x, g.StartPoint.y], end=[g.EndPoint.x, g.EndPoint.y])
+        elif kind in ("Circle", "ArcOfCircle"):
+            item.update(center=[g.Center.x, g.Center.y], radius=g.Radius, axis_z=g.Axis.z)
+            if kind == "ArcOfCircle":
+                item.update(first=g.FirstParameter, last=g.LastParameter)
+        elif kind == "Point":
+            item.update(at=[g.X, g.Y])
+        geometry.append(item)
+    construction = [bool(obj.getConstruction(i)) for i in range(len(geometry))]
+    constraints = [
+        {
+            "type": k.Type,
+            "first": int(k.First),
+            "first_pos": int(k.FirstPos),
+            "second": int(k.Second),
+            "second_pos": int(k.SecondPos),
+            "third": int(k.Third),
+            "third_pos": int(k.ThirdPos),
+            "value": float(k.Value),
+            "name": str(k.Name or ""),
+            "driving": bool(getattr(k, "Driving", True)),
+            "active": bool(getattr(k, "IsActive", True)),
+        }
+        for k in obj.Constraints
+    ]
+    external = []
+    for ref in getattr(obj, "ExternalGeometry", None) or []:
+        target, subs = ref if isinstance(ref, tuple) else (ref, "")
+        subs = [subs] if isinstance(subs, str) else list(subs or [])
+        external.append([getattr(target, "Name", ""), *[str(x) for x in subs]])
+    return geometry, construction, constraints, external
+
+
+def _sketch_object(doc, params: dict[str, Any], before: list[str], after: list[str]):
+    for name in [n for n in after if n not in set(before)] + [str(params.get("obj_name") or "")]:
+        obj = doc.getObject(name) if name else None
+        if obj is not None and obj.TypeId == "Sketcher::SketchObject":
+            return obj
+    return None
+
+
+def _note_sketch_signature(doc, params: dict[str, Any], before, after) -> None:
+    """Remember the structure a sketch step built, so a later edit can be told apart."""
+    with contextlib.suppress(Exception):
+        obj = _sketch_object(doc, params, list(before or []), list(after or []))
+        if obj is not None:
+            params["sketch_signature"] = sj.sketch_signature(*_live_sketch(obj))
+
+
+def _sketch_blob(obj) -> dict[str, Any]:
+    """The sketch's own serialization, for a sketch the spec cannot express.
+
+    ``digest`` covers the content only: the dumps are zip files stamped with
+    the time they were written, so two dumps of one sketch never compare equal.
+    """
+    import base64
+    import hashlib
+    import io
+    import zipfile
+
+    blob: dict[str, Any] = {}
+    digest = hashlib.sha1()
+    for prop in ("Geometry", "Constraints", "ExternalGeometry"):
+        data = bytes(obj.dumpPropertyContent(prop))
+        blob[prop] = base64.b64encode(data).decode("ascii")
+        with zipfile.ZipFile(io.BytesIO(data)) as archive:
+            for name in sorted(archive.namelist()):
+                digest.update(archive.read(name))
+    blob["expressions"] = [
+        [str(path), str(expr)]
+        for path, expr in getattr(obj, "ExpressionEngine", None) or []
+        if "Constraints" in str(path)
+    ]
+    digest.update(json.dumps(blob["expressions"]).encode("utf-8"))
+    blob["digest"] = digest.hexdigest()[:16]
+    return blob
+
+
+def _restore_live_sketch(doc, sketch, blob: dict[str, Any]) -> None:
+    """Put a user-edited sketch back exactly, after the builder made its base."""
+    import base64
+
+    for path, _expr in list(getattr(sketch, "ExpressionEngine", None) or []):
+        if "Constraints" in str(path):
+            sketch.setExpression(str(path), None)
+    for prop in ("ExternalGeometry", "Geometry", "Constraints"):
+        if blob.get(prop):
+            sketch.restorePropertyContent(prop, base64.b64decode(blob[prop]))
+    for path, expr in blob.get("expressions") or []:
+        sketch.setExpression(path, expr)
+    doc.recompute()
+    if sketch.solve() != 0:
+        raise RuntimeError(f"the user's edited sketch '{sketch.Name}' no longer solves")
+
+
 def _sync_props_target(rec: sj.StepRecord, sub: int | None) -> dict[str, Any] | None:
     """The obj_properties dict a manual-edit sync write lands in.
 
@@ -1733,10 +2207,110 @@ def _sync_props_target(rec: sj.StepRecord, sub: int | None) -> dict[str, Any] | 
     return None
 
 
+def _user_thread() -> bool:
+    # execute_code_async runs Claude's snippet on a worker thread outside any
+    # engine window; only the GUI thread is the user.
+    return threading.current_thread() is threading.main_thread()
+
+
 class _JournalSyncObserver:
     def __init__(self):
         self._cache: dict[str, tuple[str, dict]] = {}
         self._writing = False
+        # Changes FreeCAD makes while undoing/redoing (doc.Transacting), held
+        # until the undo is over and its transaction name says whose it was.
+        self._undoing: dict[str, dict[str, Any]] = {}
+
+    def _muted(self, doc) -> bool:
+        return (
+            self._writing
+            or _ENGINE_ACTIVE > 0
+            or not _user_thread()
+            or bool(getattr(doc, "Restoring", False))
+        )
+
+    def _undo_buffer(self, doc) -> dict[str, Any]:
+        return self._undoing.setdefault(doc.Name, {"props": [], "added": [], "removed": []})
+
+    def slotCreatedObject(self, obj):
+        with contextlib.suppress(Exception):
+            doc = obj.Document
+            if self._muted(doc):
+                return
+            if doc.Transacting:
+                self._undo_buffer(doc)["added"].append(obj.Name)
+                return
+            note_user_change(
+                doc.Name, {"kind": "added", "objects": [obj.Name], "types": [obj.TypeId]}
+            )
+
+    def slotDeletedObject(self, obj):
+        with contextlib.suppress(Exception):
+            doc = obj.Document
+            if self._muted(doc):
+                return
+            if doc.Transacting:
+                self._undo_buffer(doc)["removed"].append(obj.Name)
+                return
+            note_user_change(doc.Name, {"kind": "removed", "objects": [obj.Name]})
+            owner = sj.creator_of(read_journal(doc), obj.Name)
+            if owner is not None:
+                note_user_change(
+                    doc.Name,
+                    {
+                        "kind": "stale",
+                        "step": owner.index,
+                        "label": owner.label,
+                        "detail": f"the user deleted {obj.Name}",
+                    },
+                )
+
+    def slotUndoDocument(self, doc):
+        with contextlib.suppress(Exception):
+            self._after_stack_op(doc, "undo")
+
+    def slotRedoDocument(self, doc):
+        with contextlib.suppress(Exception):
+            self._after_stack_op(doc, "redo")
+
+    def _after_stack_op(self, doc, kind: str) -> None:
+        held = self._undoing.pop(doc.Name, None) or {"props": [], "added": [], "removed": []}
+        if self._muted(doc):
+            return
+        stack = _real_redo_names(doc) if kind == "undo" else _real_undo_names(doc)
+        name = stack[0] if stack else ""
+        rec = _record_for_transaction(doc, name)
+        if rec is not None:
+            # Remembered on the record: a later commit clears the redo stack,
+            # and with it the only other trace that the step was undone.
+            records = read_journal(doc)
+            target = next(r for r in records if r.index == rec.index)
+            target.stale = "undone by the user (Ctrl+Z)" if kind == "undo" else ""
+            self._writing = True
+            try:
+                write_journal(doc, records)
+            finally:
+                self._writing = False
+        if not name.startswith(TX_PREFIX):
+            # The user undid (or redid) their OWN edit: the values FreeCAD
+            # restored are the user's again, so the journal follows them. A
+            # CADPilot step's undo is not mirrored: the step keeps its params
+            # and goes stale instead, so Claude can restore it or drop it.
+            for obj_name, prop in held["props"]:
+                obj = doc.getObject(obj_name)
+                if obj is not None:
+                    self._sync(obj, prop)
+        note_user_change(
+            doc.Name,
+            {
+                "kind": kind,
+                "transaction": name,
+                "step": rec.index if rec is not None else None,
+                "label": rec.label if rec is not None else "",
+                "added": held["added"],
+                "removed": held["removed"],
+            },
+        )
 
     def slotChangedObject(self, obj, prop):
         # _writing guards the observer's own journal write; _ENGINE_ACTIVE
@@ -1747,22 +2321,53 @@ class _JournalSyncObserver:
             return
         # An observer must never break the host's edit.
         with contextlib.suppress(Exception):
+            # Opening a file sets every property once, in file order (Length
+            # before the ExpressionEngine that binds it), which read as a
+            # burst of manual edits and rewrote bound params to numbers.
+            if obj.Document.Restoring or not _user_thread():
+                return
+            if obj.Document.Transacting:
+                self._undo_buffer(obj.Document)["props"].append((obj.Name, prop))
+                return
             self._sync(obj, prop)
+
+    def _entry(self, doc, obj) -> tuple[str, dict[str, Any] | None]:
+        text = getattr(doc, sj.JOURNAL_PROP, "") or ""
+        if not text:
+            return "", None
+        cached = self._cache.get(doc.Name)
+        if cached is None or cached[0] != text:
+            cached = (text, sj.tracked_objects(sj.from_json(text)))
+            self._cache[doc.Name] = cached
+        return text, cached[1].get(getattr(obj, "Name", ""))
+
+    def sync_sketch(self, doc, obj) -> None:
+        """The deferred half of a sketch edit (see _defer_sketch_sync)."""
+        if self._writing or doc.Restoring:
+            return
+        text, entry = self._entry(doc, obj)
+        if entry is None or entry.get("sketch") is None:
+            return
+        records = sj.from_json(text)
+        if self._sync_sketch_structure(obj, doc, records, *entry["sketch"]):
+            return
+        self._sync_constraints(obj, doc, records, *entry["sketch"])
 
     def _sync(self, obj, prop) -> None:
         doc = getattr(obj, "Document", None)
         if doc is None:
             return
-        text = getattr(doc, sj.JOURNAL_PROP, "") or ""
-        if not text:
-            return
-        cached = self._cache.get(doc.Name)
-        if cached is None or cached[0] != text:
-            cached = (text, sj.tracked_objects(sj.from_json(text)))
-            self._cache[doc.Name] = cached
-        entry = cached[1].get(getattr(obj, "Name", ""))
+        text, entry = self._entry(doc, obj)
         if entry is None:
             return
+        if entry.get("sketch") is not None and prop in _SKETCH_PROPS:
+            # Deleting a constraint fires ExpressionEngine while Constraints
+            # still has the old length but the expression paths are already
+            # renumbered, so a sync at event time paired bindings with the
+            # wrong constraints. The sketch is read once the edit settled.
+            _defer_sketch_sync(doc.Name, obj.Name)
+            if prop != "ExpressionEngine":
+                return
         if prop == "ExpressionEngine":
             # Binding or unbinding an expression rewrites ExpressionEngine and
             # need not fire the bound property itself, so every value this
@@ -1774,10 +2379,19 @@ class _JournalSyncObserver:
             records = sj.from_json(text)
             if entry.get("sheet") is not None:
                 self._sync_cells(obj, doc, records, *entry["sheet"])
-            if entry.get("sketch") is not None:
-                self._sync_constraints(obj, doc, records, *entry["sketch"])
-            for claimed in list(entry["props"]):
-                self._sync(obj, claimed)
+            # Only what may have been bound or unbound: a property that is
+            # bound now, or whose step value is an expression. Re-reading every
+            # claim wrote each builder default the caller had left out.
+            bound = {
+                str(path).lstrip(".").split(".")[0]
+                for path, _expr in getattr(obj, "ExpressionEngine", None) or []
+            }
+            by_index = {r.index: r for r in records}
+            for claimed, (index, key, sub) in list(entry["props"].items()):
+                rec = by_index.get(index)
+                target = (_sync_props_target(rec, sub) or {}) if rec is not None else {}
+                if claimed in bound or str(target.get(key, "")).startswith("="):
+                    self._sync(obj, claimed)
             if entry.get("move") is not None:
                 self._sync_move_fold(obj, doc, records, *entry["move"])
             return
@@ -1785,9 +2399,6 @@ class _JournalSyncObserver:
         # edit fires both 'cells' and the address) no-ops, so trigger wide.
         if entry.get("sheet") is not None:
             self._sync_cells(obj, doc, sj.from_json(text), *entry["sheet"])
-            return
-        if entry.get("sketch") is not None and prop == "Constraints":
-            self._sync_constraints(obj, doc, sj.from_json(text), *entry["sketch"])
             return
         hit = entry["props"].get(prop)
         if hit is None:
@@ -1799,27 +2410,16 @@ class _JournalSyncObserver:
         rec = next((r for r in records if r.index == hit[0]), None)
         if rec is None:
             return
+        rule = sj.feature_rule(rec.operation, prop) if hit[2] is None else None
+        if rule is not None:
+            self._sync_rule(obj, doc, records, rec, prop, rule)
+            return
         if prop == "Placement":
             value, same, brief = (
                 _placement_json(obj.Placement),
                 _same_placement,
                 _placement_brief,
             )
-        elif prop == "Edges":
-            value = _uniform_edge_size(getattr(obj, prop, None))
-            if value is None:
-                return
-            same, brief = _same_scalar, repr
-        elif prop == "AttachmentOffset":
-            # Only a pure-z translation maps onto the spec's scalar offset; a
-            # rotated/shifted attachment has no spec representation.
-            pl = getattr(obj, prop, None)
-            base, rot = getattr(pl, "Base", None), getattr(pl, "Rotation", None)
-            if base is None or rot is None:
-                return
-            if abs(base.x) > 1e-9 or abs(base.y) > 1e-9 or abs(rot.Angle) > 1e-9:
-                return
-            value, same, brief = _num(base.z), _same_scalar, repr
         else:
             # An expression binding wins over the literal value, in both
             # directions: binding in the GUI stores "=expr" (the builder
@@ -1833,7 +2433,7 @@ class _JournalSyncObserver:
                 value = _json_scalar(getattr(obj, prop, None))
                 if value is None:
                     return
-            same, brief = _same_scalar, repr
+            same, brief = _same_scalar, None
         props = _sync_props_target(rec, hit[2])
         if props is None:
             return
@@ -1841,9 +2441,38 @@ class _JournalSyncObserver:
         if same(current, value):
             return
         props[hit[1]] = value
-        self._commit_sync(
-            doc, records, rec.index, f"{obj.Name}.{prop}", brief(current), brief(value)
-        )
+        shown = (brief(current), brief(value)) if brief else (current, value)
+        self._commit_sync(doc, records, rec, [(f"{obj.Name}.{prop}", *shown)])
+
+    def _sync_rule(self, obj, doc, records, rec, prop: str, rule: sj.SyncRule) -> None:
+        """Mirror one feature property through its FEATURE_SYNC rule."""
+        if rule.only and getattr(obj, "TypeId", "") not in rule.only:
+            return
+        if rule.when is not None and str(getattr(obj, rule.when[0], "")) != str(rule.when[1]):
+            return
+        exprs = dict(getattr(obj, "ExpressionEngine", None) or [])
+        expr = exprs.get(prop)
+        if rule.kind == "z_offset":
+            expr = exprs.get(".AttachmentOffset.Base.z") or exprs.get("AttachmentOffset.Base.z")
+        base = str((rec.params or {}).get("obj_name") or "")
+        patch = sj.sync_patch(rule, _read_live(obj, prop, rule.kind), expr, base)
+        if not patch:
+            return
+        target = rec.params.setdefault("obj_properties", {})
+        edits: list[tuple[str, Any, Any]] = []
+        for key, value in patch.items():
+            current = target.get(key)
+            if sj.patch_value_matches(rule, key, current, value):
+                continue
+            if value is sj.REMOVE:
+                target.pop(key, None)
+                value = None
+            else:
+                target[key] = value
+            what = f"{obj.Name}.{prop}" + ("" if key == rule.key else f" ({key})")
+            edits.append((what, current, value))
+        if edits:
+            self._commit_sync(doc, records, rec, edits)
 
     def _sync_cells(self, obj, doc, records, index: int, sub: int | None = None) -> None:
         """Mirror spreadsheet cell edits (values, formulas, aliases) into the
@@ -1854,7 +2483,7 @@ class _JournalSyncObserver:
         cells = (_sync_props_target(rec, sub) or {}).get("cells")
         if not isinstance(cells, dict) or not cells:
             return
-        changed = 0
+        edits: list[tuple[str, Any, Any]] = []
         for cell, cell_entry in cells.items():
             if not (isinstance(cell_entry, list) and len(cell_entry) == 2):
                 continue
@@ -1866,17 +2495,86 @@ class _JournalSyncObserver:
             new = sj.map_cell_value(old, live_contents)
             if new is not sj.UNREADABLE and not _same_scalar(old, new):
                 cell_entry[1] = new
-                changed += 1
+                edits.append((f"{obj.Name}.{cell} ({alias})", old, new))
             try:
                 live_alias = obj.getAlias(cell) or ""
             except Exception:
                 live_alias = alias
             if live_alias and live_alias != alias:
                 cell_entry[0] = live_alias
-                changed += 1
-        if not changed:
-            return
-        self._commit_sync(doc, records, index, f"{obj.Name}.cells", "-", f"{changed} cell field(s)")
+                edits.append((f"{obj.Name}.{cell} alias", alias, live_alias))
+        if edits:
+            self._commit_sync(doc, records, rec, edits)
+
+    def _sync_sketch_structure(self, obj, doc, records, index: int, sub: int | None) -> bool:
+        """Snapshot a sketch the user changed structurally into its step.
+
+        Geometry or constraints added or deleted by hand used to leave the
+        step's spec as it was (the value sync maps by index and bails), so a
+        replay silently rebuilt the original sketch. The live sketch goes into
+        the spec when the spec can express it, otherwise the sketch's own
+        serialization rides along (``live_sketch``), which replay restores
+        after the builder made the base. True = handled, the values included.
+        """
+        rec = next((r for r in records if r.index == index), None)
+        if rec is None or sub is not None:
+            return False
+        live = _live_sketch(obj)
+        signature = sj.sketch_signature(*live)
+        stored = rec.params.get("sketch_signature")
+        if rec.operation != "sketch":
+            # A sketch_edit-style step has no full spec to rewrite: whatever the
+            # user changed after it, structure or values, rides on it as the
+            # sketch's own data, restored after it re-runs.
+            blob = _sketch_blob(obj)
+            old = rec.params.get("live_sketch") or {}
+            if stored == signature and (not old or old.get("digest") == blob["digest"]):
+                return True
+            rec.params["live_sketch"] = blob
+            rec.params["sketch_signature"] = signature
+            rec.params["user_edited"] = True
+            detail = "edited by hand after this step; kept as FreeCAD's own sketch data"
+            self._commit_sync(doc, records, rec, [], sketch=(obj.Name, detail))
+            return True
+        spec = rec.params.setdefault("obj_properties", {})
+        if stored is None:
+            # A journal from before signatures: adopt the live structure as the
+            # baseline unless it plainly differs from the spec.
+            if len(spec.get("constraints") or []) == len(live[2]) and len(
+                spec.get("geometry") or []
+            ) == len(live[0]):
+                rec.params["sketch_signature"] = signature
+                return False
+        elif stored == signature:
+            if not rec.params.get("live_sketch"):
+                return False
+            blob = _sketch_blob(obj)
+            if blob["digest"] == rec.params["live_sketch"].get("digest"):
+                return True
+            rec.params["live_sketch"] = blob
+            self._commit_sync(doc, records, rec, [], sketch=(obj.Name, "dimensions changed"))
+            return True
+        new_spec, unsupported = sj.sketch_spec_from_live(
+            live[0], live[1], live[2], dict(getattr(obj, "ExpressionEngine", None) or [])
+        )
+        if len(live[3]) != len(spec.get("external") or []):
+            unsupported.append("external geometry")
+        detail = sj.describe_sketch_edit(spec, new_spec)
+        if unsupported:
+            rec.params["live_sketch"] = _sketch_blob(obj)
+            detail += (
+                f"; kept as FreeCAD's own sketch data because the spec cannot express "
+                f"{', '.join(unsupported[:3])}"
+            )
+        else:
+            rec.params.pop("live_sketch", None)
+            spec.update(new_spec)
+            if not spec["construction"]:
+                spec.pop("construction")
+        rec.params["sketch_signature"] = signature
+        rec.params["user_edited"] = True
+        self._commit_sync(doc, records, rec, [], sketch=(obj.Name, detail))
+        return True
 
     def _sync_constraints(self, obj, doc, records, index: int, sub: int | None = None) -> None:
         """Mirror dimensional-constraint edits into the owning sketch step.
@@ -1905,7 +2603,7 @@ class _JournalSyncObserver:
                 return
             if ctype not in sj.DIMENSIONAL_CONSTRAINTS or "value" not in pc:
                 continue
-            expr = exprs.get(f"Constraints[{i}]")
+            expr = sj.constraint_expression(exprs, i, str(getattr(live[i], "Name", "") or ""))
             new = sj.map_constraint_value(
                 ctype, pc.get("value"), getattr(live[i], "Value", None), expr
             )
@@ -1915,11 +2613,12 @@ class _JournalSyncObserver:
                 updates.append((i, new))
         if not updates:
             return
+        edits = []
         for i, new in updates:
+            name = pcons[i].get("name") or getattr(live[i], "Name", "") or f"#{i}"
+            edits.append((f"{obj.Name} constraint {name}", pcons[i]["value"], new))
             pcons[i]["value"] = new
-        self._commit_sync(
-            doc, records, index, f"{obj.Name}.Constraints", "-", f"{len(updates)} value(s)"
-        )
+        self._commit_sync(doc, records, rec, edits)
 
     def _sync_move_fold(self, obj, doc, records, index: int, sub: int | None) -> None:
         """Fold a manual drag of a move-owned object into its last move step.
@@ -1952,21 +2651,48 @@ class _JournalSyncObserver:
         self._commit_sync(
             doc,
             records,
-            index,
-            f"{obj.Name}.Placement",
-            _placement_brief(current),
-            _placement_brief(value),
+            rec,
+            [(f"{obj.Name}.Placement", _placement_brief(current), _placement_brief(value))],
         )
 
-    def _commit_sync(self, doc, records, index: int, what: str, old: str, new: str) -> None:
+    def _commit_sync(
+        self,
+        doc,
+        records,
+        rec,
+        edits: list[tuple[str, Any, Any]],
+        sketch: tuple[str, str] | None = None,
+    ) -> None:
         self._writing = True
         try:
             write_journal(doc, records)
         finally:
             self._writing = False
-        logger.info("journal sync: step %d %s = %s (manual edit)", index, what, new)
-        _SYNC_EVENTS.append({"doc": doc.Name, "index": index, "prop": what, "old": old, "new": new})
-        del _SYNC_EVENTS[:-50]
+        if sketch is not None:
+            logger.info("journal sync: step %d sketch %s %s (manual edit)", rec.index, *sketch)
+            note_user_change(
+                doc.Name,
+                {
+                    "kind": "sketch",
+                    "step": rec.index,
+                    "label": rec.label,
+                    "object": sketch[0],
+                    "detail": sketch[1],
+                },
+            )
+        for what, old, new in edits:
+            logger.info("journal sync: step %d %s = %s (manual edit)", rec.index, what, new)
+            note_user_change(
+                doc.Name,
+                {
+                    "kind": "edit",
+                    "step": rec.index,
+                    "label": rec.label,
+                    "what": what,
+                    "old": old,
+                    "new": new,
+                },
+            )
 
 
 _OBSERVER_ATTR = "_cadpilot_journal_sync"

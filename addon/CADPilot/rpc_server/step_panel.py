@@ -19,6 +19,7 @@ standard icons (floppy, trash, media arrows) clash with FreeCAD's chrome.
 
 from __future__ import annotations
 
+import contextlib
 import html
 import json
 import time
@@ -153,6 +154,24 @@ def _op_label(spec: dict) -> str:
     return label
 
 
+def _doc_title(doc) -> str:
+    label = str(getattr(doc, "Label", "") or doc.Name)
+    return f"'{label}'" if label == doc.Name else f"'{label}' ({doc.Name})"
+
+
+def _plan_notes(plan: dict) -> str:
+    """What a rollback's dry run needs the user to know beyond its summary."""
+    notes = ""
+    if plan.get("accepted"):
+        notes += f"\nStep(s) {plan['accepted']} are accepted (reviewed)."
+    stale = [s for s in plan.get("stale") or [] if s["index"] in (plan.get("rerun") or [])]
+    if stale:
+        notes += "\nThis re-creates step(s) " + ", ".join(
+            f"{s['index']} ({s['reason']})" for s in stale
+        )
+    return notes
+
+
 def _row_text(rec) -> str:
     """Delegate: the display rules live in ``step_journal`` (pure, tested)."""
     return sj.row_text(rec)
@@ -169,10 +188,15 @@ class StepPanel(QtWidgets.QDockWidget):
         self._digest: str | None = None
         self._note: str | None = None
         self._records: list = []
+        self._stale: dict[int, str] = {}
         self._details_for: int = 0
         self._in_apply: bool = False
-        self._drifted: bool = False
-        self._entries: list[dict] = []
+        self._stale_logged: set[int] = set()
+        # One log per document: the panel follows the document the user is
+        # looking at, and a log that ran on across documents put one model's
+        # failures under another's steps.
+        self._logs: dict[str, list[dict]] = {}
+        self._doc_name: str | None = None
         self._spotlight: dict | None = None
         self._meta_raw: str = ""
         self._derive_colors()
@@ -272,6 +296,12 @@ class StepPanel(QtWidgets.QDockWidget):
             "Undo the selected step and forget everything from it onward",
             self._reject,
         )
+        self.act_drop = self._action(
+            "Drop",
+            "Forget the selected step: it is no longer in the model (undone or deleted "
+            "by hand), and dropping it keeps a rollback or replay from re-creating it",
+            self._drop,
+        )
         self.act_replay = self._action(
             "Replay",
             "Roll back to the start and re-run the whole journal",
@@ -294,6 +324,7 @@ class StepPanel(QtWidgets.QDockWidget):
             self.act_rollback,
             self.act_accept,
             self.act_reject,
+            self.act_drop,
             self.act_replay,
             self.act_snapshot,
         ):
@@ -497,6 +528,53 @@ QLabel#PanelStatus {{ color: {c["dim"]}; padding: 5px 8px 4px 8px; }}
 
     # --- refresh ---------------------------------------------------------
 
+    @property
+    def _entries(self) -> list[dict]:
+        return self._logs.setdefault(self._doc_name or "", [])
+
+    def _shown_document(self):
+        """The document the user is looking at: the GUI's, not App's.
+
+        App.ActiveDocument is whatever the last RPC call bound (execute_code
+        switches it and leaves it there), so following it moved the panel to
+        another model behind the user's back.
+        """
+        with contextlib.suppress(Exception):
+            gui_doc = FreeCADGui.ActiveDocument
+            if gui_doc is not None:
+                return gui_doc.Document
+        return FreeCAD.ActiveDocument
+
+    def _doc(self):
+        """The document this panel shows, which every action applies to."""
+        if self._doc_name and self._doc_name in FreeCAD.listDocuments():
+            return FreeCAD.getDocument(self._doc_name)
+        return None
+
+    def _bind(self, doc) -> None:
+        name = doc.Name if doc is not None else None
+        if name == self._doc_name:
+            return
+        # A closed document takes its log with it; one reopened under the same
+        # name starts a fresh one.
+        open_docs = set(FreeCAD.listDocuments())
+        for gone in [n for n in self._logs if n and n not in open_docs]:
+            del self._logs[gone]
+        self._doc_name = name
+        self._digest = None
+        self._note = None
+        self._records = []
+        self._stale = {}
+        self._stale_logged = set()
+        # A row number means nothing in another document's journal.
+        self.tree.blockSignals(True)
+        self.tree.clearSelection()
+        self.tree.blockSignals(False)
+        self._details_for = 0
+        self.editor.document().setModified(False)
+        self._spotlight = None
+        self._render_log()
+
     def refresh(self) -> None:
         """Redraw when the journal changed; report drift on its own channel.
 
@@ -505,7 +583,8 @@ QLabel#PanelStatus {{ color: {c["dim"]}; padding: 5px 8px 4px 8px; }}
         manual Ctrl+Z changes the undo stack WITHOUT touching the journal —
         so it is checked on every tick and logged once per episode.
         """
-        doc = FreeCAD.ActiveDocument
+        self._bind(self._shown_document())
+        doc = self._doc()
         if doc is None:
             if self._note != NO_DOCUMENT:
                 self._digest = None
@@ -518,14 +597,16 @@ QLabel#PanelStatus {{ color: {c["dim"]}; padding: 5px 8px 4px 8px; }}
         except Exception:
             text = ""
         records = sj.from_json(text)
-        self._report_drift(doc, records)
-        note = self._summary(records)
-        if text == self._digest and note == self._note:
+        stale = {s["index"]: s["reason"] for s in step_engine.stale_steps(doc, records)}
+        self._report_drift(stale)
+        note = self._summary(records, stale)
+        if text == self._digest and note == self._note and stale == self._stale:
             return
         old_states = {r.index: r.state for r in self._records}
         self._digest = text
         self._note = note
         self._records = records
+        self._stale = stale
         self._render(records, self._header_text(doc, records, sj.meta_from_json(text)), note)
         # Mirror failures caused OUTSIDE the panel (MCP step_control, another
         # client) into the log: the panel's own _apply already narrated its
@@ -537,13 +618,10 @@ QLabel#PanelStatus {{ color: {c["dim"]}; padding: 5px 8px 4px 8px; }}
                     sj.STATE_FAILED,
                 ):
                     self._log(f"step {rec.index} ({rec.operation}) failed: {rec.error}", "error")
-        # Manual-edit sync notices queued by step_engine's observer: the user
-        # corrected a tracked object in the GUI and the journal followed.
-        for ev in step_engine.pop_sync_events(doc.Name):
-            self._log(
-                f"step {ev['index']}: {ev['prop']} {ev['old']} -> {ev['new']} (manual edit)",
-                "info",
-            )
+        # The panel's own copy of what the user did in the GUI (Claude's copy
+        # rides on the next RPC reply and is drained separately).
+        for ev in step_engine.pop_panel_events(doc.Name):
+            self._log(sj.describe_change(ev), "info")
 
     def _header_text(self, doc, records, meta) -> str:
         name = html.escape(doc.Label or doc.Name)
@@ -558,40 +636,27 @@ QLabel#PanelStatus {{ color: {c["dim"]}; padding: 5px 8px 4px 8px; }}
             text += f"<br><span style='color:{dim}'>Plan: {html.escape(description)}</span>"
         return text
 
-    def _summary(self, records) -> str:
-        return (
+    def _summary(self, records, stale=None) -> str:
+        text = (
             f"{len(records)} step(s), "
             f"{sj.done_count(records)} done, {sj.pending_count(records)} planned, "
             f"{sum(1 for r in records if r.accepted)} accepted"
         )
+        if stale:
+            text += f", {len(stale)} no longer in the model"
+        return text
 
-    def _report_drift(self, doc, records) -> None:
-        """Log once when the journal and FreeCAD's undo stack start disagreeing.
+    def _report_drift(self, stale: dict[int, str]) -> None:
+        """Log each step once when it goes stale (the user undid or deleted it).
 
-        A manual Ctrl+Z/Ctrl+Y pops journal transactions without touching the
-        journal itself, so from then on rollback's undo math is unreliable —
-        it may rebuild instead of undoing cleanly. The notice is
-        edge-triggered (clean -> drifted logs one line, drifted -> clean
-        re-arms it): pinned in the status line it stayed on screen forever,
-        because the stack never realigns on its own.
+        Edge-triggered per step: pinned in the status line a notice stayed on
+        screen forever, and the row itself already shows the state.
         """
-        try:
-            names = list(getattr(doc, "UndoNames", []) or [])
-        except Exception:
-            names = []
-        # Same anchor as step_engine._status: the last ATOMIC step. A trailing
-        # execute_code record has no transaction, so anchoring on the last
-        # completed record outright would hide a manual undo here too.
-        last = sj.last_atomic_done(records)
-        drifted = bool(last and last.transaction not in names)
-        if drifted and not self._drifted:
-            # Default kind (dim), not "error": a heads-up about the undo
-            # stack, not a failed action — red is reserved for failures.
-            self._log(
-                "out of sync with FreeCAD's undo stack (undone manually?) — "
-                "rollback may rebuild instead of undoing cleanly",
-            )
-        self._drifted = drifted
+        for index, reason in sorted(stale.items()):
+            if index not in self._stale_logged:
+                # Default kind (dim), not "error": red is reserved for failures.
+                self._log(f"step {index} is no longer in the model ({reason}); Drop accepts that")
+        self._stale_logged = set(stale)
 
     def _render(self, records, header: str, note: str) -> None:
         self.header.setText(header)
@@ -605,9 +670,11 @@ QLabel#PanelStatus {{ color: {c["dim"]}; padding: 5px 8px 4px 8px; }}
         self.tree.blockSignals(True)
         self.tree.clear()
         for rec in records:
-            item = QtWidgets.QTreeWidgetItem([str(rec.index), _row_text(rec), rec.operation])
+            stale = self._stale.get(rec.index) if rec.state == sj.STATE_DONE else None
+            text = _row_text(rec) + (" — no longer in the model" if stale else "")
+            item = QtWidgets.QTreeWidgetItem([str(rec.index), text, rec.operation])
             item.setIcon(0, _state_icon(rec))
-            item.setToolTip(1, _tooltip_text(rec))
+            item.setToolTip(1, _tooltip_text(rec) + (f"\n{stale}" if stale else ""))
             if rec.accepted:
                 font = item.font(1)
                 font.setBold(True)
@@ -617,6 +684,12 @@ QLabel#PanelStatus {{ color: {c["dim"]}; padding: 5px 8px 4px 8px; }}
                     item.setForeground(col, QtGui.QBrush(_GREY))
             elif rec.state == sj.STATE_FAILED:
                 item.setForeground(1, QtGui.QBrush(_RED))
+            if stale:
+                font = item.font(1)
+                font.setStrikeOut(True)
+                item.setFont(1, font)
+                for col in range(3):
+                    item.setForeground(col, QtGui.QBrush(_GREY))
             self.tree.addTopLevelItem(item)
             if rec.index == selected:
                 self.tree.setCurrentItem(item)
@@ -736,7 +809,7 @@ QLabel#PanelStatus {{ color: {c["dim"]}; padding: 5px 8px 4px 8px; }}
 
     def _update_actions(self) -> None:
         rec = self._selected_record()
-        has_doc = FreeCAD.ActiveDocument is not None
+        has_doc = self._doc() is not None
         # The cursor is next_runnable (planned OR failed): a failed step's
         # transaction aborted, so its effect is not in the model and Next must
         # be able to retry it. Gating on planned-only disabled both buttons the
@@ -753,6 +826,7 @@ QLabel#PanelStatus {{ color: {c["dim"]}; padding: 5px 8px 4px 8px; }}
         self.act_accept.setEnabled(done)
         self.act_accept.setText("Unaccept" if (rec is not None and rec.accepted) else "Accept")
         self.act_reject.setEnabled(rec is not None)
+        self.act_drop.setEnabled(rec is not None and rec.index in self._stale)
         self.btn_save.setEnabled(
             rec is not None and rec.state in (sj.STATE_PLANNED, sj.STATE_FAILED)
         )
@@ -763,7 +837,7 @@ QLabel#PanelStatus {{ color: {c["dim"]}; padding: 5px 8px 4px 8px; }}
     # --- actions ---------------------------------------------------------
 
     def _apply(self, spec: dict, warn: bool = True):
-        doc = FreeCAD.ActiveDocument
+        doc = self._doc()
         if doc is None:
             self._warn(NO_DOCUMENT)
             return None
@@ -772,7 +846,8 @@ QLabel#PanelStatus {{ color: {c["dim"]}; padding: 5px 8px 4px 8px; }}
         # narrates its own outcome below, with the op label attached.
         self._in_apply = True
         try:
-            res = step_engine.apply_op(doc, spec)
+            res = step_engine.apply_op(doc, spec, deliver=False)
+            step_engine.note_panel_action(doc, spec, res)
             self._digest = None
             self._note = None
             self.refresh()
@@ -783,9 +858,11 @@ QLabel#PanelStatus {{ color: {c["dim"]}; padding: 5px 8px 4px 8px; }}
             self._in_apply = False
         if res.get("success"):
             self._log(label, "ok")
-            # A rollback that rebuilt or only partially restored the model
-            # "succeeded" — the panel user clicked the button and got their
-            # answer, so without this the degradation notes stay invisible.
+            # A rebuild is a success and reads as one (dim); a partial restore
+            # or a forced break is a warning (red). Either way the panel user
+            # sees what the engine did, not just that it "succeeded".
+            for text in res.get("notes") or []:
+                self._log(text, "info")
             for text in res.get("warnings") or []:
                 self._log(text, "error")
         elif warn:
@@ -798,7 +875,9 @@ QLabel#PanelStatus {{ color: {c["dim"]}; padding: 5px 8px 4px 8px; }}
         if res is None or res.get("success"):
             return
         error = str(res.get("error") or "The operation failed.")
-        if "force=true" in error and self._confirm(f"{error}\n\nForce it?"):
+        doc = self._doc()
+        where = f"{_doc_title(doc)}: " if doc is not None else ""
+        if "force=true" in error and self._confirm(f"{where}{error}\n\nForce it?"):
             self._apply({**spec, "force": True})
         else:
             self._warn(f"{_op_label(spec)}: {error}")
@@ -814,11 +893,16 @@ QLabel#PanelStatus {{ color: {c["dim"]}; padding: 5px 8px 4px 8px; }}
 
     def _rollback(self, _checked=False):
         index = self._selected_index()
-        doc = FreeCAD.ActiveDocument
+        doc = self._doc()
         if not index or doc is None:
             return
-        plan = sj.plan_rollback(step_engine.read_journal(doc), index - 1)
-        if plan["undo_count"] == 0 and not (plan["blocking"] or plan["accepted"]):
+        plan = step_engine.rollback_plan(doc, step_engine.read_journal(doc), index - 1)
+        if (
+            plan["undo_count"] == 0
+            and not (plan["blocking"] or plan["accepted"])
+            and plan["mode"] == "native"
+            and not plan["remove"]
+        ):
             # undo_count counts only transaction-bearing records, so a range
             # holding a MUTATED non-atomic record (a legacy record, or steps
             # behind a snapshot) reads as "nothing to undo" here while the
@@ -827,12 +911,8 @@ QLabel#PanelStatus {{ color: {c["dim"]}; padding: 5px 8px 4px 8px; }}
             # through to _apply_maybe_force, which offers the force retry.
             self._warn(f"Nothing has been executed before step {index}.")
             return
-        text = (
-            f"Roll back to just before step {index}? "
-            f"This undoes {plan['undo_count']} transaction(s)."
-        )
-        if plan["accepted"]:
-            text += f"\nStep(s) {plan['accepted']} are accepted (reviewed)."
+        text = f"Roll back {_doc_title(doc)} to just before step {index}?\n\n{plan['summary']}"
+        text += _plan_notes(plan)
         if not self._confirm(text):
             return
         self._apply_maybe_force({"operation": "rollback_to", "index": index - 1})
@@ -845,16 +925,15 @@ QLabel#PanelStatus {{ color: {c["dim"]}; padding: 5px 8px 4px 8px; }}
 
     def _reject(self, _checked=False):
         rec = self._selected_record()
-        doc = FreeCAD.ActiveDocument
+        doc = self._doc()
         if rec is None or doc is None:
             return
-        plan = sj.plan_reject(step_engine.read_journal(doc), rec.index)
+        plan = step_engine.reject_plan(doc, step_engine.read_journal(doc), rec.index)
         if plan is None:
             return
         text = (
-            f"Reject step {rec.index} and everything after it? "
-            f"{plan['undo_count']} transaction(s) will be undone and "
-            f"{len(plan['drop'])} step(s) forgotten."
+            f"Reject step {rec.index} of {_doc_title(doc)} and everything after it?\n\n"
+            f"{plan['summary']}"
         )
         if plan["accepted"]:
             text += f"\nThat includes accepted step(s) {plan['accepted']}."
@@ -865,30 +944,42 @@ QLabel#PanelStatus {{ color: {c["dim"]}; padding: 5px 8px 4px 8px; }}
                 "carry no transaction, so undo may revert the wrong change."
             )
             force = True
+        if plan["user_dependents"]:
+            force = True
         if not self._confirm(text):
             return
         self._apply({"operation": "reject", "index": rec.index, "force": force})
 
+    def _drop(self, _checked=False):
+        rec = self._selected_record()
+        if rec is None or rec.index not in self._stale:
+            return
+        self._apply({"operation": "drop", "index": rec.index})
+
     def _replay(self, _checked=False):
-        doc = FreeCAD.ActiveDocument
+        doc = self._doc()
         if doc is None:
             return
-        plan = sj.plan_rollback(step_engine.read_journal(doc), 0)
+        plan = step_engine.rollback_plan(doc, step_engine.read_journal(doc), 0)
         if plan["undo_count"] == 0 and not (plan["blocking"] or plan["accepted"]):
             self._warn("Nothing has been executed yet.")
             return
-        if not self._confirm(
-            f"Replay the journal from scratch? "
-            f"This undoes {plan['undo_count']} transaction(s) and re-runs every step."
-        ):
+        text = (
+            f"Replay the journal of {_doc_title(doc)} from scratch?\n\n{plan['summary']} "
+            "Then every step is re-run."
+        )
+        if not self._confirm(text + _plan_notes(plan)):
             return
         self._apply_maybe_force({"operation": "replay", "index": 0})
 
     def _snapshot(self, _checked=False):
+        doc = self._doc()
+        if doc is None:
+            return
         text, ok = QtWidgets.QInputDialog.getText(
             self,
             "Snapshot",
-            "Note for the baseline (what was done outside the journal):",
+            f"Note for the baseline of {_doc_title(doc)} (what was done outside the journal):",
         )
         if not ok:
             return
@@ -926,7 +1017,9 @@ QLabel#PanelStatus {{ color: {c["dim"]}; padding: 5px 8px 4px 8px; }}
         params = self._edited_params()
         if params is None:
             return
-        res = self._apply({"operation": "update", "index": rec.index, "params": params})
+        res = self._apply(
+            {"operation": "update", "index": rec.index, "params": params, "replace": True}
+        )
         if res is not None and res.get("success"):
             self.editor.document().setModified(False)
 
@@ -940,7 +1033,9 @@ QLabel#PanelStatus {{ color: {c["dim"]}; padding: 5px 8px 4px 8px; }}
         if not rec.executable:
             self._warn(f"'{rec.operation}' cannot be re-run — only modeling steps can.")
             return
-        self._apply_maybe_force({"operation": "reexecute", "index": rec.index, "params": params})
+        self._apply_maybe_force(
+            {"operation": "reexecute", "index": rec.index, "params": params, "replace": True}
+        )
         self.editor.document().setModified(False)
 
     def _menu(self, pos) -> None:
@@ -951,6 +1046,7 @@ QLabel#PanelStatus {{ color: {c["dim"]}; padding: 5px 8px 4px 8px; }}
             self.act_rollback,
             self.act_accept,
             self.act_reject,
+            self.act_drop,
             self.act_replay,
         ):
             menu.addAction(action)
