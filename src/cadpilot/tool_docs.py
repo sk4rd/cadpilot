@@ -302,7 +302,11 @@ Optional: plane, offset, body, construction, external, constraints.
   {"face": [...], "center": true} puts the sketch origin at the MIDDLE of the
   face; without it the origin sits on the face's parametric origin, which is a
   CORNER on rectangular faces (a circle meant for the middle of a 100x60 side
-  face lands at its corner and the cut is clipped by the part's edge).
+  face lands at its corner and the cut is clipped by the part's edge). The
+  middle is measured once and stored as a constant AttachmentOffset (echoed
+  as center_offset): it does NOT follow later dimension changes. For a
+  profile that stays centred, sketch on a base or datum plane and dimension
+  it from the spreadsheet (distance_x "=Params.width / 2").
   Naming the BODY is allowed and is resolved to its Tip: the Body's Shape IS
   its Tip's result, so an attachment naming the Body itself closes a dependency
   cycle the moment a feature built on this profile joins the body, and FreeCAD
@@ -538,7 +542,10 @@ origin) or {"face": ["ObjName", "FaceN"]} (attached to an existing face;
 "+Z"/"top"/"MaxX"/… direction tokens resolve like a sketch's plane.face).
 Add {"face": [...], "center": true} to put the plane's origin at the MIDDLE of
 the face (the default is the face's parametric origin — a corner on
-rectangular faces; sketches attached to the datum then land there).
+rectangular faces; sketches attached to the datum then land there). The
+middle is a constant offset measured at build time; it does not follow later
+dimension changes, and a face reference can break on upstream edits, so an
+origin-plane datum is the stable choice.
 The result echoes the resolved face (name/center/normal, and the datum's own
 support), so a surprise direction pick is visible.
 Optional: offset (mm along the plane normal, or an "=expression" that stays

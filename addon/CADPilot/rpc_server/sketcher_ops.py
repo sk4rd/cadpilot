@@ -513,6 +513,15 @@ def _attach_sketch(sketch, doc, spec, body) -> tuple[dict, list[str]]:
             off_material = center_attachment(sketch, ref, face_name, doc)
             if off_material:
                 warnings.append(off_material)
+            shift = _vec3(sketch.AttachmentOffset.Base)[:2]
+            echo["center_offset"] = shift
+            warnings.append(
+                f"center: true is fixed at build time: the origin was moved to the face's "
+                f"middle by a constant AttachmentOffset {shift} in the face's frame, which "
+                "does not follow later dimension changes. To keep a profile centred as the "
+                "parameters change, sketch on a base or datum plane and dimension it from the "
+                "spreadsheet (e.g. distance_x '=Params.width / 2')."
+            )
         _apply_offset(sketch, offset, offset_expr)
         # The echo used to report only the FACE center, which a caller reads as
         # "the sketch origin is here" — while the origin actually sits on the

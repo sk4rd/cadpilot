@@ -51,6 +51,7 @@ def ok(res):
 
 
 def err(res):
+    """The reply's text; warnings are folded into it as "WARNING - ..." lines."""
     return res.get("summary") or res.get("text") or ""
 
 
@@ -458,7 +459,7 @@ def m4_face_attachments_warn_that_they_are_fragile():
         plane={"face": [pad, "+Z"]},
         geometry=[{"type": "circle", "center": [5, 5], "radius": 2}],
     )
-    warnings = " ".join(res.get("warnings") or []) + err(res)
+    warnings = err(res)
     check(
         "M4 a face attachment warns that it can break on upstream edits",
         ok(res)
@@ -476,8 +477,35 @@ def m4_face_attachments_warn_that_they_are_fragile():
     )
     check(
         "M4 a base-plane sketch carries no fragility warning",
-        ok(res) and not any("upstream" in w for w in res.get("warnings") or []),
+        ok(res) and "upstream geometry" not in err(res),
         str(res),
+    )
+
+
+def m5_a_centred_face_sketch_says_it_is_fixed():
+    doc = "SkCenter"
+    newdoc(doc)
+    pad = _stepped_block(doc)
+    res = cad(
+        "sketch",
+        doc,
+        "Mid",
+        plane={"face": [pad, "+Z"], "center": True},
+        geometry=[{"type": "circle", "center": [0, 0], "radius": 2}],
+    )
+    warnings = err(res)
+    check(
+        "M5 center: true says the offset is fixed at build time",
+        ok(res)
+        and "fixed at build time" in warnings
+        and res.get("plane", {}).get("center_offset") == [15.0, 10.0],
+        str(res),
+    )
+    cad("variables", doc, "Params", cells={"A1": ["width", 50]})
+    check(
+        "M5 (as documented) the centre stays where it was measured",
+        inspect(doc, "Mid")["origin"][:2] == [15.0, 10.0],
+        str(inspect(doc, "Mid")),
     )
 
 
@@ -491,6 +519,7 @@ CHECKS = [
     m1_composite_geometry_is_fully_constrainable,
     m3_base_planes_attach_to_the_origin_with_an_expression_offset,
     m4_face_attachments_warn_that_they_are_fragile,
+    m5_a_centred_face_sketch_says_it_is_fixed,
 ]
 
 if __name__ == "__main__":
