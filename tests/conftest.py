@@ -22,6 +22,13 @@ def _reset_home_document():
     operations_core.reset_last_doc_name()
 
 
+@pytest.fixture(autouse=True)
+def _default_port(monkeypatch):
+    """Unit tests expect the default port; a developer's CADPILOT_PORT (set to
+    talk to a test FreeCAD) must not leak into them."""
+    monkeypatch.delenv("CADPILOT_PORT", raising=False)
+
+
 @pytest.fixture(autouse=True, scope="session")
 def _isolate_addon_logs(tmp_path_factory):
     """Keep the addon log pipeline out of the developer's home directory.
