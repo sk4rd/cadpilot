@@ -9,11 +9,17 @@ by ``feature_ops.describe_feature`` — builders only return the object itself.
 """
 
 import contextlib
+import importlib
 import math
 
 import FreeCAD
 import Part
 import Sketcher
+
+# rpc_server.sketch_spec is not in rpc_server._RELOAD_ORDER, so it is reloaded
+# here, with this module; a plain import would keep its old code alive across
+# a hot restart.
+sketch_spec = importlib.reload(importlib.import_module("rpc_server.sketch_spec"))
 
 # Result of the most recent build_sketch_gui call; read once by
 # describe_feature() via pop_last_sketch_info().
@@ -23,9 +29,6 @@ _LAST_SKETCH_INFO: dict | None = None
 # sketch result so a wrong face pick is visible).
 _LAST_ATTACHMENT: dict | None = None
 _CENTER_OFF_MATERIAL: str | None = None
-
-# spec point keyword -> Sketcher PointPos
-_POINT_POS = {"start": 1, "end": 2, "center": 3, "mid": 3}
 
 # Base-plane placements as (yaw, pitch, roll) degrees, copied from FreeCAD's
 # own origin planes (XY_Plane R=identity, XZ_Plane roll +90, YZ_Plane
@@ -222,153 +225,22 @@ def _check_external_point_refs(spec):
 # --- constraints ----------------------------------------------------------------
 
 
-def _point_ref(item, what="item"):
-    """[geo_id, "start"|"end"|...] -> (geo_id, PointPos).
-
-    GeoId -1 is the sketch X axis; its start point (origin) is the common
-    anchor, so any point keyword on -1 maps to the origin (PointPos 1).
-    Bare [geo_id] (a whole-geometry reference) is handled by callers.
-    """
-    if not (isinstance(item, (list, tuple)) and len(item) == 2):
-        raise ValueError(f"{what} must be [geo_id, point], got {item!r}")
-    geo_id, pos = int(item[0]), str(item[1]).lower()
-    if geo_id == -1:
-        return -1, 1  # origin
-    p = _POINT_POS.get(pos)
-    if p is None:
-        raise ValueError(f"{what}: point must be one of {sorted(_POINT_POS)}, got {item[1]!r}")
-    return geo_id, p
-
-
-def _geo_id(item, what="item"):
-    """A whole-geometry reference: ``[geo_id]`` or a bare ``geo_id``.
-
-    Both spellings mean the same thing, and a caller writing a constraint by
-    hand naturally writes ``"items": [0]`` (the geometry INDEX), which used to
-    die "item must be [geo_id], got 0" — an error that names the shape but not
-    the intent. A 2-element item is a POINT reference elsewhere, so a bare int
-    can never be ambiguous here.
-    """
-    if isinstance(item, int):
-        return item
-    if not (isinstance(item, (list, tuple)) and len(item) == 1):
-        raise ValueError(f"{what} must be a geo_id or [geo_id] (the geometry index), got {item!r}")
-    return int(item[0])
-
-
-def _is_point_item(item):
-    return isinstance(item, (list, tuple)) and len(item) == 2
-
-
-def _constraint_geometry(ctype: str, items: list):
-    """spec constraint -> Sketcher.Constraint args (without any value)."""
-    if ctype == "coincident":
-        g1, p1 = _point_ref(items[0])
-        g2, p2 = _point_ref(items[1])
-        return ("Coincident", g1, p1, g2, p2)
-    if ctype in ("horizontal", "vertical"):
-        return (ctype.capitalize(), _geo_id(items[0]))
-    if ctype in ("tangent", "perpendicular"):
-        if all(_is_point_item(i) for i in items[:2]):
-            g1, p1 = _point_ref(items[0])
-            g2, p2 = _point_ref(items[1])
-            return (ctype.capitalize(), g1, p1, g2, p2)
-        return (ctype.capitalize(), _geo_id(items[0]), _geo_id(items[1]))
-    if ctype in ("parallel", "equal"):
-        return (ctype.capitalize(), _geo_id(items[0]), _geo_id(items[1]))
-    if ctype == "symmetric":
-        g1, p1 = _point_ref(items[0])
-        g2, p2 = _point_ref(items[1])
-        third = items[2]
-        if _is_point_item(third):  # symmetry about a point
-            g3, p3 = _point_ref(third)
-            return ("Symmetric", g1, p1, g2, p2, g3, p3)
-        return ("Symmetric", g1, p1, g2, p2, _geo_id(third))  # about a line
-    if ctype == "distance":
-        if len(items) == 1:
-            return ("Distance", _geo_id(items[0]))
-        a, b = items[0], items[1]
-        if _is_point_item(a) and _is_point_item(b):
-            g1, p1 = _point_ref(a)
-            g2, p2 = _point_ref(b)
-            return ("Distance", g1, p1, g2, p2)
-        if _is_point_item(a):
-            g1, p1 = _point_ref(a)
-            return ("Distance", g1, p1, _geo_id(b))
-        g2, p2 = _point_ref(b)
-        return ("Distance", g2, p2, _geo_id(a))
-    if ctype in ("distance_x", "distance_y"):
-        fc_type = "DistanceX" if ctype == "distance_x" else "DistanceY"
-        if len(items) == 1:
-            # ONE item is either a point (distance from the origin) or a whole
-            # geometry (FreeCAD's edge form: the x/y position of a line). The
-            # edge form is the natural way to place a vertical/horizontal wall,
-            # and requiring a point ref made it unexpressible.
-            if _is_point_item(items[0]):
-                g, p = _point_ref(items[0])
-                return (fc_type, g, p)
-            return (fc_type, _geo_id(items[0]))
-        g1, p1 = _point_ref(items[0])
-        g2, p2 = _point_ref(items[1])
-        return (fc_type, g1, p1, g2, p2)
-    if ctype == "radius":
-        return ("Radius", _geo_id(items[0]))
-    if ctype == "angle":
-        if len(items) == 1:
-            return ("Angle", _geo_id(items[0]))
-        return ("Angle", _geo_id(items[0]), _geo_id(items[1]))
-    raise ValueError(
-        f"unknown constraint type {ctype!r}; supported: coincident, horizontal, "
-        "vertical, tangent, perpendicular, parallel, equal, symmetric, distance, "
-        "distance_x, distance_y, radius, angle"
-    )
-
-
-_DIMENSIONAL = ("distance", "distance_x", "distance_y", "radius", "angle")
-
-
 def _add_constraints(sketch, constraints: list):
-    for i, c in enumerate(constraints or []):
-        if not isinstance(c, dict):
-            raise ValueError(f"constraints[{i}] must be a dict, got {c!r}")
-        ctype = c.get("type")
-        items = c.get("items")
-        if not isinstance(items, list) or not items:
-            raise ValueError(f"constraints[{i}] ({ctype}): 'items' must be a non-empty list.")
-        try:
-            args = _constraint_geometry(ctype, items)
-        except (IndexError, TypeError) as e:
-            raise ValueError(f"constraints[{i}] ({ctype}): malformed items: {e}") from e
-
-        dimensional = ctype in _DIMENSIONAL
-        value = c.get("value")
-        if dimensional:
-            if value is None:
-                raise ValueError(
-                    f"constraints[{i}] ({ctype}): dimensional constraint requires 'value'."
-                )
-            is_expr = isinstance(value, str) and value.startswith("=")
-            if ctype == "angle" and not is_expr:
-                datum = math.radians(float(value))
-            else:
-                datum = 1.0 if is_expr else float(value)  # placeholder for expr binding
-            con = Sketcher.Constraint(*args, datum)
-        else:
-            if value is not None:
-                raise ValueError(
-                    f"constraints[{i}] ({ctype}): geometric constraint takes no 'value'."
-                )
+    for plan in sketch_spec.plan_constraints(constraints):
+        args = plan["args"]
+        if plan["datum"] is None:
             con = Sketcher.Constraint(*args)
-
+        else:
+            con = Sketcher.Constraint(*args, plan["datum"])
         idx = sketch.addConstraint(con)
-        if c.get("name"):
-            sketch.renameConstraint(idx, str(c["name"]))
-        if dimensional and isinstance(value, str) and value.startswith("="):
+        if plan["name"]:
+            sketch.renameConstraint(idx, plan["name"])
+        if plan["expr"] is not None:
             try:
-                sketch.setExpression(f"Constraints[{idx}]", value[1:])
+                sketch.setExpression(f"Constraints[{idx}]", plan["expr"])
             except Exception as e:
                 raise ValueError(
-                    f"constraints[{i}] ({ctype}): expression binding failed: {e}"
+                    f"constraints[{plan['entry']}] ({plan['type']}): expression binding failed: {e}"
                 ) from e
 
 
