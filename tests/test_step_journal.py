@@ -613,7 +613,7 @@ def test_tracked_objects_feature_claims_builder_keys_even_when_unpassed():
     props = sj.tracked_objects(recs)["Pad"]["props"]
     assert props["Length"] == (1, "length", None)
     assert props["Reversed"] == (1, "reversed", None)
-    assert props["Midplane"] == (1, "midplane", None)
+    assert props["Midplane"] == (1, "pad_type", None)  # one rule with Type and SideType
 
 
 def test_tracked_objects_variables_claims_the_sheet_even_when_idempotent():

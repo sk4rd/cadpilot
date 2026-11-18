@@ -1209,11 +1209,11 @@ class SyncRule:
     """How one live feature property maps back onto the op's spec.
 
     ``kind`` names the converter (``sync_patch``) and the engine's reader:
-    ``value`` (a scalar), ``int``, ``enum`` (snake_case of the enum text),
-    ``spacings`` (a float list, FreeCAD's all -1 meaning "uniform"),
-    ``extent_spacing`` (a linear pattern's overall length as the pitch the
-    spec gives), ``pad_type`` (the Type enum, ThroughAll being the spec's
-    ``through_all``), ``link_sub`` (a ``[object, subelement]`` reference),
+    ``value`` (a scalar), ``int``, ``spacings`` (a float list, FreeCAD's all -1 meaning "uniform"),
+    ``pattern_mode`` (a linear pattern's Spacing/Extent mode), ``pad_mode``
+    (a pad/pocket's Type, SideType and Midplane together: ``pad_type``,
+    ``through_all``, ``midplane``), ``link_sub`` (a ``[object, subelement]``
+    reference),
     ``names`` (the extra originals beyond the step's own base), ``axis``,
     ``mirror_plane``, ``z_offset`` (a pure-z AttachmentOffset) and
     ``edge_size`` (a uniform Part fillet/chamfer size).
@@ -1232,15 +1232,19 @@ class SyncRule:
 #: A sync_patch value that removes the key from the spec.
 REMOVE = object()
 
+# Type, SideType and Midplane are one decision in the spec (pad_type plus the
+# through_all/midplane flags, and the keys only one mode reads), so all three
+# map through the same rule and its converter reads them together.
+_PAD_MODE = SyncRule("pad_type", "pad_mode", default="length")
 _PADLIKE = {
     "Length": SyncRule("length", default=10.0),
-    "Length2": SyncRule("length2"),
+    "Length2": SyncRule("length2", when=("SideType", "Two sides")),
     "Offset": SyncRule("offset", default=0),
     "Reversed": SyncRule("reversed", default=False),
-    "Midplane": SyncRule("midplane", default=False),
-    "SideType": SyncRule("side_type", "enum", default="one_side"),
-    "Type": SyncRule("pad_type", "pad_type", default="length"),
-    "UpToFace": SyncRule("up_to_face", "link_sub"),
+    "Midplane": _PAD_MODE,
+    "SideType": _PAD_MODE,
+    "Type": _PAD_MODE,
+    "UpToFace": SyncRule("up_to_face", "link_sub", when=("Type", "UpToFace")),
 }
 _LINEAR = ("PartDesign::LinearPattern",)
 _POLAR = ("PartDesign::PolarPattern",)
@@ -1273,9 +1277,10 @@ FEATURE_SYNC: dict[str, dict[str, SyncRule]] = {
     "pattern": {
         "Occurrences": SyncRule("count", "int"),
         "Angle": SyncRule("angle", default=360.0, only=_POLAR),
+        "Mode": SyncRule("mode", "pattern_mode", default="spacing", only=_LINEAR),
         "Offset": SyncRule("spacing", only=_LINEAR, when=("Mode", "Spacing")),
-        "Length": SyncRule("spacing", "extent_spacing", only=_LINEAR, when=("Mode", "Extent")),
-        "Spacings": SyncRule("spacings", "spacings", only=_LINEAR),
+        "Length": SyncRule("length", only=_LINEAR, when=("Mode", "Extent")),
+        "Spacings": SyncRule("spacings", "spacings", only=_LINEAR, when=("Mode", "Spacing")),
         "Reversed": SyncRule("reversed", default=False),
         "Originals": SyncRule("originals", "names", default=[]),
         "Direction": SyncRule("axis", "axis", only=_LINEAR),
@@ -1348,26 +1353,20 @@ def sync_patch(
             return {rule.key: int(live)}
         except (TypeError, ValueError):
             return None
-    if kind == "enum":
-        return None if live is None else {rule.key: str(live).strip().lower().replace(" ", "_")}
     if kind == "spacings":
         if not isinstance(live, (list, tuple)):
             return None
         if all(float(v) == -1 for v in live):
             return {rule.key: REMOVE}
         return {rule.key: [_num(v) for v in live]}
-    if kind == "extent_spacing":
-        # (overall length, occurrences): the spec's pitch spans count-1 gaps.
-        try:
-            length, count = float(live[0]), int(live[1])
-        except (TypeError, ValueError, IndexError):
+    if kind == "pad_mode":
+        return _pad_mode_patch(rule.key, live)
+    if kind == "pattern_mode":
+        if live not in ("Spacing", "Extent"):
             return None
-        return {rule.key: _num(length / (count - 1))} if count > 1 else None
-    if kind == "pad_type":
-        if live == "ThroughAll":
-            return {"through_all": True, rule.key: REMOVE}
-        token = PAD_TYPES.get(str(live))
-        return None if token is None else {rule.key: token, "through_all": REMOVE}
+        if live == "Extent":
+            return {rule.key: "extent", "spacings": REMOVE}
+        return {rule.key: "spacing"}
     if kind == "link_sub":
         if not live:
             return {rule.key: REMOVE}
@@ -1400,6 +1399,35 @@ def sync_patch(
             return None
         return {rule.key: _num(z)}
     return None
+
+
+def _pad_mode_patch(key: str, live: Any) -> dict[str, Any] | None:
+    """A pad/pocket's Type + SideType + Midplane as the spec's mode keys.
+
+    ``live`` is ``{"type", "side", "midplane"}``. The spec reads each mode's
+    own keys only (up_to_face with up_to_face, length2 with two_lengths), so a
+    mode change removes the keys the new mode would refuse.
+    """
+    if not isinstance(live, dict):
+        return None
+    side = str(live.get("side") or "")
+    fc_type = str(live.get("type") or "")
+    if side == "Two sides" or fc_type == "TwoLengths":
+        return {key: "two_lengths", "through_all": REMOVE, "midplane": REMOVE, "up_to_face": REMOVE}
+    patch: dict[str, Any] = {
+        "midplane": True if side == "Symmetric" or live.get("midplane") else REMOVE,
+        "length2": REMOVE,
+    }
+    if fc_type == "ThroughAll":
+        patch.update({"through_all": True, key: REMOVE, "up_to_face": REMOVE})
+        return patch
+    token = PAD_TYPES.get(fc_type)
+    if token is None:
+        return None
+    patch.update({key: REMOVE if token == "length" else token, "through_all": REMOVE})
+    if token != "up_to_face":
+        patch["up_to_face"] = REMOVE
+    return patch
 
 
 def patch_value_matches(rule: SyncRule, key: str, current: Any, value: Any) -> bool:

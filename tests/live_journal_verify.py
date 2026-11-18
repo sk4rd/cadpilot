@@ -770,7 +770,11 @@ user(
     """,
 )
 pad = step_params(D, "pad")
-check("F a pad's SideType syncs", pad.get("side_type") == "two_sides", str(pad))
+check(
+    "F a two-sided pad syncs as the builder's two_lengths",
+    pad.get("pad_type") == "two_lengths",
+    str(pad),
+)
 check("F ... with the second length", pad.get("length2") == 3, str(pad))
 user(D, "d.getObject('Pocket').Type = 'ThroughAll'; d.recompute()")
 pocket = step_params(D, "pocket")

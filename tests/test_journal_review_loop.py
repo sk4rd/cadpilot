@@ -156,10 +156,9 @@ def test_every_feature_rule_has_a_converter():
     known = {
         "value",
         "int",
-        "enum",
         "spacings",
-        "extent_spacing",
-        "pad_type",
+        "pattern_mode",
+        "pad_mode",
         "link_sub",
         "names",
         "axis",
@@ -170,12 +169,28 @@ def test_every_feature_rule_has_a_converter():
     assert kinds <= known
 
 
-def test_pad_and_pocket_sync_their_type_and_second_length():
-    assert _patch("pocket", "Type", "ThroughAll") == {"through_all": True, "pad_type": sj.REMOVE}
-    assert _patch("pad", "Type", "TwoLengths") == {
+def _mode(fc_type="Length", side="One side", midplane=False):
+    return {"type": fc_type, "side": side, "midplane": midplane}
+
+
+def test_pad_and_pocket_sync_their_mode_as_the_builder_reads_it():
+    assert _patch("pocket", "Type", _mode("ThroughAll")) == {
+        "midplane": sj.REMOVE,
+        "length2": sj.REMOVE,
+        "through_all": True,
+        "pad_type": sj.REMOVE,
+        "up_to_face": sj.REMOVE,
+    }
+    # FreeCAD 1.1 keeps two lengths in SideType, the builder in pad_type.
+    assert _patch("pad", "SideType", _mode(side="Two sides")) == {
         "pad_type": "two_lengths",
         "through_all": sj.REMOVE,
+        "midplane": sj.REMOVE,
+        "up_to_face": sj.REMOVE,
     }
+    assert _patch("pad", "Midplane", _mode(side="Symmetric", midplane=True))["midplane"] is True
+    up = _patch("pocket", "Type", _mode("UpToFace"))
+    assert up["pad_type"] == "up_to_face" and "up_to_face" not in up
     assert _patch("pad", "Length2", 4.5) == {"length2": 4.5}
     assert _patch("pocket", "Offset", 1) == {"offset": 1}
     assert _patch("pocket", "UpToFace", {"name": "Pad", "subs": ["Face6"]}) == {
@@ -188,8 +203,8 @@ def test_pattern_and_mirror_properties_sync():
     assert _patch("pattern", "Occurrences", 6, expr="Vars.n") == {"count": "=Vars.n"}
     assert _patch("pattern", "Spacings", [10.0, 12.5]) == {"spacings": [10, 12.5]}
     assert _patch("pattern", "Spacings", [-1.0, -1.0]) == {"spacings": sj.REMOVE}
-    assert _patch("pattern", "Length", (30.0, 4)) == {"spacing": 10}
-    assert _patch("pad", "SideType", "Two sides") == {"side_type": "two_sides"}
+    assert _patch("pattern", "Length", 30.0) == {"length": 30.0}
+    assert _patch("pattern", "Mode", "Extent") == {"mode": "extent", "spacings": sj.REMOVE}
     assert _patch("pattern", "Originals", ["Pocket", "Pocket001"], base="Pocket") == {
         "originals": ["Pocket001"]
     }
@@ -224,6 +239,7 @@ def test_a_value_equal_to_the_builder_default_writes_nothing():
     assert sj.patch_value_matches(rule, "pad_type", None, sj.REMOVE)
     assert sj.patch_value_matches(rule, "pad_type", None, "length")
     assert not sj.patch_value_matches(rule, "through_all", None, True)
+    assert sj.patch_value_matches(rule, "midplane", None, sj.REMOVE)
 
 
 def test_feature_claims_follow_the_rules():

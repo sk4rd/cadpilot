@@ -2074,9 +2074,13 @@ def _read_live(obj, prop: str, kind: str):
         return [o.Name for o in value or [] if o is not None]
     if kind == "spacings":
         return list(value) if value is not None else None
-    if kind == "extent_spacing":
-        return (_json_scalar(value), getattr(obj, "Occurrences", 0))
-    if kind == "enum":
+    if kind == "pad_mode":
+        return {
+            "type": str(getattr(obj, "Type", "") or ""),
+            "side": str(getattr(obj, "SideType", "") or ""),
+            "midplane": bool(getattr(obj, "Midplane", False)),
+        }
+    if kind == "pattern_mode":
         return str(value) if value is not None else None
     if kind == "edge_size":
         return _uniform_edge_size(value)
@@ -2084,8 +2088,6 @@ def _read_live(obj, prop: str, kind: str):
         if value is None:
             return None
         return (value.Base.x, value.Base.y, value.Base.z, value.Rotation.Angle)
-    if kind == "pad_type":
-        return str(value) if value is not None else None
     return _json_scalar(value)
 
 
@@ -2377,8 +2379,19 @@ class _JournalSyncObserver:
             records = sj.from_json(text)
             if entry.get("sheet") is not None:
                 self._sync_cells(obj, doc, records, *entry["sheet"])
-            for claimed in list(entry["props"]):
-                self._sync(obj, claimed)
+            # Only what may have been bound or unbound: a property that is
+            # bound now, or whose step value is an expression. Re-reading every
+            # claim wrote each builder default the caller had left out.
+            bound = {
+                str(path).lstrip(".").split(".")[0]
+                for path, _expr in getattr(obj, "ExpressionEngine", None) or []
+            }
+            by_index = {r.index: r for r in records}
+            for claimed, (index, key, sub) in list(entry["props"].items()):
+                rec = by_index.get(index)
+                target = (_sync_props_target(rec, sub) or {}) if rec is not None else {}
+                if claimed in bound or str(target.get(key, "")).startswith("="):
+                    self._sync(obj, claimed)
             if entry.get("move") is not None:
                 self._sync_move_fold(obj, doc, records, *entry["move"])
             return
