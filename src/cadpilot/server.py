@@ -1,3 +1,4 @@
+import functools
 import json
 import logging
 import os
@@ -47,6 +48,7 @@ from .operations import (
     set_anchors_operation,
     step_control_operation,
     step_plan_operation,
+    user_changes_text,
     verify_assembly_operation,
 )
 from .pattern_store import get_pattern, list_patterns
@@ -198,7 +200,33 @@ def _maybe_start_log_forwarder() -> None:
     logger.info("Forwarding the addon log to this process's stderr every %ss", _FORWARD_INTERVAL)
 
 
+def _reports_user_changes(tool):
+    """Lead the tool's reply with what the user changed in FreeCAD since the last call.
+
+    Every FreeCAD-facing tool carries it, reads included: the user edits,
+    undoes and rejects between Claude's calls, and this is the only way the
+    model learns of it.
+    """
+
+    @functools.wraps(tool)
+    def wrapper(*args, **kwargs):
+        conn = state.freecad_connection
+        if conn is not None:
+            conn.begin_tool_call()
+        response = tool(*args, **kwargs)
+        conn = state.freecad_connection
+        if conn is None:
+            return response
+        note = user_changes_text(conn, kwargs.get("doc_name"))
+        if not note:
+            return response
+        return [TextContent(type="text", text=note), *response]
+
+    return wrapper
+
+
 @mcp.tool(annotations=_mutating("Create Document", destructive=False))
+@_reports_user_changes
 def create_document(
     ctx: Context,
     name: Annotated[str, Field(min_length=1)],
@@ -215,6 +243,7 @@ def create_document(
 
 
 @mcp.tool(annotations=_mutating("CAD Modeling Operation"))
+@_reports_user_changes
 def cad(
     ctx: Context,
     operation: Literal[
@@ -277,6 +306,7 @@ def cad(
 
 
 @mcp.tool(annotations=_mutating("Execute Code (Background)"))
+@_reports_user_changes
 def execute_code_async(ctx: Context, code: str) -> list[TextContent]:
     """Run Python on a background thread and return a task_id; poll the result with get_task_result.
 
@@ -289,6 +319,7 @@ def execute_code_async(ctx: Context, code: str) -> list[TextContent]:
 
 
 @mcp.tool(annotations=_read_only("Get Async Task Result"))
+@_reports_user_changes
 def get_task_result(
     ctx: Context, task_id: Annotated[str, Field(min_length=1)]
 ) -> list[TextContent]:
@@ -303,6 +334,7 @@ def get_task_result(
 
 
 @mcp.tool(annotations=_mutating("Execute Code (GUI Thread)"))
+@_reports_user_changes
 def execute_code(
     ctx: Context,
     code: str,
@@ -324,6 +356,7 @@ def execute_code(
 
 
 @mcp.tool(annotations=_read_only("Capture View Screenshot"))
+@_reports_user_changes
 def get_view(
     ctx: Context,
     view_name: Literal[
@@ -352,6 +385,7 @@ def get_view(
 
 
 @mcp.tool(annotations=_read_only("List Objects / Get Object"))
+@_reports_user_changes
 def get_objects(
     ctx: Context,
     doc_name: Annotated[str, Field(min_length=1)],
@@ -375,6 +409,7 @@ def get_objects(
 
 
 @mcp.tool(annotations=_read_only("List Documents"))
+@_reports_user_changes
 def list_documents(
     ctx: Context,
     limit: Annotated[int, Field(ge=1, le=500)] = 50,
@@ -394,6 +429,7 @@ def list_documents(
 
 
 @mcp.tool(annotations=_mutating("Modeling Session"))
+@_reports_user_changes
 def session(
     ctx: Context,
     action: Literal[
@@ -452,6 +488,7 @@ def session(
 
 
 @mcp.tool(annotations=_mutating("Plan Modeling Steps", destructive=False))
+@_reports_user_changes
 def step_plan(
     ctx: Context,
     doc_name: str,
@@ -468,6 +505,7 @@ def step_plan(
 
 
 @mcp.tool(annotations=_mutating("Control Step Journal"))
+@_reports_user_changes
 def step_control(
     ctx: Context,
     doc_name: str,
@@ -586,6 +624,7 @@ def operation_help(ctx: Context, operation: str | None = None) -> list[TextConte
 
 
 @mcp.tool(annotations=_read_only("Inspect FreeCAD API"))
+@_reports_user_changes
 def inspect_freecad(
     ctx: Context,
     doc_name: str | None = None,
@@ -600,6 +639,7 @@ def inspect_freecad(
 
 
 @mcp.tool(annotations=_read_only("Measure Geometry"))
+@_reports_user_changes
 def measure_geometry(ctx: Context, doc_name: str, obj_name: str) -> list[TextContent]:
     """Measure an object's Shape (the object must have one) to verify a design target numerically.
 
@@ -609,6 +649,7 @@ def measure_geometry(ctx: Context, doc_name: str, obj_name: str) -> list[TextCon
 
 
 @mcp.tool(annotations=_read_only("Get Topology"))
+@_reports_user_changes
 def get_topology(
     ctx: Context,
     doc_name: str,
@@ -632,6 +673,7 @@ def get_topology(
 
 
 @mcp.tool(annotations=_read_only("Check Interference"))
+@_reports_user_changes
 def check_interference(ctx: Context, doc_name: str, obj_a: str, obj_b: str) -> list[TextContent]:
     """Check two objects for interference: the distance between them and their common volume. Use it to verify clearance or detect collisions.
 
@@ -641,6 +683,7 @@ def check_interference(ctx: Context, doc_name: str, obj_a: str, obj_b: str) -> l
 
 
 @mcp.tool(annotations=_read_only("Get Positioning Info"))
+@_reports_user_changes
 def get_positioning_info(
     ctx: Context,
     doc_name: str,
@@ -660,6 +703,7 @@ def get_positioning_info(
 
 
 @mcp.tool(annotations=_mutating("Align Shapes"))
+@_reports_user_changes
 def align_shapes(
     ctx: Context,
     doc_name: str,
@@ -695,6 +739,7 @@ def align_shapes(
 
 
 @mcp.tool(annotations=_read_only("Get Anchors"))
+@_reports_user_changes
 def get_anchors(ctx: Context, doc_name: str, obj_name: str) -> list[TextContent]:
     """List an object's assembly anchors in GLOBAL coordinates. Auto-derived ones (bbox_center/min/max, com, axis_mid/start/end for the dominant cylindrical face, face0..2_center for the largest planar faces) merge with set_anchors ones, and explicit wins. Call it before placing parts and plan mates from the returned numbers; never guess coordinates.
 
@@ -704,6 +749,7 @@ def get_anchors(ctx: Context, doc_name: str, obj_name: str) -> list[TextContent]
 
 
 @mcp.tool(annotations=_mutating("Set Anchors"))
+@_reports_user_changes
 def set_anchors(
     ctx: Context,
     doc_name: str,
@@ -730,6 +776,7 @@ def set_anchors(
 
 
 @mcp.tool(annotations=_mutating("Assemble (Snap Anchors)"))
+@_reports_user_changes
 def assemble(
     ctx: Context,
     doc_name: str,
@@ -756,6 +803,7 @@ def assemble(
 
 
 @mcp.tool(annotations=_read_only("Verify Assembly"))
+@_reports_user_changes
 def verify_assembly(
     ctx: Context,
     doc_name: str,
@@ -782,6 +830,7 @@ def verify_assembly(
 
 
 @mcp.tool(annotations=_mutating("Assembly Session (Joints)"))
+@_reports_user_changes
 def assembly_session(
     ctx: Context,
     operation: str,

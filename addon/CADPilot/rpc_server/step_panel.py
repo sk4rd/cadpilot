@@ -537,13 +537,10 @@ QLabel#PanelStatus {{ color: {c["dim"]}; padding: 5px 8px 4px 8px; }}
                     sj.STATE_FAILED,
                 ):
                     self._log(f"step {rec.index} ({rec.operation}) failed: {rec.error}", "error")
-        # Manual-edit sync notices queued by step_engine's observer: the user
-        # corrected a tracked object in the GUI and the journal followed.
-        for ev in step_engine.pop_sync_events(doc.Name):
-            self._log(
-                f"step {ev['index']}: {ev['prop']} {ev['old']} -> {ev['new']} (manual edit)",
-                "info",
-            )
+        # The panel's own copy of what the user did in the GUI (Claude's copy
+        # rides on the next RPC reply and is drained separately).
+        for ev in step_engine.pop_panel_events(doc.Name):
+            self._log(sj.describe_change(ev), "info")
 
     def _header_text(self, doc, records, meta) -> str:
         name = html.escape(doc.Label or doc.Name)
@@ -772,7 +769,8 @@ QLabel#PanelStatus {{ color: {c["dim"]}; padding: 5px 8px 4px 8px; }}
         # narrates its own outcome below, with the op label attached.
         self._in_apply = True
         try:
-            res = step_engine.apply_op(doc, spec)
+            res = step_engine.apply_op(doc, spec, deliver=False)
+            step_engine.note_panel_action(doc, spec, res)
             self._digest = None
             self._note = None
             self.refresh()

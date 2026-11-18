@@ -1392,3 +1392,141 @@ def map_constraint_value(ctype: str, old: Any, live_value: Any, live_expr: str |
     if ctype == "angle":
         value = math.degrees(value)
     return _num(value)
+
+
+# --- what the user changed ------------------------------------------------------
+#
+# The engine's observer turns the user's GUI work into events, one per document,
+# for two readers: Claude (every RPC reply carries the events since its last call)
+# and the steps panel's log. Each reader drains its own copy. Kinds:
+#
+#   edit    {step, label, what, old, new}   a value synced into a step's params
+#   sketch  {step, label, object, detail}   geometry/constraints added or removed
+#   undo    {transaction, step, label, added, removed}   Ctrl+Z (redo likewise)
+#   added   {objects, types}                objects the user created
+#   removed {objects}                       objects the user deleted
+#   stale   {step, label, detail}           a done step the model no longer has
+#   panel   {action, index, ok, detail}     a Steps-panel button the user pressed
+
+
+def _same_value(a: Any, b: Any) -> bool:
+    if isinstance(a, bool) or isinstance(b, bool):
+        return a is b
+    if isinstance(a, (int, float)) and isinstance(b, (int, float)):
+        return abs(float(a) - float(b)) <= 1e-9
+    return a == b
+
+
+def append_change(log: list[dict[str, Any]], event: dict[str, Any]) -> None:
+    """Append ``event``, folding it into the previous one where that reads better.
+
+    A drag or a typed value fires one edit per keystroke, and an edit followed
+    by its own Ctrl+Z is no change at all: repeated edits of one value keep the
+    first ``old`` and the last ``new`` and vanish when the two agree. An undo,
+    a panel action or a stale notice is a boundary nothing folds across.
+    Consecutive additions or deletions become one entry, and an object added
+    and then deleted again cancels out.
+    """
+    kind = event.get("kind")
+    if kind == "edit":
+        key = (event.get("step"), event.get("what"))
+        for pos in range(len(log) - 1, -1, -1):
+            prev = log[pos]
+            if prev.get("kind") not in ("edit", "sketch", "added", "removed"):
+                break
+            if prev.get("kind") == "edit" and (prev.get("step"), prev.get("what")) == key:
+                prev["new"] = event.get("new")
+                if _same_value(prev.get("old"), prev.get("new")):
+                    del log[pos]
+                return
+    last = log[-1] if log else None
+    if last is not None and kind == "removed" and last.get("kind") == "added":
+        gone = set(event.get("objects") or [])
+        pairs = list(zip(last.get("objects") or [], last.get("types") or [], strict=False))
+        kept = [(name, typ) for name, typ in pairs if name not in gone]
+        if len(kept) < len(pairs):
+            cancelled = {name for name, _ in pairs} & gone
+            last["objects"] = [name for name, _ in kept]
+            last["types"] = [typ for _, typ in kept]
+            if not kept:
+                log.pop()
+            leftover = [n for n in event.get("objects") or [] if n not in cancelled]
+            if leftover:
+                append_change(log, {**event, "objects": leftover})
+            return
+    if last is not None and kind in ("added", "removed") and last.get("kind") == kind:
+        last["objects"] = list(last.get("objects") or []) + list(event.get("objects") or [])
+        if kind == "added":
+            last["types"] = list(last.get("types") or []) + list(event.get("types") or [])
+        return
+    log.append(dict(event))
+
+
+def _value_text(value: Any) -> str:
+    if value is None:
+        return "(unset)"
+    if isinstance(value, float):
+        return f"{value:g}"
+    return str(value)
+
+
+def describe_change(event: dict[str, Any]) -> str:
+    """One line for an event: the panel log shows it, tests read it."""
+    kind = event.get("kind")
+    step = event.get("step")
+    where = f"step {step}" + (f" ({event['label']})" if event.get("label") else "") if step else ""
+    if kind == "edit":
+        old, new = _value_text(event.get("old")), _value_text(event.get("new"))
+        return f"{where}: {event.get('what')} {old} -> {new}"
+    if kind == "sketch":
+        return f"{where}: sketch {event.get('object')} {event.get('detail')}"
+    if kind in ("undo", "redo"):
+        verb = "undid" if kind == "undo" else "redid"
+        target = where or f"'{event.get('transaction')}'"
+        bits = []
+        if event.get("removed"):
+            bits.append("removed " + ", ".join(event["removed"]))
+        if event.get("added"):
+            bits.append("restored " + ", ".join(event["added"]))
+        return f"{verb} {target}" + (f" ({'; '.join(bits)})" if bits else "")
+    if kind == "added":
+        pairs = zip(event.get("objects") or [], event.get("types") or [], strict=False)
+        return "added " + ", ".join(f"{n} ({t})" if t else n for n, t in pairs)
+    if kind == "removed":
+        return "deleted " + ", ".join(event.get("objects") or [])
+    if kind == "stale":
+        return f"{where} is no longer in the model: {event.get('detail')}"
+    if kind == "panel":
+        state = "" if event.get("ok", True) else " (failed)"
+        detail = f": {event['detail']}" if event.get("detail") else ""
+        return f"Steps panel: {event.get('action')}{state}{detail}"
+    return str(event)
+
+
+def panel_action_text(spec: dict[str, Any]) -> str:
+    """What a Steps-panel button did, in words ("rolled back to step 3")."""
+    op = str(spec.get("operation") or "")
+    index = spec.get("index")
+    params = spec.get("params") or {}
+    if op == "rollback_to":
+        return f"rolled back to step {index}" if index else "rolled back to the start"
+    if op == "replay":
+        return "replayed the journal from the start"
+    if op == "reject":
+        return f"rejected step {index} and everything after it"
+    if op == "reexecute":
+        return f"re-ran step {index} with edited parameters"
+    if op == "accept":
+        return f"{'accepted' if params.get('on', True) else 'unaccepted'} step {index}"
+    if op == "update":
+        return f"edited the parameters of step {index}"
+    if op == "run_next":
+        return "ran the next planned step"
+    if op == "run_all":
+        return "ran all planned steps"
+    if op == "drop":
+        return f"dropped step {index} (accepted the change to the model)"
+    if op == "snapshot":
+        note = params.get("note")
+        return "took a snapshot" + (f" ({note})" if note else "")
+    return op.replace("_", " ") + (f" step {index}" if index else "")

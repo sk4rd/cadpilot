@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import contextlib
 import math
+import threading
 import time
 from typing import Any
 
@@ -883,7 +884,7 @@ def _run_record_locked(doc, records: list[sj.StepRecord], rec: sj.StepRecord) ->
 # --- op dispatch -------------------------------------------------------------
 
 
-def apply_op(doc, spec: dict[str, Any]) -> dict[str, Any]:
+def apply_op(doc, spec: dict[str, Any], deliver: bool = True) -> dict[str, Any]:
     """Single entry point for the panel and the RPC handler.
 
     Wraps :func:`_apply_op` so every journal operation — however it returns —
@@ -893,9 +894,15 @@ def apply_op(doc, spec: dict[str, Any]) -> dict[str, Any]:
     Every mutating result carries a compact ``journal`` snapshot, so a caller
     (the MCP client especially) sees the resulting state in the same call and
     does not need a follow-up status round-trip.
+
+    ``deliver`` hands the caller what the user changed since the last delivery
+    (``user_changes``, every document). The RPC handler is Claude; the panel
+    passes False, because its own button presses must not swallow the record
+    Claude is owed.
     """
     operation = str(spec.get("operation") or "")
     started = time.monotonic()
+    flush_deferred_syncs()
     try:
         result = _apply_op(doc, spec)
     finally:
@@ -904,10 +911,37 @@ def apply_op(doc, spec: dict[str, Any]) -> dict[str, Any]:
         logger.info("journal %s finished in %.1fms", operation, (time.monotonic() - started) * 1000)
     if not result.get("success"):
         logger.warning("journal %s failed: %s", operation, result.get("error"))
-    if operation != "status":
+    if operation not in ("status", "user_changes"):
         with contextlib.suppress(Exception):
             result["journal"] = _compact_journal(doc)
+    if deliver:
+        changes = take_user_changes()
+        if changes:
+            result["user_changes"] = changes
     return result
+
+
+def note_panel_action(doc, spec: dict[str, Any], result: dict[str, Any] | None) -> None:
+    """Tell Claude about a Steps-panel button the user pressed."""
+    res = result or {}
+    detail = ""
+    if res.get("restored"):
+        detail = f"restored: {res['restored']}"
+    removed = res.get("removed") or []
+    if removed:
+        detail = (detail + "; " if detail else "") + "removed " + ", ".join(removed)
+    if not res.get("success", False) and res.get("error"):
+        detail = str(res["error"])[:200]
+    note_user_change(
+        doc.Name,
+        {
+            "kind": "panel",
+            "action": sj.panel_action_text(spec),
+            "ok": bool(res.get("success")),
+            "detail": detail,
+        },
+        panel=False,
+    )
 
 
 def _compact_journal(doc) -> dict[str, Any]:
@@ -941,6 +975,26 @@ def _apply_op(doc, spec: dict[str, Any]) -> dict[str, Any]:
 
     if operation == "status":
         return _status(doc, records, spec)
+    if operation == "user_changes":
+        # Nothing to do here: apply_op attaches the changes to every reply.
+        # The last record is what a session step needs to know which journal
+        # step (and which undo entry) the call it just made became.
+        last = records[-1] if records else None
+        return {
+            "success": True,
+            "document": doc.Name,
+            "count": len(records),
+            "last_record": (
+                {
+                    "index": last.index,
+                    "state": last.state,
+                    "operation": last.operation,
+                    "transaction": last.transaction,
+                }
+                if last is not None
+                else None
+            ),
+        }
     if operation == "set_plan":
         steps = list(spec.get("steps") or [])
         # A planned snippet MUST carry its code: op name alone would be accepted
@@ -1666,15 +1720,44 @@ def _reexecute(
 # under _EngineQuiet — a tool's change is its own step, and echoing it into
 # an earlier step's params made reject/replay inconsistent.
 
-_SYNC_EVENTS: list[dict[str, Any]] = []
+# Per document, two copies of what the user did (see sj.append_change for the
+# event kinds): Claude's, drained by the next RPC reply, and the panel's,
+# drained by its log. The RPC thread may read Claude's copy, hence the lock.
+_CHANGES_LOCK = threading.Lock()
+_USER_CHANGES: dict[str, list[dict[str, Any]]] = {}
+_PANEL_EVENTS: dict[str, list[dict[str, Any]]] = {}
+_CHANGES_CAP = 200
 
 
-def pop_sync_events(doc_name: str) -> list[dict[str, Any]]:
-    """Take (and clear) the queued manual-edit notices for one document."""
-    mine = [e for e in _SYNC_EVENTS if e["doc"] == doc_name]
-    if mine:
-        _SYNC_EVENTS[:] = [e for e in _SYNC_EVENTS if e["doc"] != doc_name]
-    return mine
+def note_user_change(doc_name: str, event: dict[str, Any], panel: bool = True) -> None:
+    """Record something the user did to ``doc_name`` for Claude (and the panel)."""
+    event = {**event, "time": time.strftime("%H:%M:%S")}
+    with _CHANGES_LOCK:
+        stores = (_USER_CHANGES, _PANEL_EVENTS) if panel else (_USER_CHANGES,)
+        for store in stores:
+            log = store.setdefault(doc_name, [])
+            sj.append_change(log, dict(event))
+            del log[:-_CHANGES_CAP]
+
+
+def take_user_changes() -> dict[str, list[dict[str, Any]]]:
+    """Every document's changes since the last call, and forget them."""
+    with _CHANGES_LOCK:
+        out = {name: list(events) for name, events in _USER_CHANGES.items() if events}
+        _USER_CHANGES.clear()
+    return out
+
+
+def pop_panel_events(doc_name: str) -> list[dict[str, Any]]:
+    """The panel's copy of one document's changes since its last refresh."""
+    with _CHANGES_LOCK:
+        return _PANEL_EVENTS.pop(doc_name, [])
+
+
+def _record_for_transaction(doc, name: str) -> sj.StepRecord | None:
+    if not name.startswith(TX_PREFIX):
+        return None
+    return next((r for r in read_journal(doc) if r.transaction == name), None)
 
 
 def _num(value: float) -> int | float:
@@ -1786,10 +1869,88 @@ def _sync_props_target(rec: sj.StepRecord, sub: int | None) -> dict[str, Any] | 
     return None
 
 
+def _user_thread() -> bool:
+    # execute_code_async runs Claude's snippet on a worker thread outside any
+    # engine window; only the GUI thread is the user.
+    return threading.current_thread() is threading.main_thread()
+
+
 class _JournalSyncObserver:
     def __init__(self):
         self._cache: dict[str, tuple[str, dict]] = {}
         self._writing = False
+        # Changes FreeCAD makes while undoing/redoing (doc.Transacting), held
+        # until the undo is over and its transaction name says whose it was.
+        self._undoing: dict[str, dict[str, Any]] = {}
+
+    def _muted(self, doc) -> bool:
+        return (
+            self._writing
+            or _ENGINE_ACTIVE > 0
+            or not _user_thread()
+            or bool(getattr(doc, "Restoring", False))
+        )
+
+    def _undo_buffer(self, doc) -> dict[str, Any]:
+        return self._undoing.setdefault(doc.Name, {"props": [], "added": [], "removed": []})
+
+    def slotCreatedObject(self, obj):
+        with contextlib.suppress(Exception):
+            doc = obj.Document
+            if self._muted(doc):
+                return
+            if doc.Transacting:
+                self._undo_buffer(doc)["added"].append(obj.Name)
+                return
+            note_user_change(
+                doc.Name, {"kind": "added", "objects": [obj.Name], "types": [obj.TypeId]}
+            )
+
+    def slotDeletedObject(self, obj):
+        with contextlib.suppress(Exception):
+            doc = obj.Document
+            if self._muted(doc):
+                return
+            if doc.Transacting:
+                self._undo_buffer(doc)["removed"].append(obj.Name)
+                return
+            note_user_change(doc.Name, {"kind": "removed", "objects": [obj.Name]})
+
+    def slotUndoDocument(self, doc):
+        with contextlib.suppress(Exception):
+            self._after_stack_op(doc, "undo")
+
+    def slotRedoDocument(self, doc):
+        with contextlib.suppress(Exception):
+            self._after_stack_op(doc, "redo")
+
+    def _after_stack_op(self, doc, kind: str) -> None:
+        held = self._undoing.pop(doc.Name, None) or {"props": [], "added": [], "removed": []}
+        if self._muted(doc):
+            return
+        stack = _real_redo_names(doc) if kind == "undo" else _real_undo_names(doc)
+        name = stack[0] if stack else ""
+        rec = _record_for_transaction(doc, name)
+        if not name.startswith(TX_PREFIX):
+            # The user undid (or redid) their OWN edit: the values FreeCAD
+            # restored are the user's again, so the journal follows them. A
+            # CADPilot step's undo is not mirrored: the step keeps its params
+            # and goes stale instead, so Claude can restore it or drop it.
+            for obj_name, prop in held["props"]:
+                obj = doc.getObject(obj_name)
+                if obj is not None:
+                    self._sync(obj, prop)
+        note_user_change(
+            doc.Name,
+            {
+                "kind": kind,
+                "transaction": name,
+                "step": rec.index if rec is not None else None,
+                "label": rec.label if rec is not None else "",
+                "added": held["added"],
+                "removed": held["removed"],
+            },
+        )
 
     def slotChangedObject(self, obj, prop):
         # _writing guards the observer's own journal write; _ENGINE_ACTIVE
@@ -1803,7 +1964,10 @@ class _JournalSyncObserver:
             # Opening a file sets every property once, in file order (Length
             # before the ExpressionEngine that binds it), which read as a
             # burst of manual edits and rewrote bound params to numbers.
-            if obj.Document.Restoring:
+            if obj.Document.Restoring or not _user_thread():
+                return
+            if obj.Document.Transacting:
+                self._undo_buffer(obj.Document)["props"].append((obj.Name, prop))
                 return
             self._sync(obj, prop)
 
@@ -1882,7 +2046,7 @@ class _JournalSyncObserver:
             value = _uniform_edge_size(getattr(obj, prop, None))
             if value is None:
                 return
-            same, brief = _same_scalar, repr
+            same, brief = _same_scalar, None
         elif prop == "AttachmentOffset":
             # Only a pure-z translation maps onto the spec's scalar offset; a
             # rotated/shifted attachment has no spec representation.
@@ -1892,7 +2056,7 @@ class _JournalSyncObserver:
                 return
             if abs(base.x) > 1e-9 or abs(base.y) > 1e-9 or abs(rot.Angle) > 1e-9:
                 return
-            value, same, brief = _num(base.z), _same_scalar, repr
+            value, same, brief = _num(base.z), _same_scalar, None
         else:
             # An expression binding wins over the literal value, in both
             # directions: binding in the GUI stores "=expr" (the builder
@@ -1906,7 +2070,7 @@ class _JournalSyncObserver:
                 value = _json_scalar(getattr(obj, prop, None))
                 if value is None:
                     return
-            same, brief = _same_scalar, repr
+            same, brief = _same_scalar, None
         props = _sync_props_target(rec, hit[2])
         if props is None:
             return
@@ -1914,9 +2078,8 @@ class _JournalSyncObserver:
         if same(current, value):
             return
         props[hit[1]] = value
-        self._commit_sync(
-            doc, records, rec.index, f"{obj.Name}.{prop}", brief(current), brief(value)
-        )
+        shown = (brief(current), brief(value)) if brief else (current, value)
+        self._commit_sync(doc, records, rec, [(f"{obj.Name}.{prop}", *shown)])
 
     def _sync_cells(self, obj, doc, records, index: int, sub: int | None = None) -> None:
         """Mirror spreadsheet cell edits (values, formulas, aliases) into the
@@ -1927,7 +2090,7 @@ class _JournalSyncObserver:
         cells = (_sync_props_target(rec, sub) or {}).get("cells")
         if not isinstance(cells, dict) or not cells:
             return
-        changed = 0
+        edits: list[tuple[str, Any, Any]] = []
         for cell, cell_entry in cells.items():
             if not (isinstance(cell_entry, list) and len(cell_entry) == 2):
                 continue
@@ -1939,17 +2102,16 @@ class _JournalSyncObserver:
             new = sj.map_cell_value(old, live_contents)
             if new is not sj.UNREADABLE and not _same_scalar(old, new):
                 cell_entry[1] = new
-                changed += 1
+                edits.append((f"{obj.Name}.{cell} ({alias})", old, new))
             try:
                 live_alias = obj.getAlias(cell) or ""
             except Exception:
                 live_alias = alias
             if live_alias and live_alias != alias:
                 cell_entry[0] = live_alias
-                changed += 1
-        if not changed:
-            return
-        self._commit_sync(doc, records, index, f"{obj.Name}.cells", "-", f"{changed} cell field(s)")
+                edits.append((f"{obj.Name}.{cell} alias", alias, live_alias))
+        if edits:
+            self._commit_sync(doc, records, rec, edits)
 
     def _sync_constraints(self, obj, doc, records, index: int, sub: int | None = None) -> None:
         """Mirror dimensional-constraint edits into the owning sketch step.
@@ -1988,11 +2150,12 @@ class _JournalSyncObserver:
                 updates.append((i, new))
         if not updates:
             return
+        edits = []
         for i, new in updates:
+            name = pcons[i].get("name") or getattr(live[i], "Name", "") or f"#{i}"
+            edits.append((f"{obj.Name} constraint {name}", pcons[i]["value"], new))
             pcons[i]["value"] = new
-        self._commit_sync(
-            doc, records, index, f"{obj.Name}.Constraints", "-", f"{len(updates)} value(s)"
-        )
+        self._commit_sync(doc, records, rec, edits)
 
     def _sync_move_fold(self, obj, doc, records, index: int, sub: int | None) -> None:
         """Fold a manual drag of a move-owned object into its last move step.
@@ -2025,21 +2188,29 @@ class _JournalSyncObserver:
         self._commit_sync(
             doc,
             records,
-            index,
-            f"{obj.Name}.Placement",
-            _placement_brief(current),
-            _placement_brief(value),
+            rec,
+            [(f"{obj.Name}.Placement", _placement_brief(current), _placement_brief(value))],
         )
 
-    def _commit_sync(self, doc, records, index: int, what: str, old: str, new: str) -> None:
+    def _commit_sync(self, doc, records, rec, edits: list[tuple[str, Any, Any]]) -> None:
         self._writing = True
         try:
             write_journal(doc, records)
         finally:
             self._writing = False
-        logger.info("journal sync: step %d %s = %s (manual edit)", index, what, new)
-        _SYNC_EVENTS.append({"doc": doc.Name, "index": index, "prop": what, "old": old, "new": new})
-        del _SYNC_EVENTS[:-50]
+        for what, old, new in edits:
+            logger.info("journal sync: step %d %s = %s (manual edit)", rec.index, what, new)
+            note_user_change(
+                doc.Name,
+                {
+                    "kind": "edit",
+                    "step": rec.index,
+                    "label": rec.label,
+                    "what": what,
+                    "old": old,
+                    "new": new,
+                },
+            )
 
 
 _OBSERVER_ATTR = "_cadpilot_journal_sync"

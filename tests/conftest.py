@@ -55,6 +55,11 @@ class FakeFreeCADConnection:
         self.documents: list[str] = []
         # undo_transactions returns this many undone (None = use requested n)
         self.undo_count: int | None = None
+        # What the addon would report the user changed ({doc: [event]}); the
+        # next journal_op reply carries it, like the real one.
+        self.pending_user_changes: dict[str, list[dict]] = {}
+        self._taken_user_changes: dict[str, list[dict]] = {}
+        self._carried = False
 
     def _record(self, method: str, *args, **kwargs):
         self.calls.append((method, args, kwargs))
@@ -324,10 +329,27 @@ class FakeFreeCADConnection:
 
     def journal_op(self, doc_name, spec):
         self._record("journal_op", doc_name, spec)
+        if self.pending_user_changes:
+            self._carried = True
+            for doc, events in self.pending_user_changes.items():
+                self._taken_user_changes.setdefault(doc, []).extend(events)
+            self.pending_user_changes = {}
         return self._result(
             "journal_op",
             {"success": True, "count": 0, "done": 0, "planned": 0},
         )
+
+    # --- bookkeeping mirrored from FreeCADConnection (no wire call) ------
+
+    def begin_tool_call(self):
+        self._carried = False
+
+    def replies_carried_user_changes(self):
+        return self._carried
+
+    def take_user_changes(self):
+        out, self._taken_user_changes = self._taken_user_changes, {}
+        return out
 
     def get_addon_log(self, level=None, grep=None, since_seq=0, limit=100):
         self._record("get_addon_log", level, grep, since_seq, limit)

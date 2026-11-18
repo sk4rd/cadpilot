@@ -65,6 +65,115 @@ def _set_last_doc(doc_name: str | None) -> None:
         _last_doc_name = doc_name
 
 
+# --- what the user changed in FreeCAD ------------------------------------------
+#
+# The addon records the user's own GUI work per document (values the journal
+# synced, Ctrl+Z/Ctrl+Y, objects added or deleted, Steps-panel buttons) and
+# hands it to the next RPC reply. This is the model's only view of it, so every
+# tool reply leads with it.
+
+USER_CHANGES_HEADING = "User changes since your last call"
+
+
+def _change_value(value: Any) -> str:
+    if value is None:
+        return "(unset)"
+    if isinstance(value, float):
+        return f"{value:g}"
+    return str(value)
+
+
+def _change_step(event: dict[str, Any]) -> str:
+    step = event.get("step")
+    if not step:
+        return ""
+    label = event.get("label")
+    return f"step {step}" + (f" ({label})" if label else "")
+
+
+def _change_line(event: dict[str, Any]) -> str:
+    kind = event.get("kind")
+    step = _change_step(event)
+    if kind == "edit":
+        old, new = _change_value(event.get("old")), _change_value(event.get("new"))
+        return f"{step}: {event.get('what')} {old} -> {new}"
+    if kind == "sketch":
+        return f"{step}: edited sketch {event.get('object')} by hand ({event.get('detail')})"
+    if kind in ("undo", "redo"):
+        verb = "Ctrl+Z undid" if kind == "undo" else "Ctrl+Y redid"
+        what = step or f"their own edit '{event.get('transaction') or '?'}'"
+        bits = []
+        if event.get("removed"):
+            bits.append("removed " + ", ".join(event["removed"]))
+        if event.get("added"):
+            bits.append("restored " + ", ".join(event["added"]))
+        line = f"{verb} {what}" + (f" ({'; '.join(bits)})" if bits else "")
+        if step and kind == "undo":
+            line += (
+                f" - the model no longer has it; step_control drop {event['step']} accepts "
+                "that, a rollback or replay would re-create it"
+            )
+        return line
+    if kind == "added":
+        pairs = zip(event.get("objects") or [], event.get("types") or [], strict=False)
+        return "added " + ", ".join(f"{n} ({t})" if t else n for n, t in pairs)
+    if kind == "removed":
+        return "deleted " + ", ".join(event.get("objects") or [])
+    if kind == "stale":
+        return (
+            f"{step} is no longer in the model ({event.get('detail')}); step_control drop "
+            f"{event.get('step')} accepts that"
+        )
+    if kind == "panel":
+        state = "" if event.get("ok", True) else " - it failed"
+        detail = f" ({event['detail']})" if event.get("detail") else ""
+        return f"Steps panel: {event.get('action')}{detail}{state}"
+    return str(event)
+
+
+def format_user_changes(changes: dict[str, list[dict[str, Any]]]) -> str:
+    """The block every tool reply leads with when the user changed something.
+
+    Compact on purpose (one line per change), and explicit about what the
+    journal already did, because the model's next move depends on it: synced
+    values are in the step's parameters, so a re-run keeps them.
+    """
+    docs = {doc: events for doc, events in (changes or {}).items() if events}
+    if not docs:
+        return ""
+    lines = [f"## {USER_CHANGES_HEADING}"]
+    for doc, events in docs.items():
+        lines.append(f"Document '{doc}':")
+        lines.extend(f"- {_change_line(e)}" for e in events)
+    if any(e.get("kind") == "edit" for events in docs.values() for e in events):
+        lines.append(
+            "The step journal already holds the edited values: build on them and do not "
+            "set them back."
+        )
+    return "\n".join(lines)
+
+
+def user_changes_text(freecad: FreeCADConnection, doc_name: str | None = None) -> str:
+    """Collect what the user changed for this tool call's reply, formatted.
+
+    The addon attaches the changes to journal replies; for any other call one
+    explicit fetch picks them up. Never raises: a failed fetch only means the
+    changes wait for the next call.
+    """
+    try:
+        if not freecad.replies_carried_user_changes():
+            target = doc_name or get_last_doc_name()
+            if not target:
+                target = next(iter(freecad.list_documents() or []), None)
+            if target:
+                # Any open document routes the request; the reply covers all.
+                freecad.journal_op(target, {"operation": "user_changes"})
+        return format_user_changes(freecad.take_user_changes())
+    except Exception as e:
+        logger.debug(f"user changes unavailable: {e}")
+        return ""
+
+
 def create_document_operation(
     freecad: FreeCADConnection,
     name: str,
