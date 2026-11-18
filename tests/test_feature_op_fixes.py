@@ -399,3 +399,26 @@ def test_a_feature_is_built_in_the_body_of_its_profile_or_base():
         assert "_feature_body(doc, spec," in text and "_get_or_create_body" not in text
     assert "_feature_body(doc, spec, anchor" in _src("_build_datum_plane")
     assert "belongs to Body" in _src("_feature_body")
+
+
+def test_a_rejected_alias_names_the_unit_symbol_rule(monkeypatch):
+    """W, H, T, N, mm and deg are refused as aliases because they are units,
+    and the old message only listed the character rules."""
+    pm = _property_mapper()
+    assert "W, H, T, N" in pm.alias_rejection_reason("W")
+
+    class _Units:
+        @staticmethod
+        def Quantity(text):
+            if text != "1 W":
+                raise ValueError(text)
+            return types.SimpleNamespace(Unit=types.SimpleNamespace(Type="Power"))
+
+    monkeypatch.setattr(pm.FreeCAD, "Units", _Units, raising=False)
+    reason = pm.alias_rejection_reason("W")
+    assert "'W' is a unit symbol (Power)" in reason and "Width" in reason
+    assert "unit symbol" not in pm.alias_rejection_reason("Wall")
+    assert "built-in constant" in pm.alias_rejection_reason("pi")
+    assert "alias_rejection_reason" in ast.unparse(
+        _func(ast.parse((_ADDON / "property_mapper.py").read_text()), "set_spreadsheet_cells")
+    )

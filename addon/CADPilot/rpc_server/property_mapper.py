@@ -172,8 +172,35 @@ def set_spreadsheet_cells(ss, cells: dict) -> None:
             raise ValueError(
                 f"cells['{cell}']: alias {alias!r} was rejected ({e}). Aliases must "
                 "start with a letter and contain only letters/digits/underscores "
-                "(no spaces, no leading digit, not a cell reference like 'A1')."
+                "(no spaces, no leading digit, not a cell reference like 'A1'), and "
+                "must not be a unit symbol or constant. " + alias_rejection_reason(str(alias))
             ) from None
+
+
+#: Names an expression already reads as something else, so FreeCAD refuses
+#: them as aliases. Unit symbols are the trap: W, H, T and N are the natural
+#: names for width, height, thickness and count (live: all four refused).
+_ALIAS_CONSTANTS = ("e", "pi")
+
+
+def alias_rejection_reason(alias: str) -> str:
+    """Why FreeCAD refuses ``alias``, as far as can be told without trying it."""
+    rules = (
+        "FreeCAD's expressions already read W, H, T, N, A, K, V, J, C, F, S, g, h, l, m, s, "
+        "t, mm, cm, deg, rad, min, in, ft, lb, kg, Pa, Hz, Ohm, e, pi, ... as units or "
+        "constants: use Width, Height, Thick, Count instead."
+    )
+    if alias in _ALIAS_CONSTANTS:
+        return f"{alias!r} is a built-in constant. " + rules
+    units = getattr(FreeCAD, "Units", None)
+    try:
+        quantity = units.Quantity(f"1 {alias}") if units is not None else None
+    except Exception:
+        quantity = None
+    if quantity is not None:
+        kind = getattr(quantity.Unit, "Type", "") or str(quantity.Unit)
+        return f"{alias!r} is a unit symbol ({kind}). " + rules
+    return rules
 
 
 def set_object_property(

@@ -254,7 +254,8 @@ variables — create/update a Spreadsheet parameter table (idempotent).
 obj_name = spreadsheet name (default "Spreadsheet", may be omitted).
 Required in obj_properties: cells — maps a cell to [alias, value]; values are
 numbers, "=formula" strings, or text. Everything downstream references cells
-as =Spreadsheet.alias.
+as =Spreadsheet.alias. FreeCAD refuses unit symbols and constants as aliases
+(W, H, T, N, mm, deg, e, pi, ...): use Width, Height, Thick, Count.
 The reply names what the recompute BROKE downstream (warnings + `broken`): an
 Invalid feature, a link to an edge/face that no longer exists ('?Edge8'), a
 sketch that no longer solves. `model` rows give each changed Body's tip and
