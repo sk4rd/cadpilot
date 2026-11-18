@@ -67,7 +67,7 @@ def user(doc, body):
     _EDITS += 1
     token = f"edit{_EDITS}"
     code = (
-        "import FreeCAD, Sketcher\n"
+        "import FreeCAD, Part, Sketcher\n"
         "from PySide import QtCore\n"
         "def _edit():\n"
         f"    d = FreeCAD.getDocument({doc!r})\n"
@@ -209,12 +209,94 @@ check(
     str(cons),
 )
 
+check("A2 the deletion itself is in the step", len(cons) == 3, str(cons))
+res = control(D, "replay", index=0, force=True)
+live = sketch_state(D, "S")
+check(
+    "A2 replay keeps the deletion and drives each line by its own alias",
+    res.get("success")
+    and [k[0] for k in live["cons"]] == ["Vertical", "Distance", "Distance"]
+    and sorted(live["expr"]) == [["Constraints[1]", "Params.Wd"], ["Constraints[2]", "Params.Ht"]],
+    f"{res.get('error')} {live}",
+)
+changes(D)
+
 # --- A3: a spreadsheet cell edit ---------------------------------------------
 user(D, "v = d.getObject('Params'); v.set('A1', '70'); d.recompute()")
 cells = step_params(D, "variables")["cells"]
 check("A3 the cell edit syncs", cells["A1"] == ["Wd", 70], str(cells))
 text = changes(D)
 check("A3 Claude is told about the cell", "Params.A1 (Wd) 60 -> 70" in text, text)
+
+# --- G: the user's own constraints survive a replay ---------------------------
+D = "LJ_Sk"
+fresh(D)
+cad("variables", D, "Params", cells={"A1": ["Wd", 60]})
+cad(
+    "sketch",
+    D,
+    "S",
+    geometry=RECT,
+    constraints=[
+        {"type": "horizontal", "items": [0]},
+        {"type": "vertical", "items": [1]},
+        {"type": "distance", "items": [0], "value": "=Params.Wd", "name": "Width"},
+    ],
+)
+changes(D)
+user(
+    D,
+    """
+    s = d.getObject('S')
+    d.openTransaction('user height')
+    i = s.addConstraint(Sketcher.Constraint('Distance', 1, 25.0))
+    s.renameConstraint(i, 'UserHeight')
+    d.commitTransaction(); d.recompute()
+    """,
+)
+rec = next(r for r in records(D) if r["operation"] == "sketch")
+names = [k.get("name") for k in rec["params"]["obj_properties"]["constraints"]]
+check("G the user's constraint is in the step", "UserHeight" in names, str(names))
+check("G the step is flagged as edited by hand", rec["params"].get("user_edited") is True)
+text = changes(D)
+check("G Claude is told about the sketch edit", "+UserHeight" in text, text)
+summary = control(D, "status", params={"summary": True})
+check(
+    "G status shows the edit is in the journal, not drift",
+    summary.get("drift") is False and "edited by hand" in summary["steps"][1]["label"],
+    str(summary.get("steps")),
+)
+control(D, "replay", index=0, force=True)
+live = sketch_state(D, "S")
+check(
+    "G replay reproduces the user's sketch",
+    ["Distance", "UserHeight", 25.0] in live["cons"]
+    and [".Constraints.Width", "Params.Wd"] in live["expr"],
+    str(live),
+)
+user(
+    D,
+    """
+    s = d.getObject('S')
+    d.openTransaction('point on line')
+    s.addGeometry(Part.Point(FreeCAD.Vector(20, 0, 0)))
+    s.addConstraint(Sketcher.Constraint('PointOnObject', 2, 1, 0))
+    d.commitTransaction(); d.recompute()
+    """,
+)
+rec = next(r for r in records(D) if r["operation"] == "sketch")
+check(
+    "G a constraint the spec cannot hold keeps FreeCAD's data",
+    bool(rec["params"].get("live_sketch")),
+)
+control(D, "replay", index=0, force=True)
+live = sketch_state(D, "S")
+check(
+    "G replay restores it exactly",
+    live["geo"] == 3 and "PointOnObject" in [k[0] for k in live["cons"]],
+    str(live),
+)
+changes(D)
 
 # --- C: opening a saved file is not a burst of manual edits -------------------
 D = "LJ_Open"

@@ -758,6 +758,8 @@ def row_text(rec: StepRecord) -> str:
                 label = f"{first} · {label.split(' · ', 1)[1]}"
             else:
                 label = f"{first} · {label}"
+    if (rec.params or {}).get("user_edited"):
+        label += " (edited by hand)"
     if rec.error:
         label += f"  — {rec.error}"
     return label
@@ -1757,3 +1759,203 @@ def panel_action_text(spec: dict[str, Any]) -> str:
         note = params.get("note")
         return "took a snapshot" + (f" ({note})" if note else "")
     return op.replace("_", " ") + (f" step {index}" if index else "")
+
+
+# --- the user's own sketch edits ------------------------------------------------
+#
+# A sketch step's spec maps onto the live sketch by index, so the moment the
+# user adds or deletes geometry or constraints the two diverge and a replay
+# would rebuild the ORIGINAL sketch. The engine reads the live sketch as plain
+# data (geometry dicts, constraint dicts, construction flags, external refs)
+# and the helpers below turn it back into the spec the builder takes, or say
+# what it cannot express.
+
+GEO_UNDEF = -2000
+_POS_NAMES = {1: "start", 2: "end", 3: "center"}
+_SPEC_TYPES = {v: k for k, v in CONSTRAINT_TYPE_MAP.items()}
+
+
+def sketch_signature(
+    geometry: list[dict[str, Any]],
+    construction: list[bool],
+    constraints: list[dict[str, Any]],
+    external: list[Any],
+) -> str:
+    """A short fingerprint of a sketch's STRUCTURE (not its dimensions).
+
+    Geometry kinds, construction flags, every constraint's type and the
+    elements it references, and the external references: what a structural
+    edit changes and a value edit or a solve does not.
+    """
+    import hashlib
+
+    shape = [
+        [g.get("type") for g in geometry],
+        [bool(x) for x in construction],
+        [
+            [
+                c.get("type"),
+                c.get("first"),
+                c.get("first_pos"),
+                c.get("second"),
+                c.get("second_pos"),
+                c.get("third"),
+                c.get("third_pos"),
+                bool(c.get("driving", True)),
+                bool(c.get("active", True)),
+            ]
+            for c in constraints
+        ],
+        [list(e) for e in external],
+    ]
+    return hashlib.sha1(json.dumps(shape).encode("utf-8")).hexdigest()[:16]
+
+
+def _r(value: float) -> int | float:
+    return _num(round(float(value), 6))
+
+
+def _pt(p: Any) -> list[int | float]:
+    return [_r(p[0]), _r(p[1])]
+
+
+def _spec_geometry(g: dict[str, Any]) -> dict[str, Any] | None:
+    kind = g.get("type")
+    if kind == "LineSegment":
+        return {"type": "line", "from": _pt(g["start"]), "to": _pt(g["end"])}
+    if kind == "Circle":
+        return {"type": "circle", "center": _pt(g["center"]), "radius": _r(g["radius"])}
+    if kind == "ArcOfCircle" and float(g.get("axis_z", 1)) > 0:
+        return {
+            "type": "arc",
+            "center": _pt(g["center"]),
+            "radius": _r(g["radius"]),
+            "start_angle": _r(math.degrees(g["first"])),
+            "end_angle": _r(math.degrees(g["last"])),
+        }
+    if kind == "Point":
+        return {"type": "point", "at": _pt(g["at"])}
+    return None
+
+
+def _point_item(geo: int, pos: int) -> list[Any] | None:
+    if geo == -1:
+        return [-1, "start"]
+    name = _POS_NAMES.get(int(pos))
+    return [geo, name] if name else None
+
+
+def _spec_items(c: dict[str, Any]) -> list[Any] | None:
+    """The builder's ``items`` for a live constraint, or None when it has none."""
+    ctype = c.get("type")
+    f, fp = int(c.get("first", GEO_UNDEF)), int(c.get("first_pos", 0))
+    s, sp = int(c.get("second", GEO_UNDEF)), int(c.get("second_pos", 0))
+    t, tp = int(c.get("third", GEO_UNDEF)), int(c.get("third_pos", 0))
+    p1 = _point_item(f, fp) if fp else None
+    p2 = _point_item(s, sp) if sp else None
+    if ctype == "Coincident":
+        return [p1, p2] if p1 and p2 else None
+    if ctype in ("Horizontal", "Vertical"):
+        return [f] if s == GEO_UNDEF and not fp else None
+    if ctype in ("Tangent", "Perpendicular"):
+        if t != GEO_UNDEF:
+            return None
+        if not fp and not sp:
+            return [f, s]
+        return [p1, p2] if p1 and p2 else None
+    if ctype in ("Parallel", "Equal"):
+        return [f, s] if not fp and not sp else None
+    if ctype == "Symmetric":
+        if not (p1 and p2):
+            return None
+        if tp:
+            p3 = _point_item(t, tp)
+            return [p1, p2, p3] if p3 else None
+        return [p1, p2, t]
+    if ctype == "Distance":
+        if s == GEO_UNDEF:
+            return [f] if not fp else None
+        if p1 and p2:
+            return [p1, p2]
+        if p1 and not sp:
+            return [p1, s]
+        return None
+    if ctype in ("DistanceX", "DistanceY"):
+        if s == GEO_UNDEF:
+            return [p1] if p1 else ([f] if not fp else None)
+        return [p1, p2] if p1 and p2 else None
+    if ctype == "Radius":
+        return [f] if not fp else None
+    if ctype == "Angle":
+        if t != GEO_UNDEF or fp or sp:
+            return None
+        return [f] if s == GEO_UNDEF else [f, s]
+    return None
+
+
+def sketch_spec_from_live(
+    geometry: list[dict[str, Any]],
+    construction: list[bool],
+    constraints: list[dict[str, Any]],
+    exprs: dict[str, Any],
+) -> tuple[dict[str, Any], list[str]]:
+    """The live sketch as the builder's spec, and what the spec cannot hold.
+
+    Returns ``({"geometry", "constraints", "construction"}, unsupported)``.
+    ``unsupported`` names each element with no spec form (a point-on-object
+    constraint, a reference dimension, an ellipse, ...); when it is non-empty
+    the spec is incomplete and the caller keeps the sketch some other way.
+    Dimensions keep their expression bindings and names.
+    """
+    unsupported: list[str] = []
+    spec_geo: list[dict[str, Any]] = []
+    for i, g in enumerate(geometry):
+        item = _spec_geometry(g)
+        if item is None:
+            unsupported.append(f"geometry {i} ({g.get('type')})")
+            continue
+        spec_geo.append(item)
+    spec_cons: list[dict[str, Any]] = []
+    for i, c in enumerate(constraints):
+        ctype = _SPEC_TYPES.get(str(c.get("type")))
+        items = _spec_items(c) if ctype else None
+        if (
+            ctype is None
+            or items is None
+            or not c.get("driving", True)
+            or not c.get("active", True)
+        ):
+            label = c.get("name") or f"#{i}"
+            unsupported.append(f"constraint {label} ({c.get('type')})")
+            continue
+        entry: dict[str, Any] = {"type": ctype, "items": items}
+        if ctype in DIMENSIONAL_CONSTRAINTS:
+            expr = constraint_expression(exprs, i, str(c.get("name") or ""))
+            value = map_constraint_value(ctype, None, c.get("value"), expr)
+            entry["value"] = None if value is UNREADABLE else value
+        if c.get("name"):
+            entry["name"] = str(c["name"])
+        spec_cons.append(entry)
+    spec = {
+        "geometry": spec_geo,
+        "constraints": spec_cons,
+        "construction": [i for i, flag in enumerate(construction) if flag],
+    }
+    return spec, unsupported
+
+
+def describe_sketch_edit(old: dict[str, Any], new: dict[str, Any]) -> str:
+    """ "geometry 2 -> 3, constraints 4 -> 5 (+UserHeight)" for a change notice."""
+    bits = []
+    for key in ("geometry", "constraints"):
+        before, after = len(old.get(key) or []), len(new.get(key) or [])
+        if before != after:
+            bits.append(f"{key} {before} -> {after}")
+    old_names = {c.get("name") for c in old.get("constraints") or [] if c.get("name")}
+    new_names = {c.get("name") for c in new.get("constraints") or [] if c.get("name")}
+    names = [f"+{n}" for n in sorted(new_names - old_names)]
+    names += [f"-{n}" for n in sorted(old_names - new_names)]
+    if (old.get("construction") or []) != (new.get("construction") or []):
+        bits.append("construction lines changed")
+    text = ", ".join(bits) or "constraints rearranged"
+    return text + (f" ({', '.join(names)})" if names else "")

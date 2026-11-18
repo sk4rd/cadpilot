@@ -250,3 +250,85 @@ def test_merging_params_keeps_what_the_caller_did_not_mention():
     }
     assert replaced == ["obj_properties.length", "obj_properties.x", "obj_properties.reversed"]
     assert old["obj_properties"]["length"] == 8
+
+
+# --- the user's own sketch edits ---------------------------------------------
+
+
+def _con(ctype, first, first_pos=0, second=sj.GEO_UNDEF, second_pos=0, value=0.0, name=""):
+    return {
+        "type": ctype,
+        "first": first,
+        "first_pos": first_pos,
+        "second": second,
+        "second_pos": second_pos,
+        "third": sj.GEO_UNDEF,
+        "third_pos": 0,
+        "value": value,
+        "name": name,
+        "driving": True,
+        "active": True,
+    }
+
+
+LINES = [
+    {"type": "LineSegment", "start": [0, 0], "end": [60.0000001, 0]},
+    {"type": "LineSegment", "start": [0, 5], "end": [0, 30]},
+]
+
+
+def test_a_live_sketch_becomes_its_spec_again():
+    cons = [
+        _con("Horizontal", 0),
+        _con("Vertical", 1),
+        _con("Distance", 0, value=60.0, name="Width"),
+        _con("Distance", 1, value=25.0, name="UserHeight"),
+        _con("Coincident", 0, 1, -1, 1),
+        _con("DistanceX", 1, 1, value=0.0),
+    ]
+    spec, unsupported = sj.sketch_spec_from_live(
+        LINES, [False, True], cons, {".Constraints.Width": "Params.Wd"}
+    )
+    assert unsupported == []
+    assert spec["geometry"][0] == {"type": "line", "from": [0, 0], "to": [60, 0]}
+    assert spec["construction"] == [1]
+    assert spec["constraints"] == [
+        {"type": "horizontal", "items": [0]},
+        {"type": "vertical", "items": [1]},
+        {"type": "distance", "items": [0], "value": "=Params.Wd", "name": "Width"},
+        {"type": "distance", "items": [1], "value": 25, "name": "UserHeight"},
+        {"type": "coincident", "items": [[0, "start"], [-1, "start"]]},
+        {"type": "distance_x", "items": [[1, "start"]], "value": 0},
+    ]
+
+
+def test_what_the_spec_cannot_express_is_named():
+    cons = [_con("PointOnObject", 1, 1, 0), {**_con("Distance", 0, value=5.0), "driving": False}]
+    _spec, unsupported = sj.sketch_spec_from_live(
+        [*LINES, {"type": "Ellipse"}], [False] * 3, cons, {}
+    )
+    assert unsupported == [
+        "geometry 2 (Ellipse)",
+        "constraint #0 (PointOnObject)",
+        "constraint #1 (Distance)",
+    ]
+
+
+def test_the_structure_signature_ignores_dimensions_but_not_references():
+    base = [_con("Distance", 0, value=60.0)]
+    sig = sj.sketch_signature(LINES, [False, False], base, [])
+    assert sj.sketch_signature(LINES, [False, False], [_con("Distance", 0, value=80.0)], []) == sig
+    assert sj.sketch_signature(LINES, [False, False], [_con("Distance", 1, value=60.0)], []) != sig
+    assert sj.sketch_signature(LINES, [False, True], base, []) != sig
+
+
+def test_a_sketch_edit_names_what_changed():
+    old = {"geometry": [1, 2], "constraints": [{"type": "horizontal"}]}
+    new = {"geometry": [1, 2], "constraints": [{"type": "horizontal"}, {"name": "UserHeight"}]}
+    assert sj.describe_sketch_edit(old, new) == "constraints 1 -> 2 (+UserHeight)"
+
+
+def test_a_hand_edited_step_says_so_in_its_row():
+    rec = sj.StepRecord(index=2, operation="sketch", label="base profile")
+    rec.params = {"user_edited": True}
+    assert sj.row_text(rec) == "base profile (edited by hand)"

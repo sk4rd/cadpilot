@@ -470,12 +470,15 @@ def record_commit(
         # position — slicing from planned_tail_start would remove nothing and
         # a stale plan would survive the commit.
         sj.drop_planned(records)
+        params = dict(params or {})
+        if operation == "sketch":
+            _note_sketch_signature(doc, params, objects_before or [], objects_after or [])
         rec = sj.StepRecord(
             index=len(records) + 1,
             state=sj.STATE_DONE,
             operation=operation,
             label=label or operation,
-            params=dict(params or {}),
+            params=params,
             transaction=transaction,
             atomic=atomic,
             executable=operation in EXECUTABLE_OPS if executable is None else executable,
@@ -703,7 +706,10 @@ def _execute_one(doc, operation: str, params: dict[str, Any]) -> dict[str, Any]:
     if operation in FEATURE_TYPES:
         spec = {"type": operation, "base": params.get("obj_name"), **props}
         try:
-            return {"success": True, "object_name": create_feature_gui(doc, spec).Name}
+            feat = create_feature_gui(doc, spec)
+            if operation == "sketch" and params.get("live_sketch"):
+                _restore_live_sketch(doc, feat, params["live_sketch"])
+            return {"success": True, "object_name": feat.Name}
         except Exception as e:
             return {"success": False, "error": f"{type(e).__name__}: {e}"}
     if operation == "set_anchors":
@@ -852,6 +858,8 @@ def _run_record_locked(doc, records: list[sj.StepRecord], rec: sj.StepRecord) ->
     rec.objects_after = _object_names(doc)
     rec.error = ""
     rec.result = str(res.get("object_name") or "")[:200]
+    if rec.operation == "sketch":
+        _note_sketch_signature(doc, rec.params, rec.objects_before, rec.objects_after)
     write_journal(doc, records)
     logger.info(
         "committed transaction %r (%d objects, %d journal records)",
@@ -963,6 +971,7 @@ def _compact_journal(doc) -> dict[str, Any]:
                 "label": r.label,
                 "accepted": r.accepted,
                 **({"error": r.error} if r.error else {}),
+                **({"user_edited": True} if (r.params or {}).get("user_edited") else {}),
             }
             for r in records
         ],
@@ -1913,6 +1922,95 @@ def _read_live(obj, prop: str, kind: str):
     return _json_scalar(value)
 
 
+def _live_sketch(obj) -> tuple[list[dict], list[bool], list[dict], list[list[str]]]:
+    """A sketch's geometry, construction flags, constraints and external refs, as data."""
+    geometry: list[dict[str, Any]] = []
+    for g in obj.Geometry:
+        kind = type(g).__name__
+        item: dict[str, Any] = {"type": kind}
+        if kind == "LineSegment":
+            item.update(start=[g.StartPoint.x, g.StartPoint.y], end=[g.EndPoint.x, g.EndPoint.y])
+        elif kind in ("Circle", "ArcOfCircle"):
+            item.update(center=[g.Center.x, g.Center.y], radius=g.Radius, axis_z=g.Axis.z)
+            if kind == "ArcOfCircle":
+                item.update(first=g.FirstParameter, last=g.LastParameter)
+        elif kind == "Point":
+            item.update(at=[g.X, g.Y])
+        geometry.append(item)
+    construction = [bool(obj.getConstruction(i)) for i in range(len(geometry))]
+    constraints = [
+        {
+            "type": k.Type,
+            "first": int(k.First),
+            "first_pos": int(k.FirstPos),
+            "second": int(k.Second),
+            "second_pos": int(k.SecondPos),
+            "third": int(k.Third),
+            "third_pos": int(k.ThirdPos),
+            "value": float(k.Value),
+            "name": str(k.Name or ""),
+            "driving": bool(getattr(k, "Driving", True)),
+            "active": bool(getattr(k, "IsActive", True)),
+        }
+        for k in obj.Constraints
+    ]
+    external = []
+    for ref in getattr(obj, "ExternalGeometry", None) or []:
+        target, subs = ref if isinstance(ref, tuple) else (ref, "")
+        subs = [subs] if isinstance(subs, str) else list(subs or [])
+        external.append([getattr(target, "Name", ""), *[str(x) for x in subs]])
+    return geometry, construction, constraints, external
+
+
+def _sketch_object(doc, params: dict[str, Any], before: list[str], after: list[str]):
+    for name in [n for n in after if n not in set(before)] + [str(params.get("obj_name") or "")]:
+        obj = doc.getObject(name) if name else None
+        if obj is not None and obj.TypeId == "Sketcher::SketchObject":
+            return obj
+    return None
+
+
+def _note_sketch_signature(doc, params: dict[str, Any], before, after) -> None:
+    """Remember the structure a sketch step built, so a later edit can be told apart."""
+    with contextlib.suppress(Exception):
+        obj = _sketch_object(doc, params, list(before or []), list(after or []))
+        if obj is not None:
+            params["sketch_signature"] = sj.sketch_signature(*_live_sketch(obj))
+
+
+def _sketch_blob(obj) -> dict[str, Any]:
+    """The sketch's own serialization, for a sketch the spec cannot express."""
+    import base64
+
+    blob = {
+        prop: base64.b64encode(bytes(obj.dumpPropertyContent(prop))).decode("ascii")
+        for prop in ("Geometry", "Constraints", "ExternalGeometry")
+    }
+    blob["expressions"] = [
+        [str(path), str(expr)]
+        for path, expr in getattr(obj, "ExpressionEngine", None) or []
+        if "Constraints" in str(path)
+    ]
+    return blob
+
+
+def _restore_live_sketch(doc, sketch, blob: dict[str, Any]) -> None:
+    """Put a user-edited sketch back exactly, after the builder made its base."""
+    import base64
+
+    for path, _expr in list(getattr(sketch, "ExpressionEngine", None) or []):
+        if "Constraints" in str(path):
+            sketch.setExpression(str(path), None)
+    for prop in ("ExternalGeometry", "Geometry", "Constraints"):
+        if blob.get(prop):
+            sketch.restorePropertyContent(prop, base64.b64decode(blob[prop]))
+    for path, expr in blob.get("expressions") or []:
+        sketch.setExpression(path, expr)
+    doc.recompute()
+    if sketch.solve() != 0:
+        raise RuntimeError(f"the user's edited sketch '{sketch.Name}' no longer solves")
+
+
 def _sync_props_target(rec: sj.StepRecord, sub: int | None) -> dict[str, Any] | None:
     """The obj_properties dict a manual-edit sync write lands in.
 
@@ -2046,7 +2144,10 @@ class _JournalSyncObserver:
         text, entry = self._entry(doc, obj)
         if entry is None or entry.get("sketch") is None:
             return
-        self._sync_constraints(obj, doc, sj.from_json(text), *entry["sketch"])
+        records = sj.from_json(text)
+        if self._sync_sketch_structure(obj, doc, records, *entry["sketch"]):
+            return
+        self._sync_constraints(obj, doc, records, *entry["sketch"])
 
     def _sync(self, obj, prop) -> None:
         doc = getattr(obj, "Document", None)
@@ -2190,6 +2291,62 @@ class _JournalSyncObserver:
         if edits:
             self._commit_sync(doc, records, rec, edits)
 
+    def _sync_sketch_structure(self, obj, doc, records, index: int, sub: int | None) -> bool:
+        """Snapshot a sketch the user changed structurally into its step.
+
+        Geometry or constraints added or deleted by hand used to leave the
+        step's spec as it was (the value sync maps by index and bails), so a
+        replay silently rebuilt the original sketch. The live sketch goes into
+        the spec when the spec can express it, otherwise the sketch's own
+        serialization rides along (``live_sketch``), which replay restores
+        after the builder made the base. True = handled, the values included.
+        """
+        rec = next((r for r in records if r.index == index), None)
+        if rec is None or sub is not None:
+            return False
+        live = _live_sketch(obj)
+        signature = sj.sketch_signature(*live)
+        stored = rec.params.get("sketch_signature")
+        spec = rec.params.setdefault("obj_properties", {})
+        if stored is None:
+            # A journal from before signatures: adopt the live structure as the
+            # baseline unless it plainly differs from the spec.
+            if len(spec.get("constraints") or []) == len(live[2]) and len(
+                spec.get("geometry") or []
+            ) == len(live[0]):
+                rec.params["sketch_signature"] = signature
+                return False
+        elif stored == signature:
+            if not rec.params.get("live_sketch"):
+                return False
+            blob = _sketch_blob(obj)
+            if blob == rec.params["live_sketch"]:
+                return True
+            rec.params["live_sketch"] = blob
+            self._commit_sync(doc, records, rec, [], sketch=(obj.Name, "dimensions changed"))
+            return True
+        new_spec, unsupported = sj.sketch_spec_from_live(
+            live[0], live[1], live[2], dict(getattr(obj, "ExpressionEngine", None) or [])
+        )
+        if len(live[3]) != len(spec.get("external") or []):
+            unsupported.append("external geometry")
+        detail = sj.describe_sketch_edit(spec, new_spec)
+        if unsupported:
+            rec.params["live_sketch"] = _sketch_blob(obj)
+            detail += (
+                f"; kept as FreeCAD's own sketch data because the spec cannot express "
+                f"{', '.join(unsupported[:3])}"
+            )
+        else:
+            rec.params.pop("live_sketch", None)
+            spec.update(new_spec)
+            if not spec["construction"]:
+                spec.pop("construction")
+        rec.params["sketch_signature"] = signature
+        rec.params["user_edited"] = True
+        self._commit_sync(doc, records, rec, [], sketch=(obj.Name, detail))
+        return True
+
     def _sync_constraints(self, obj, doc, records, index: int, sub: int | None = None) -> None:
         """Mirror dimensional-constraint edits into the owning sketch step.
 
@@ -2269,12 +2426,31 @@ class _JournalSyncObserver:
             [(f"{obj.Name}.Placement", _placement_brief(current), _placement_brief(value))],
         )
 
-    def _commit_sync(self, doc, records, rec, edits: list[tuple[str, Any, Any]]) -> None:
+    def _commit_sync(
+        self,
+        doc,
+        records,
+        rec,
+        edits: list[tuple[str, Any, Any]],
+        sketch: tuple[str, str] | None = None,
+    ) -> None:
         self._writing = True
         try:
             write_journal(doc, records)
         finally:
             self._writing = False
+        if sketch is not None:
+            logger.info("journal sync: step %d sketch %s %s (manual edit)", rec.index, *sketch)
+            note_user_change(
+                doc.Name,
+                {
+                    "kind": "sketch",
+                    "step": rec.index,
+                    "label": rec.label,
+                    "object": sketch[0],
+                    "detail": sketch[1],
+                },
+            )
         for what, old, new in edits:
             logger.info("journal sync: step %d %s = %s (manual edit)", rec.index, what, new)
             note_user_change(
