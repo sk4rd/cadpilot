@@ -469,6 +469,22 @@ def _stack_op(doc, n: int, undo: bool) -> dict[str, Any]:
     }
 
 
+def commit_transaction(doc) -> None:
+    """Commit, and close FreeCAD's application-wide active transaction too.
+
+    A transaction that recorded no change commits nothing and leaves its name
+    active, so the user's next change made without a transaction of its own
+    (a console edit, a script) was filed under CADPilot's name and left open.
+    """
+    doc.commitTransaction()
+    with contextlib.suppress(Exception):
+        active = FreeCAD.getActiveTransaction()
+        # Only our own: the user may be inside a sketch edit in another
+        # document, whose transaction must not be committed under them.
+        if active and str(active[0]).startswith(TX_PREFIX):
+            FreeCAD.closeActiveTransaction(False, int(active[1]))
+
+
 # --- recording ---------------------------------------------------------------
 
 
@@ -900,7 +916,7 @@ def _run_record_locked(doc, records: list[sj.StepRecord], rec: sj.StepRecord) ->
         len(rec.objects_after),
         len(records),
     )
-    doc.commitTransaction()
+    commit_transaction(doc)
     with _EngineQuiet(), contextlib.suppress(Exception):
         doc.recompute()
     # Self-correction for a re-run whose op ended up changing nothing (an
@@ -1432,7 +1448,7 @@ def _remove_objects_locked(doc, names: list[str]) -> list[str]:
             # leave a usable document behind.
             if repair_body_tips(doc):
                 doc.recompute()
-        doc.commitTransaction()
+        commit_transaction(doc)
     except Exception:
         with contextlib.suppress(Exception):
             doc.abortTransaction()
