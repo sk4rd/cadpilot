@@ -376,12 +376,21 @@ Example (parametric plate: variables -> sketch -> pad):
      "obj_properties": {"length": "=Spreadsheet.thick"}}""",
     "pad": """\
 pad — extrude a closed sketch profile (obj_name = profile sketch).
-Optional in obj_properties: length (default 10), reversed, midplane, body, name.
-through_all (true) asks for PartDesign's parametric through-all instead of a
-length, and `length` is then ignored (it is meant for cuts, so it rarely makes
-sense on a pad). pad_type: only "length" is accepted — the other PartDesign
-pad modes are unsupported, and the error names through_all for through cuts.
-Numeric params accept "=expressions". The profile must have a closed wire.
+Optional in obj_properties: length (default 10), pad_type, length2, up_to_face,
+offset, reversed, midplane, body, name.
+pad_type (FreeCAD's own names work too):
+  length       — `length` mm (the default)
+  up_to_first  — up to the first face of the part along the extrusion
+  up_to_last   — up to the last face (through_all=true means this on a pad)
+  up_to_face   — up to the face in up_to_face: [obj, "+Z"|"FaceN"], or a bare
+                 direction ("+Z", "top", …) for a face of the body's shape
+  two_lengths  — `length` one way and length2 the other (implied by length2)
+offset shifts where an up_to_* mode ends (+ goes past the face). An up_to_*
+feature that finds no face in its default direction is built reversed, and the
+reply says so; an explicit reversed is never overridden. `length` is ignored in
+the up_to_* modes.
+Numeric params accept "=expressions". The profile must have a closed wire that
+does not cross itself (a crossing outline is refused).
 A NEGATIVE length is legal and extrudes the other way (the result warns).
 A profile that does not touch the base still succeeds (the Body allows
 compounds) but leaves a floating solid — the result warns about it.
@@ -389,10 +398,13 @@ Attachment fusion: on a face-attached sketch, pad FUSES into the supporting
 solid automatically — do not pad-then-boolean.""",
     "pocket": """\
 pocket — cut a closed sketch profile out of a solid (obj_name = profile sketch).
-Optional: length (default 10) OR through_all (true = PartDesign's parametric
-through-all, and `length` is then ignored), reversed, midplane, body, name.
-pad_type: only "length" is accepted — other PartDesign pocket modes are
-unsupported, and the error names through_all for through cuts.
+Optional: length (default 10), through_all, pad_type, length2, up_to_face,
+offset, reversed, midplane, body, name.
+pad_type: length (default), through_all (= through_all=true, PartDesign's
+parametric through-all; up_to_last means the same on a pocket), up_to_first,
+up_to_face (with up_to_face: [obj, "-Z"|"FaceN"] or a bare direction),
+two_lengths (with length2). offset shifts where an up_to_* mode ends; `length`
+is ignored in the through/up_to modes.
 A NEGATIVE length is legal and cuts the other way (the result warns).
 through_all is the right choice for a hole that must stay open when the model
 gets thicker: a numeric length only goes "through" while the body is thinner
@@ -400,8 +412,9 @@ than it, and silently leaves a floor once it is not.
 The DIRECTION is decided from the geometry: FreeCAD's own default points away
 from the solid when the profile sits on the body's start plane, which removes
 0 mm^3, so if the default cuts nothing while the opposite direction removes
-material the opposite is applied and the reply's warnings say so. Pass
-reversed explicitly to decide it yourself; midplane is never touched.
+material the opposite is applied and the reply's warnings say so; an up_to_*
+pocket that finds no face is reversed the same way. Pass reversed explicitly to
+decide it yourself; midplane is never touched.
 Attachment fusion: on a face-attached sketch, pocket CUTS the supporting
 solid via attachment — no boolean needed.""",
     "revolution": """\

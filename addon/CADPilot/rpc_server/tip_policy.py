@@ -142,7 +142,18 @@ def dress_base_is_allowed(*, base_in_body: bool, base_is_tip: bool) -> bool:
 
 
 _DRESS_KEYS = ("edges", "name")
-_PADLIKE_KEYS = ("length", "through_all", "pad_type", "reversed", "midplane", "body", "name")
+_PADLIKE_KEYS = (
+    "length",
+    "length2",
+    "through_all",
+    "pad_type",
+    "up_to_face",
+    "offset",
+    "reversed",
+    "midplane",
+    "body",
+    "name",
+)
 _REVLIKE_KEYS = ("angle", "axis", "reversed", "body", "name")
 
 #: The obj_properties keys each feature op reads, the one list the builders
@@ -255,3 +266,74 @@ def unknown_transform_step_keys(kind: str, step: dict) -> str:
         f"a {kind} step does not take {', '.join(map(repr, unknown))}; valid keys: "
         f"{', '.join(sorted(allowed))}."
     )
+
+
+#: pad_type spelling -> FreeCAD's Type. FreeCAD's own names are accepted too.
+PADLIKE_MODES = {
+    "length": "Length",
+    "through_all": "ThroughAll",
+    "up_to_first": "UpToFirst",
+    "up_to_last": "UpToLast",
+    "up_to_face": "UpToFace",
+    "two_lengths": "TwoLengths",
+}
+_UP_TO = ("UpToFirst", "UpToLast", "UpToFace")
+
+
+def padlike_mode(op: str, spec: dict) -> tuple[str, str]:
+    """(FreeCAD Type, note) for a pad/pocket spec; ValueError on a bad combination.
+
+    Without pad_type the mode follows the keys given: through_all, up_to_face,
+    or length2 (two lengths). A pad has no ThroughAll and a pocket no
+    UpToLast; each maps to the other, which is what it means for that op, and
+    the note says so.
+    """
+    raw = spec.get("pad_type")
+    if raw is None:
+        if spec.get("through_all"):
+            mode = "through_all"
+        elif spec.get("up_to_face") is not None:
+            mode = "up_to_face"
+        elif spec.get("length2") is not None:
+            mode = "two_lengths"
+        else:
+            mode = "length"
+    else:
+        key = str(raw).strip().lower().replace("-", "_").replace(" ", "_")
+        by_freecad_name = {v.lower(): k for k, v in PADLIKE_MODES.items()}
+        mode = by_freecad_name.get(key.replace("_", ""), key)
+        if spec.get("through_all") and mode != "through_all":
+            raise ValueError(f"through_all=true contradicts pad_type={raw!r}; pass one of them.")
+    if mode not in PADLIKE_MODES:
+        raise ValueError(f"pad_type must be one of {', '.join(PADLIKE_MODES)}, got {raw!r}.")
+    note = ""
+    if op == "pad" and mode == "through_all":
+        mode = "up_to_last"
+        note = (
+            "a pad has no through-all, so through_all was built as UpToLast (up to the last "
+            "face of the part in the extrusion direction)"
+        )
+    elif op == "pocket" and mode == "up_to_last":
+        mode = "through_all"
+        note = "a pocket has no UpToLast; ThroughAll (through every face) was built instead"
+    fc_type = PADLIKE_MODES[mode]
+    if fc_type == "UpToFace" and spec.get("up_to_face") is None:
+        raise ValueError(
+            "pad_type up_to_face needs up_to_face: [object, '+Z'|'FaceN'], or a direction "
+            "token ('+Z', 'top', ...) for a face of the body's current shape."
+        )
+    if fc_type != "UpToFace" and spec.get("up_to_face") is not None:
+        raise ValueError(f"up_to_face is only read with pad_type up_to_face, not {mode}.")
+    if fc_type == "TwoLengths":
+        if spec.get("length2") is None:
+            raise ValueError("pad_type two_lengths needs length2 (the extent on the other side).")
+        if spec.get("midplane"):
+            raise ValueError("midplane contradicts two_lengths: one is symmetric, one is not.")
+    elif spec.get("length2") is not None:
+        raise ValueError(f"length2 is only read with pad_type two_lengths, not {mode}.")
+    if spec.get("offset") is not None and fc_type not in _UP_TO:
+        raise ValueError(
+            "offset (the distance from the face the feature ends at) applies to up_to_first, "
+            f"up_to_last and up_to_face only, not {mode}."
+        )
+    return fc_type, note

@@ -329,3 +329,45 @@ def test_patterning_a_whole_body_is_refused():
     build = _src("_build_pattern")
     assert build.index("PartDesign::Body") < build.index("import Draft")
     assert "is a whole Body" in build
+
+
+# --- pad / pocket modes -------------------------------------------------------------
+
+
+def test_pad_and_pocket_modes_follow_pad_type_or_the_keys_given():
+    tp = _tip_policy()
+    assert tp.padlike_mode("pad", {}) == ("Length", "")
+    assert tp.padlike_mode("pocket", {"through_all": True}) == ("ThroughAll", "")
+    assert tp.padlike_mode("pad", {"pad_type": "UpToFirst"})[0] == "UpToFirst"
+    assert tp.padlike_mode("pad", {"pad_type": "up to last"})[0] == "UpToLast"
+    assert tp.padlike_mode("pad", {"up_to_face": "+Z", "offset": 2})[0] == "UpToFace"
+    assert tp.padlike_mode("pocket", {"length2": 3})[0] == "TwoLengths"
+
+
+def test_a_pad_through_all_is_up_to_last_and_says_so():
+    """tool_docs documented through_all on a pad, and FreeCAD refused it."""
+    tp = _tip_policy()
+    fc_type, note = tp.padlike_mode("pad", {"through_all": True})
+    assert fc_type == "UpToLast" and "UpToLast" in note
+    assert tp.padlike_mode("pocket", {"pad_type": "up_to_last"})[0] == "ThroughAll"
+
+
+def test_contradictory_pad_keys_are_refused():
+    tp = _tip_policy()
+    for spec, words in (
+        ({"pad_type": "up_to_face"}, "needs up_to_face"),
+        ({"pad_type": "two_lengths"}, "needs length2"),
+        ({"length2": 3, "midplane": True}, "contradicts"),
+        ({"offset": 2}, "applies to up_to_first"),
+        ({"through_all": True, "pad_type": "length"}, "contradicts"),
+        ({"pad_type": "sideways"}, "pad_type must be one of"),
+    ):
+        with pytest.raises(ValueError, match=words):
+            tp.padlike_mode("pad", spec)
+
+
+def test_up_to_modes_find_their_face_in_either_direction():
+    flip = _src("_flip_up_to_direction")
+    assert "spec.get('reversed') is not None" in flip, "an explicit reversed wins"
+    assert "_flip_up_to_direction" in _src("_build_padlike")
+    assert "'Two sides'" in _src("_apply_padlike_mode")

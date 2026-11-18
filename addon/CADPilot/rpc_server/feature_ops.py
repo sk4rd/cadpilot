@@ -1733,8 +1733,6 @@ def _profile_sketch(doc, spec, op):
     return sketch
 
 
-_PAD_TYPES = ("length",)  # uptoface & co. intentionally unsupported for now
-
 # A cut that removed nothing changes no volume at all, so any hair of
 # difference is a real removal. Shared by the direction probe and by the
 # "removed no material" warning so the two cannot disagree.
@@ -1893,52 +1891,126 @@ def _auto_detect_cut_direction(doc, feat, spec, fc_type, base_vol) -> None:
         doc.recompute()
         return
     global _AUTO_DIRECTION_NOTE
-    _AUTO_DIRECTION_NOTE = (
+    note = (
         f"'{feat.Name}' cut material in the reverse direction, so its Reversed "
         f"property was set for you (removed {round(base_vol - reversed_vol, 3)} mm^3; "
         "the caller's direction would have cut air). Pass reversed=true/false "
         "explicitly to decide it yourself."
     )
-    FreeCAD.Console.PrintMessage(f"CADPilot: {_AUTO_DIRECTION_NOTE}\n")
+    _AUTO_DIRECTION_NOTE = f"{_AUTO_DIRECTION_NOTE} {note}".strip()
+    FreeCAD.Console.PrintMessage(f"CADPilot: {note}\n")
+
+
+def _add_note(text: str) -> None:
+    global _AUTO_DIRECTION_NOTE
+    _AUTO_DIRECTION_NOTE = (
+        f"{_AUTO_DIRECTION_NOTE} {text}".strip() if text else _AUTO_DIRECTION_NOTE
+    )
+
+
+def _up_to_face_ref(doc, body, spec):
+    """(object, face name) a pad/pocket ends at: [obj, face] or a token on the body."""
+    target = spec["up_to_face"]
+    if isinstance(target, (list, tuple)) and len(target) == 2:
+        ref = sketcher_ops.attachment_ref(_get_obj(doc, target[0], "up_to_face object"))
+        token = target[1]
+    elif isinstance(target, str):
+        ref = sketcher_ops.attachment_ref(body)
+        if ref is body:
+            raise ValueError(
+                "up_to_face as a bare direction needs a body that already has a shape."
+            )
+        token = target
+    else:
+        raise ValueError(
+            f"up_to_face must be [object, '+Z'|'FaceN'] or a direction, got {target!r}"
+        )
+    name = _resolve_elements(ref, [token], "Face")[0]
+    _record_resolved_faces(ref, [name])
+    return ref, name
+
+
+def _apply_padlike_mode(feat, op, fc_mode, spec, face_ref) -> None:
+    if fc_mode == "Length":
+        _set_length(feat, op, spec.get("length", 10.0))
+        return
+    if fc_mode == "TwoLengths":
+        _set_length(feat, op, spec.get("length", 10.0))
+        try:
+            _set_or_bind(feat, "Length2", spec["length2"])
+        except Exception as e:
+            raise ValueError(
+                f"{op} length2 {spec['length2']!r} is not a valid length: {e}."
+            ) from None
+        if "SideType" in feat.PropertiesList:
+            # FreeCAD 1.1 hides the TwoLengths type ("?TwoLengths") behind SideType.
+            feat.SideType = "Two sides"
+        else:
+            feat.Type = "TwoLengths"
+        return
+    try:
+        feat.Type = fc_mode
+    except Exception as e:
+        raise ValueError(f"{op} cannot use {fc_mode} in this FreeCAD: {e}.") from None
+    if face_ref is not None:
+        feat.UpToFace = (face_ref[0], [face_ref[1]])
+    if spec.get("offset") is not None:
+        _set_or_bind(feat, "Offset", spec["offset"])
+
+
+def _flip_up_to_direction(doc, feat, spec, fc_mode) -> None:
+    """An up-to feature whose direction finds no face is built the other way.
+
+    FreeCAD extrudes along the sketch normal (a pocket against it), so a
+    profile above the part padded "up to first" fails with "No faces found in
+    this direction" (live) while the reversed one is exactly what was meant.
+    An explicit ``reversed`` is never overridden.
+    """
+    if fc_mode not in ("UpToFirst", "UpToLast", "UpToFace") or spec.get("reversed") is not None:
+        return
+    doc.recompute()
+    if "Invalid" not in [str(s) for s in feat.State]:
+        return
+    feat.Reversed = True
+    doc.recompute()
+    if "Invalid" in [str(s) for s in feat.State]:
+        feat.Reversed = False
+        doc.recompute()
+        return
+    _add_note(
+        f"'{feat.Name}' found no face in its default direction, so it was built reversed "
+        "(Reversed=true). Pass reversed explicitly to decide it yourself."
+    )
 
 
 def _build_padlike(doc, spec, fc_type, default_name):
+    op = fc_type.split("::")[-1].lower()
     body = sketcher_ops._get_or_create_body(doc, spec.get("body"))
     sketch = _profile_sketch(doc, spec, fc_type)
-    ptype = str(spec.get("pad_type", "length")).lower()
-    if ptype not in _PAD_TYPES:
-        raise ValueError(
-            f"pad_type must be one of {_PAD_TYPES}, got {ptype!r} — for a parametric "
-            "through cut pass through_all=true instead."
-        )
+    fc_mode, mode_note = tip_policy.padlike_mode(op, spec)
     doc.recompute()
     _require_closed_profile(sketch, fc_type)
-    _refuse_self_intersecting_profile(sketch, fc_type.split("::")[-1].lower())
-    _ensure_material_base(doc, body, sketch, fc_type.split("::")[-1].lower())
+    _refuse_self_intersecting_profile(sketch, op)
+    _ensure_material_base(doc, body, sketch, op)
     # Snapshot the material BEFORE the feature joins the body: afterwards its
     # Shape is the feature's own result (see _body_material_volume).
     base_vol = _body_material_volume(body)
+    face_ref = _up_to_face_ref(doc, body, spec) if fc_mode == "UpToFace" else None
     feat = body.newObject(fc_type, spec.get("name") or default_name)
     feat.Profile = sketch
-    if spec.get("through_all"):
-        # PartDesign's OWN parametric through-all, not a big numeric length.
-        # `through_all` used to be ignored here, so the pocket silently took
-        # `length`'s default 10 mm: the hole looked through on a plate thinner
-        # than 10 and quietly grew a floor the moment the model passed it (live:
-        # a Ø6 "through" hole in a flange was exact at 8 mm, then left a 2 mm
-        # floor at 12 mm and a 10 mm floor at 20 mm — +1696 mm³ of uncut material
-        # and 6 extra bottom faces, with the volume formula the only clue).
-        # `length` is ignored while this is set, by FreeCAD's own semantics.
-        try:
-            feat.Type = "ThroughAll"
-        except Exception as e:
-            raise ValueError(
-                f"through_all is not available on {fc_type}: {e}. Drop it and give length instead."
-            ) from None
-    else:
-        _set_length(feat, fc_type.split("::")[-1].lower(), spec.get("length", 10.0))
+    # through_all is PartDesign's OWN parametric through-all, not a big numeric
+    # length: a numeric stand-in only goes through while the part is thinner
+    # than it (live: a Ø6 "through" hole in a flange left a 10 mm floor at
+    # 20 mm, +1696 mm³ of uncut material). `length` is ignored in the
+    # through/up-to modes, by FreeCAD's own semantics.
+    _apply_padlike_mode(feat, op, fc_mode, spec, face_ref)
     feat.Reversed = bool(spec.get("reversed", False))
-    feat.Midplane = bool(spec.get("midplane", False))
+    if fc_mode != "TwoLengths":
+        # FreeCAD 1.1 maps Midplane onto SideType: writing False resets a
+        # "Two sides" feature to one side (live: 5 + 3 built 5 mm only).
+        feat.Midplane = bool(spec.get("midplane", False))
+    _add_note(mode_note)
+    _flip_up_to_direction(doc, feat, spec, fc_mode)
     _auto_detect_cut_direction(doc, feat, spec, fc_type, base_vol)
     return feat
 

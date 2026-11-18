@@ -357,10 +357,13 @@ def test_through_all_is_freecads_parametric_through_all():
     a blind hole, with the volume formula the only clue. The builder must set
     PartDesign's own Type, which stays through at any thickness."""
     body = _func(_FEATURE, "_build_padlike")
-    assert "through_all" in ast.unparse(body)
-    assert "ThroughAll" in _strings(body), "must use FreeCAD's parametric through-all"
-    # The numeric-length path must become the ELSE branch, not the only branch.
-    assert "_set_length" in ast.unparse(body)
+    assert "padlike_mode" in ast.unparse(body), "the mode follows through_all/pad_type"
+    tip_policy = ast.parse((_ADDON / "tip_policy.py").read_text(encoding="utf-8"))
+    assert "ThroughAll" in _strings(tip_policy), "must use FreeCAD's parametric through-all"
+    apply = ast.unparse(_func(_FEATURE, "_apply_padlike_mode"))
+    assert "feat.Type = fc_mode" in apply
+    # The numeric-length path is one mode among several, not the only branch.
+    assert "_set_length" in apply
 
 
 def test_invalid_shape_error_names_the_object_and_reason():
