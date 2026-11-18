@@ -40,6 +40,7 @@ FEATURE_TYPES = (
     "draft",
     "datum_plane",
     "hull",
+    "hole",
 )
 
 _AXIS = {"X": (1, 0, 0), "Y": (0, 1, 0), "Z": (0, 0, 1)}
@@ -1961,7 +1962,7 @@ def _auto_detect_cut_direction(doc, feat, spec, fc_type, base_vol) -> None:
     that is a profile outside the solid or a bad attachment, and the existing
     no-material warning explains it better than a silent flip would.
     """
-    if fc_type != "PartDesign::Pocket" or base_vol <= 0:
+    if fc_type not in ("PartDesign::Pocket", "PartDesign::Hole") or base_vol <= 0:
         return
     if spec.get("reversed") is not None or spec.get("midplane"):
         return
@@ -2179,6 +2180,49 @@ def _build_revlike(doc, spec, fc_type, default_name):
             )
         feat.ReferenceAxis = (sketch, [sub])
     feat.Reversed = bool(spec.get("reversed", False))
+    return feat
+
+
+def _build_hole(doc, spec):
+    """PartDesign::Hole at every circle centre of a sketch (plain drilled holes).
+
+    The hole's diameter is its own; the circles only place it. Threads, counter
+    bores and countersinks are FreeCAD's Hole task panel's to set afterwards.
+    """
+    _require(spec, "diameter")
+    sketch = _profile_sketch(doc, spec, "hole")
+    body = _feature_body(doc, spec, sketch, "hole")
+    circles = [
+        g
+        for i, g in enumerate(sketch.Geometry)
+        if g.TypeId == "Part::GeomCircle" and not sketch.getConstruction(i)
+    ]
+    if not circles:
+        raise ValueError(
+            f"hole needs circles in '{sketch.Name}': a hole is drilled at each circle's centre."
+        )
+    through = bool(spec.get("through"))
+    if through == (spec.get("depth") is not None):
+        raise ValueError("hole needs exactly one of depth (mm or '=expression') or through=true.")
+    point = str(spec.get("drill_point", "flat")).lower()
+    if point not in ("flat", "angled"):
+        raise ValueError(f"drill_point must be 'flat' or 'angled', got {spec.get('drill_point')!r}")
+    doc.recompute()
+    _ensure_material_base(doc, body, sketch, "hole")
+    base_vol = _body_material_volume(body)
+    feat = body.newObject("PartDesign::Hole", spec.get("name") or "Hole")
+    feat.Profile = sketch
+    feat.Threaded = False
+    _set_or_bind(feat, "Diameter", spec["diameter"])
+    if through:
+        feat.DepthType = "ThroughAll"
+    else:
+        feat.DepthType = "Dimension"
+        _set_or_bind(feat, "Depth", spec["depth"])
+    feat.DrillPoint = point.capitalize()
+    feat.Reversed = bool(spec.get("reversed", False))
+    feat.Midplane = bool(spec.get("midplane", False))
+    _auto_detect_cut_direction(doc, feat, spec, "PartDesign::Hole", base_vol)
     return feat
 
 
@@ -2482,7 +2526,7 @@ def _build_draft(doc, spec):
     return feat
 
 
-_CUT_TYPES = ("pocket", "groove")
+_CUT_TYPES = ("pocket", "groove", "hole")
 
 
 def _cut_without_material(feat) -> str:
@@ -2852,6 +2896,7 @@ _BUILDERS = {
     "draft": _build_draft,
     "datum_plane": _build_datum_plane,
     "hull": _build_hull,
+    "hole": _build_hole,
 }
 
 

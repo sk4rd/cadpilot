@@ -428,6 +428,15 @@ pocket that finds no face is reversed the same way. Pass reversed explicitly to
 decide it yourself; midplane is never touched.
 Attachment fusion: on a face-attached sketch, pocket CUTS the supporting
 solid via attachment — no boolean needed.""",
+    "hole": """\
+hole — drilled holes (PartDesign::Hole) at every circle centre of a sketch
+(obj_name = the sketch; the circles only place the holes).
+Required in obj_properties: diameter, and depth OR through (true).
+Optional: drill_point ("flat" default, "angled"), reversed, midplane, body, name.
+diameter and depth accept "=expressions". The direction is decided like a
+pocket's: if the default drills air and the opposite removes material, the
+opposite is used and the reply says so. Threads and counterbores are set in
+FreeCAD's Hole panel afterwards; a circle pocket is the alternative.""",
     "revolution": """\
 revolution — revolve a closed profile (obj_name = profile sketch).
 Optional: axis (default "Y" = the sketch's in-plane V axis, the usual lathe

@@ -432,3 +432,10 @@ def test_fillet_edges_can_be_picked_by_geometry():
         assert rule in match
     assert "face.Edges" in _src("_select_edges")
     assert "resolved_edges" in _src("describe_feature"), "the picked edges must be echoed"
+
+
+def test_hole_drills_at_the_sketch_circles_and_decides_its_direction():
+    hole = _src("_build_hole")
+    assert "PartDesign::Hole" in hole and "Part::GeomCircle" in hole
+    assert "_auto_detect_cut_direction(doc, feat, spec, 'PartDesign::Hole'" in hole
+    assert "'PartDesign::Hole'" in _src("_auto_detect_cut_direction")

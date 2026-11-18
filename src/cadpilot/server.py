@@ -241,6 +241,7 @@ def cad(
         "draft",
         "datum_plane",
         "hull",
+        "hole",
     ],
     doc_name: str,
     obj_type: str | None = None,

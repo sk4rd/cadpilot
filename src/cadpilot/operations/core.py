@@ -437,6 +437,7 @@ CAD_FEATURE_OPERATIONS = (
     "draft",
     "datum_plane",
     "hull",
+    "hole",
 )
 # Feature ops whose obj_name names the NEW object (or is unused), not a base.
 CAD_NO_BASE_OPERATIONS = ("loft", "sketch", "variables", "datum_plane", "hull")

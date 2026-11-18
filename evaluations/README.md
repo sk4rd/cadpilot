@@ -54,7 +54,7 @@ scratch model, or the evaluation rots the moment the document changes.
 | 5 | `50` | `get_topology` schema default (max 200) |
 | 6 | `384` | `operation_help("screenshots")` / `DEFAULT_MAX_DIM` |
 | 7 | `screenshots/` | `operation_help("screenshots")` |
-| 8 | `23` | `cad` operation enum (`CAD_OPERATIONS`) — pinned by a test |
-| 9 | `33` | `operation_help()` topic index (`CAD_OP_DOCS`) — pinned by a test |
+| 8 | `24` | `cad` operation enum (`CAD_OPERATIONS`) — pinned by a test |
+| 9 | `34` | `operation_help()` topic index (`CAD_OP_DOCS`) — pinned by a test |
 | 10 | `get_view` | `operation_help("screenshots")` |
 | 11 | `50` | `operation_help("color")` (transparency is a percent, not a fraction) |

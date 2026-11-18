@@ -214,6 +214,16 @@ SPEC_KEYS: dict[str, frozenset[str]] = {
         "draft": ("faces", "angle", "neutral_plane", "pull_direction", "body", "name"),
         "datum_plane": ("plane", "offset", "body"),
         "hull": ("sketches", "margin"),
+        "hole": (
+            "diameter",
+            "depth",
+            "through",
+            "drill_point",
+            "reversed",
+            "midplane",
+            "body",
+            "name",
+        ),
     }.items()
 }
 
