@@ -2636,6 +2636,9 @@ def create_feature_gui(doc, spec):
     builder = _BUILDERS.get(ftype)
     if builder is None:
         raise ValueError(f"unknown feature type {ftype!r}; supported: {', '.join(FEATURE_TYPES)}")
+    problem = tip_policy.unknown_spec_keys(ftype, spec)
+    if problem:
+        raise ValueError(problem)
     # Notes are per-build: a replay (step_engine) also calls this, and a note it
     # leaves behind must never be reported as the NEXT caller's outcome.
     global _AUTO_DIRECTION_NOTE, _LAST_FEATURE_INFO

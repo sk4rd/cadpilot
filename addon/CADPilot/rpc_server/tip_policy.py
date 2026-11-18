@@ -1,4 +1,5 @@
-"""Which created feature must become its PartDesign Body's Tip.
+"""Which created feature must become its PartDesign Body's Tip, and which
+``obj_properties`` keys each feature op takes.
 
 Pure decision data — no FreeCAD import, so it is unit-tested from ``tests/``.
 
@@ -18,6 +19,8 @@ stale one — assigning an object that is not a body member leaves the body
 """
 
 from __future__ import annotations
+
+import difflib
 
 # PartDesign features that are a modelling step, so the body should show them.
 _ADVANCING_TYPES = frozenset(
@@ -136,3 +139,90 @@ def dress_base_is_allowed(*, base_in_body: bool, base_is_tip: bool) -> bool:
     left the tip wrong), so the caller must refuse.
     """
     return (not base_in_body) or base_is_tip
+
+
+_DRESS_KEYS = ("edges", "name")
+_PADLIKE_KEYS = ("length", "through_all", "pad_type", "reversed", "midplane", "body", "name")
+_REVLIKE_KEYS = ("angle", "axis", "reversed", "body", "name")
+
+#: The obj_properties keys each feature op reads, the one list the builders
+#: are checked against. An unknown key used to be dropped silently: live,
+#: ``pattern(mode="Spacing", spacings=[...])`` built evenly spaced copies and
+#: reported success.
+SPEC_KEYS: dict[str, frozenset[str]] = {
+    op: frozenset(keys)
+    for op, keys in {
+        "boolean": ("op", "tool", "name"),
+        "fillet": (*_DRESS_KEYS, "radius"),
+        "chamfer": (*_DRESS_KEYS, "size"),
+        "loft": ("profiles", "solid", "ruled", "name"),
+        "sweep": ("path", "solid", "name"),
+        "mirror": ("plane", "face", "originals", "name"),
+        "pattern": (
+            "count",
+            "pattern_type",
+            "spacing",
+            "axis",
+            "angle",
+            "center",
+            "reversed",
+            "name",
+        ),
+        "move": ("translate", "rotate", "placement"),
+        "color": (
+            "color",
+            "transparency",
+            "line_color",
+            "line_width",
+            "point_size",
+            "display_mode",
+            "draw_style",
+            "visible",
+            "objects",
+        ),
+        "variables": ("cells", "name"),
+        "sketch": (
+            "geometry",
+            "plane",
+            "offset",
+            "body",
+            "construction",
+            "external",
+            "constraints",
+        ),
+        "pad": _PADLIKE_KEYS,
+        "pocket": _PADLIKE_KEYS,
+        "revolution": _REVLIKE_KEYS,
+        "groove": _REVLIKE_KEYS,
+        "thickness": ("faces", "value", "reversed", "body", "name"),
+        "draft": ("faces", "angle", "neutral_plane", "pull_direction", "body", "name"),
+        "datum_plane": ("plane", "offset", "body"),
+        "hull": ("sketches", "margin"),
+    }.items()
+}
+
+# The feature spec's own fields, filled in by the dispatcher, not the caller.
+_SPEC_FIELDS = frozenset({"type", "base", "description"})
+
+
+def unknown_spec_keys(op: str, spec: dict) -> str:
+    """'' when every key of ``spec`` is one ``op`` reads, else the refusal text."""
+    allowed = SPEC_KEYS.get(op)
+    if allowed is None:
+        return ""
+    # A key set to None asks for nothing (callers pass {"name": None} for "no
+    # name"), so only keys that carry a value can be ignored by mistake.
+    unknown = sorted(
+        k for k, v in spec.items() if v is not None and k not in allowed and k not in _SPEC_FIELDS
+    )
+    if not unknown:
+        return ""
+    hints = []
+    for key in unknown:
+        close = difflib.get_close_matches(key, sorted(allowed), n=1)
+        hints.append(f"{key!r} (did you mean {close[0]!r}?)" if close else repr(key))
+    return (
+        f"{op} does not take {', '.join(hints)}; it would be ignored, so nothing was "
+        f"built. Valid keys for {op}: {', '.join(sorted(allowed))} "
+        f"(see operation_help('{op}'))."
+    )

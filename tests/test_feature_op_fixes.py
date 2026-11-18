@@ -6,6 +6,7 @@ tests/live_features_verify.py proves the same behaviour against a live FreeCAD.
 """
 
 import ast
+import re
 import sys
 import types
 from pathlib import Path
@@ -207,3 +208,47 @@ def test_no_effect_guard_compares_with_the_predecessor_and_names_the_cause():
     assert "BaseFeature" in _src("_transform_volumes")
     docs = (Path(__file__).resolve().parents[1] / "src" / "cadpilot" / "tool_docs.py").read_text()
     assert "cannot drive a PartDesign pattern" not in docs
+
+
+# --- unknown keys -----------------------------------------------------------------
+
+
+def _tip_policy():
+    if str(_ADDON.parent) not in sys.path:
+        sys.path.insert(0, str(_ADDON.parent))
+    from rpc_server import tip_policy
+
+    return tip_policy
+
+
+def test_every_feature_op_has_a_key_list():
+    feature_types = next(
+        ast.literal_eval(n.value)
+        for n in _FEATURE.body
+        if isinstance(n, ast.Assign) and getattr(n.targets[0], "id", "") == "FEATURE_TYPES"
+    )
+    assert set(_tip_policy().SPEC_KEYS) == set(feature_types)
+
+
+def test_every_key_a_builder_reads_is_listed():
+    """A key read by a builder but missing from SPEC_KEYS would be refused."""
+    listed = set().union(*_tip_policy().SPEC_KEYS.values())
+    # _settle_shape_caches probes "profile" defensively; no op takes it.
+    internal = {"type", "base", "description", "profile"}
+    for module in ("feature_ops.py", "sketcher_ops.py"):
+        text = (_ADDON / module).read_text(encoding="utf-8")
+        read = set(re.findall(r"spec(?:\.get\(|\[)\"([a-z_0-9]+)\"", text))
+        assert read - internal <= listed, f"{module}: {sorted(read - internal - listed)}"
+
+
+def test_unknown_keys_are_refused_with_the_valid_ones_listed():
+    """Live: pattern(mode="Spacing", spacings=[...]) built evenly spaced copies
+    and reported success."""
+    tp = _tip_policy()
+    message = tp.unknown_spec_keys("pattern", {"type": "pattern", "count": 4, "colour": 1})
+    assert "'colour'" in message and "Valid keys for pattern:" in message
+    assert "count" in message and "spacing" in message
+    assert "did you mean 'color'" in tp.unknown_spec_keys("color", {"colour": "red"})
+    assert tp.unknown_spec_keys("pad", {"type": "pad", "base": "S", "length": 5}) == ""
+    assert tp.unknown_spec_keys("sketch", {"geometry": [], "name": None}) == "", "None asks nothing"
+    assert "unknown_spec_keys" in _src("create_feature_gui")
