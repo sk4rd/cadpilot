@@ -732,13 +732,29 @@ def build_sketch_gui(doc, spec):
 
     name = spec.get("base")
     existing = doc.getObject(name) if name else None
+    created_body = None
     if existing is not None:
         sketch, body = _sketch_to_replace(doc, existing, spec)
     else:
-        body = _get_or_create_body(doc, spec.get("body"))
+        named = spec.get("body")
+        if named and doc.getObject(named) is None:
+            # A plan names the Body its first sketch goes in before anything has
+            # created it; refusing made every such plan fail at step 1.
+            body = doc.addObject("PartDesign::Body", named)
+            created_body = body.Name
+        else:
+            body = _get_or_create_body(doc, named)
         sketch = body.newObject("Sketcher::SketchObject", name or "Sketch")
 
     attachment, warnings = _attach_sketch(sketch, doc, spec, body)
+    if created_body:
+        renamed = (
+            "" if created_body == spec.get("body") else f" (FreeCAD named it '{created_body}')"
+        )
+        warnings = [
+            f"Body '{spec.get('body')}' did not exist, so it was created{renamed}.",
+            *warnings,
+        ]
     geometry_ids, implied = _add_geometry(sketch, geometry, spec.get("construction"))
     _add_external(sketch, doc, body, spec.get("external"))
     origins, unnamed = _add_constraints(sketch, spec.get("constraints"), implied)
