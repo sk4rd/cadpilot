@@ -494,10 +494,15 @@ def test_set_accepted_only_marks_done_steps():
 def test_update_planned_merges_params_and_label():
     rec = sj.build_record(_step(), 1, sj.STATE_PLANNED, OPS)
     rec.params = {"obj_name": "Box", "obj_properties": {"Length": 10}}
-    assert sj.update_planned([rec], 1, {"obj_properties": {"Length": 20}}, "bigger") is rec
-    assert rec.params["obj_properties"] == {"Length": 20}  # replaced wholesale
-    assert rec.params["obj_name"] == "Box"  # top-level merge
+    rec.params = {"obj_name": "Box", "obj_properties": {"Length": 10, "Width": 4}}
+    out = sj.update_planned([rec], 1, {"obj_properties": {"Length": 20}}, "bigger")
+    assert out == (rec, ["obj_properties.Length"])
+    assert rec.params["obj_properties"] == {"Length": 20, "Width": 4}  # deep merge
+    assert rec.params["obj_name"] == "Box"
     assert rec.label == "bigger"
+    out = sj.update_planned([rec], 1, {"obj_properties": {"Length": 5}}, replace=True)
+    assert out == (rec, ["obj_name", "obj_properties"])
+    assert rec.params == {"obj_properties": {"Length": 5}}
 
 
 def test_update_planned_rejects_done_and_unknown():

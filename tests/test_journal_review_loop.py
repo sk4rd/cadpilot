@@ -237,3 +237,16 @@ def test_feature_claims_follow_the_rules():
     props = sj.tracked_objects([rec])["LinearPattern"]["props"]
     assert props["Occurrences"] == (4, "count", None)
     assert props["Originals"] == (4, "originals", None)
+
+
+def test_merging_params_keeps_what_the_caller_did_not_mention():
+    old = {"obj_name": "Profile", "obj_properties": {"length": 8, "reversed": True, "x": [1]}}
+    merged, replaced = sj.merge_params(
+        old, {"obj_properties": {"length": 12, "midplane": True, "x": [2], "reversed": None}}
+    )
+    assert merged == {
+        "obj_name": "Profile",
+        "obj_properties": {"length": 12, "midplane": True, "x": [2]},
+    }
+    assert replaced == ["obj_properties.length", "obj_properties.x", "obj_properties.reversed"]
+    assert old["obj_properties"]["length"] == 8

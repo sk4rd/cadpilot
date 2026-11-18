@@ -924,7 +924,9 @@ QLabel#PanelStatus {{ color: {c["dim"]}; padding: 5px 8px 4px 8px; }}
         params = self._edited_params()
         if params is None:
             return
-        res = self._apply({"operation": "update", "index": rec.index, "params": params})
+        res = self._apply(
+            {"operation": "update", "index": rec.index, "params": params, "replace": True}
+        )
         if res is not None and res.get("success"):
             self.editor.document().setModified(False)
 
@@ -938,7 +940,9 @@ QLabel#PanelStatus {{ color: {c["dim"]}; padding: 5px 8px 4px 8px; }}
         if not rec.executable:
             self._warn(f"'{rec.operation}' cannot be re-run — only modeling steps can.")
             return
-        self._apply_maybe_force({"operation": "reexecute", "index": rec.index, "params": params})
+        self._apply_maybe_force(
+            {"operation": "reexecute", "index": rec.index, "params": params, "replace": True}
+        )
         self.editor.document().setModified(False)
 
     def _menu(self, pos) -> None:

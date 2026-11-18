@@ -549,14 +549,16 @@ Review loop (the point of the panel: plan, release, review, fix):
                 authored against step `index` existing). params.reason is
                 logged. Reject never stops at accepted steps: it is the
                 deliberate act of destruction
-  update        edit a PLANNED/FAILED step without running it: params merge
-                top-level (obj_properties is replaced wholesale — send the
-                full dict), params.label renames the row. params.label alone
+  update        edit a PLANNED/FAILED step without running it: params
+                deep-merge (send only what changes; a null value removes
+                the key; the reply's `replaced` lists the keys whose values
+                changed), params.label renames the row. params.label alone
                 also renames a DONE step (a label is presentation, not
                 history: it is the only way to fix a wrong row without
                 re-running the step)
   reexecute     roll back to just before `index`, then run it with `params`
-                merged in (params.label renames the step). The planned tail
+                deep-merged in, like update (params.label renames the step;
+                `replaced` lists what changed). The planned tail
                 survives (reject drops it), but the DONE steps after `index`
                 are rolled back to planned and must be released again — the
                 reply says so in `rewound` and `warning`, and a re-run needs a

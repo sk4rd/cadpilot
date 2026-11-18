@@ -963,25 +963,66 @@ def set_accepted(records: list[StepRecord], index: int, on: bool = True) -> Step
     return rec
 
 
+def merge_params(
+    old: dict[str, Any], new: dict[str, Any], prefix: str = ""
+) -> tuple[dict[str, Any], list[str]]:
+    """Deep-merge ``new`` into ``old``; also returns the dotted keys it replaced.
+
+    Nested dicts merge key by key, so ``{"obj_properties": {"length": 12}}``
+    changes the length and keeps every other property, including the ones the
+    user's edits synced in. Any other value (a list, a number) replaces the old
+    one, and ``None`` removes the key. A replaced key is one that held a
+    different value before.
+    """
+    merged = dict(old or {})
+    replaced: list[str] = []
+    for key, value in (new or {}).items():
+        path = f"{prefix}{key}"
+        if value is None:
+            if key in merged:
+                merged.pop(key)
+                replaced.append(path)
+            continue
+        current = merged.get(key)
+        if isinstance(current, dict) and isinstance(value, dict):
+            merged[key], inner = merge_params(current, value, f"{path}.")
+            replaced.extend(inner)
+            continue
+        if key in merged and current != value:
+            replaced.append(path)
+        merged[key] = value
+    return merged, replaced
+
+
 def update_planned(
     records: list[StepRecord],
     index: int,
     params: dict[str, Any] | None = None,
     label: str = "",
-) -> StepRecord | None:
+    replace: bool = False,
+) -> tuple[StepRecord, list[str]] | None:
     """Edit a not-yet-committed step in place. None = done or unknown step.
 
-    Top-level shallow merge (same rule as reexecute): ``obj_properties`` is
-    replaced wholesale, so callers send the full property dict.
+    ``params`` deep-merge into the step (see ``merge_params``), so a caller
+    sends only what it changes; ``replace`` swaps them wholesale instead, for
+    an editor that holds the complete dict (a key it deleted must go). Returns
+    the record and the keys whose values were replaced.
     """
     rec = next((r for r in records if r.index == index), None)
     if rec is None or rec.state not in (STATE_PLANNED, STATE_FAILED):
         return None
+    replaced: list[str] = []
     if params:
-        rec.params = {**(rec.params or {}), **params}
+        if replace:
+            replaced = sorted(
+                k for k in rec.params or {} if (rec.params or {}).get(k) != params.get(k)
+            )
+            rec.params = dict(params)
+        else:
+            rec.params, replaced = merge_params(rec.params or {}, params)
     if label:
         rec.label = label
-    return rec
+    return rec, replaced
 
 
 def set_label(records: list[StepRecord], index: int, label: str) -> StepRecord | None:

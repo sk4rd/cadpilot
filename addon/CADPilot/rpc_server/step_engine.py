@@ -1038,6 +1038,7 @@ def _apply_op(doc, spec: dict[str, Any]) -> dict[str, Any]:
             int(spec.get("index") or 0),
             spec.get("params") or {},
             bool(spec.get("force")),
+            bool(spec.get("replace")),
         )
     if operation == "accept":
         rec = sj.set_accepted(
@@ -1064,7 +1065,10 @@ def _apply_op(doc, spec: dict[str, Any]) -> dict[str, Any]:
     if operation == "update":
         params = dict(spec.get("params") or {})
         label = str(params.pop("label", "") or "")
-        rec = sj.update_planned(records, int(spec.get("index") or 0), params, label)
+        updated = sj.update_planned(
+            records, int(spec.get("index") or 0), params, label, bool(spec.get("replace"))
+        )
+        rec, replaced = updated if updated is not None else (None, [])
         if rec is None and label and not params:
             # A label is presentation, not history: renaming a DONE step is a
             # legitimate fix of a wrong row, and it cannot invalidate the step's
@@ -1080,7 +1084,7 @@ def _apply_op(doc, spec: dict[str, Any]) -> dict[str, Any]:
                 ),
             }
         write_journal(doc, records)
-        return {"success": True, "index": rec.index, "label": rec.label}
+        return {"success": True, "index": rec.index, "label": rec.label, "replaced": replaced}
     if operation == "insert":
         steps = list(spec.get("steps") or (spec.get("params") or {}).get("steps") or [])
         if not steps:
@@ -1594,7 +1598,7 @@ def _reject(doc, records, index: int, force: bool, reason: str) -> dict[str, Any
 
 
 def _reexecute(
-    doc, records, index: int, params: dict[str, Any], force: bool = False
+    doc, records, index: int, params: dict[str, Any], force: bool = False, replace: bool = False
 ) -> dict[str, Any]:
     params = dict(params or {})
     # A label is presentation, so it is applied to the record and never merged
@@ -1680,12 +1684,25 @@ def _reexecute(
     # sit in the journal as a transaction the stack cannot supply, which breaks
     # the rollback trust check at that position.
     rec.transaction = ""
-    rec.params = {**(rec.params or {}), **(params or {})}
+    # Merged, not swapped: the step's params carry the user's synced edits,
+    # and a caller passing {"obj_properties": {"reversed": true}} used to drop
+    # every other property with them.
+    if replace and params:
+        replaced = sorted(k for k in rec.params or {} if (rec.params or {}).get(k) != params.get(k))
+        rec.params = dict(params)
+    else:
+        rec.params, replaced = sj.merge_params(rec.params or {}, params or {})
     if label:
         rec.label = label
     write_journal(doc, records)
     res = run_record(doc, records, rec)
-    out = {**res, "index": index, "count": len(records), "done": sj.done_count(records)}
+    out = {
+        **res,
+        "index": index,
+        "count": len(records),
+        "done": sj.done_count(records),
+        "replaced": replaced,
+    }
     if extra > 0:
         # A re-run happens on a clean base, so the steps after it are undone and
         # returned to `planned`. That is by design, but it used to happen

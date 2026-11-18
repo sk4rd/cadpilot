@@ -353,6 +353,41 @@ check(
 )
 
 
+# --- E: a partial update or re-run merges into the step ------------------------
+D = "LJ_Merge"
+fresh(D)
+ops.step_plan_operation(
+    c,
+    D,
+    [
+        {
+            "operation": "create_object",
+            "obj_type": "Part::Box",
+            "obj_name": "Lid",
+            "obj_properties": {"Length": 30, "Width": 20, "Height": 4},
+        }
+    ],
+)
+res = control(D, "update", index=1, params={"obj_properties": {"Height": 6}})
+check(
+    "E update reports what it replaced", res.get("replaced") == ["obj_properties.Height"], str(res)
+)
+props = step_params(D, "create_object")
+check(
+    "E update keeps the properties it was not given",
+    props == {"Length": 30, "Width": 20, "Height": 6},
+    str(props),
+)
+control(D, "run_all")
+res = control(D, "reexecute", index=1, params={"obj_properties": {"Height": 8}})
+dims = py(
+    "import FreeCAD\nb = FreeCAD.getDocument('LJ_Merge').getObject('Lid')\n"
+    "print(b.Length.Value, b.Width.Value, b.Height.Value)",
+    D,
+)
+check("E a partial re-run keeps the other properties", dims == "30.0 20.0 8.0", f"{dims} {res}")
+
+
 py(
     "import FreeCAD\n"
     "for name in list(FreeCAD.listDocuments()):\n"
