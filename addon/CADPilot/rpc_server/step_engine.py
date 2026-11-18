@@ -1800,6 +1800,11 @@ class _JournalSyncObserver:
             return
         # An observer must never break the host's edit.
         with contextlib.suppress(Exception):
+            # Opening a file sets every property once, in file order (Length
+            # before the ExpressionEngine that binds it), which read as a
+            # burst of manual edits and rewrote bound params to numbers.
+            if obj.Document.Restoring:
+                return
             self._sync(obj, prop)
 
     def _entry(self, doc, obj) -> tuple[str, dict[str, Any] | None]:
@@ -1814,7 +1819,7 @@ class _JournalSyncObserver:
 
     def sync_sketch(self, doc, obj) -> None:
         """The deferred half of a sketch edit (see _defer_sketch_sync)."""
-        if self._writing:
+        if self._writing or doc.Restoring:
             return
         text, entry = self._entry(doc, obj)
         if entry is None or entry.get("sketch") is None:
