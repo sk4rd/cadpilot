@@ -269,6 +269,10 @@ class _EngineQuiet:
 
     def __enter__(self) -> _EngineQuiet:
         global _ENGINE_ACTIVE
+        if _ENGINE_ACTIVE == 0:
+            # A user edit still waiting for its deferred read must be recorded
+            # against the state the user left, not the one this window writes.
+            flush_deferred_syncs()
         _ENGINE_ACTIVE += 1
         return self
 
@@ -284,6 +288,54 @@ class _EngineQuiet:
         # step's obj_properties — the exact bleed this window exists to prevent).
         _ENGINE_ACTIVE = max(0, _ENGINE_ACTIVE - 1)
         return False
+
+
+_SKETCH_PROPS = ("Constraints", "ExpressionEngine", "Geometry")
+_DEFERRED: dict[tuple[str, str], bool] = {}
+_FLUSH_SCHEDULED = False
+
+
+def _defer_sketch_sync(doc_name: str, obj_name: str) -> None:
+    global _FLUSH_SCHEDULED
+    _DEFERRED[(doc_name, obj_name)] = True
+    if _FLUSH_SCHEDULED:
+        return
+    try:
+        from PySide import QtCore
+    except ImportError:
+        flush_deferred_syncs()
+        return
+    _FLUSH_SCHEDULED = True
+    QtCore.QTimer.singleShot(0, _flush_from_timer)
+
+
+def _flush_from_timer() -> None:
+    global _FLUSH_SCHEDULED
+    _FLUSH_SCHEDULED = False
+    if _ENGINE_ACTIVE > 0:
+        # A nested event loop inside an engine window; the window's exit
+        # leaves the edit pending and the next window (or tick) settles it.
+        if _DEFERRED:
+            _defer_sketch_sync(*next(iter(_DEFERRED)))
+        return
+    flush_deferred_syncs()
+
+
+def flush_deferred_syncs() -> None:
+    """Run the sketch syncs that user edits queued (see _defer_sketch_sync)."""
+    if not _DEFERRED:
+        return
+    pending = list(_DEFERRED)
+    _DEFERRED.clear()
+    observer = getattr(FreeCAD, _OBSERVER_ATTR, None)
+    if observer is None:
+        return
+    for doc_name, obj_name in pending:
+        with contextlib.suppress(Exception):
+            doc = FreeCAD.getDocument(doc_name)
+            obj = doc.getObject(obj_name)
+            if obj is not None:
+                observer.sync_sketch(doc, obj)
 
 
 def engine_quiet() -> _EngineQuiet:
@@ -1749,20 +1801,40 @@ class _JournalSyncObserver:
         with contextlib.suppress(Exception):
             self._sync(obj, prop)
 
-    def _sync(self, obj, prop) -> None:
-        doc = getattr(obj, "Document", None)
-        if doc is None:
-            return
+    def _entry(self, doc, obj) -> tuple[str, dict[str, Any] | None]:
         text = getattr(doc, sj.JOURNAL_PROP, "") or ""
         if not text:
-            return
+            return "", None
         cached = self._cache.get(doc.Name)
         if cached is None or cached[0] != text:
             cached = (text, sj.tracked_objects(sj.from_json(text)))
             self._cache[doc.Name] = cached
-        entry = cached[1].get(getattr(obj, "Name", ""))
+        return text, cached[1].get(getattr(obj, "Name", ""))
+
+    def sync_sketch(self, doc, obj) -> None:
+        """The deferred half of a sketch edit (see _defer_sketch_sync)."""
+        if self._writing:
+            return
+        text, entry = self._entry(doc, obj)
+        if entry is None or entry.get("sketch") is None:
+            return
+        self._sync_constraints(obj, doc, sj.from_json(text), *entry["sketch"])
+
+    def _sync(self, obj, prop) -> None:
+        doc = getattr(obj, "Document", None)
+        if doc is None:
+            return
+        text, entry = self._entry(doc, obj)
         if entry is None:
             return
+        if entry.get("sketch") is not None and prop in _SKETCH_PROPS:
+            # Deleting a constraint fires ExpressionEngine while Constraints
+            # still has the old length but the expression paths are already
+            # renumbered, so a sync at event time paired bindings with the
+            # wrong constraints. The sketch is read once the edit settled.
+            _defer_sketch_sync(doc.Name, obj.Name)
+            if prop != "ExpressionEngine":
+                return
         if prop == "ExpressionEngine":
             # Binding or unbinding an expression rewrites ExpressionEngine and
             # need not fire the bound property itself, so every value this
@@ -1774,8 +1846,6 @@ class _JournalSyncObserver:
             records = sj.from_json(text)
             if entry.get("sheet") is not None:
                 self._sync_cells(obj, doc, records, *entry["sheet"])
-            if entry.get("sketch") is not None:
-                self._sync_constraints(obj, doc, records, *entry["sketch"])
             for claimed in list(entry["props"]):
                 self._sync(obj, claimed)
             if entry.get("move") is not None:
@@ -1785,9 +1855,6 @@ class _JournalSyncObserver:
         # edit fires both 'cells' and the address) no-ops, so trigger wide.
         if entry.get("sheet") is not None:
             self._sync_cells(obj, doc, sj.from_json(text), *entry["sheet"])
-            return
-        if entry.get("sketch") is not None and prop == "Constraints":
-            self._sync_constraints(obj, doc, sj.from_json(text), *entry["sketch"])
             return
         hit = entry["props"].get(prop)
         if hit is None:

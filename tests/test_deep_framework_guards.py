@@ -410,12 +410,16 @@ def test_expression_binding_changes_are_tracked():
     need not fire the bound property, so a step's params kept the last NUMBER
     (or kept "=Vars.x" after an unbind) while the model was already driven by
     the expression. The observer must re-read everything it tracks for the
-    object when ExpressionEngine changes."""
+    object when ExpressionEngine changes. A sketch is re-read once the edit
+    settled, because a constraint deletion fires ExpressionEngine with the
+    paths already renumbered and the constraint list not yet shortened."""
     sync = _func(ENGINE, "_sync")
     assert "ExpressionEngine" in _strings(sync), "the observer must react to the engine itself"
-    assert {"_sync_constraints", "_sync_cells", "_sync_move_fold"} <= _attrs(sync), (
+    assert {"_sync_cells", "_sync_move_fold"} <= _attrs(sync), (
         "every handler must re-read its values when ExpressionEngine changes"
     )
+    assert "_defer_sketch_sync" in {n.id for n in ast.walk(sync) if isinstance(n, ast.Name)}
+    assert "_sync_constraints" in _attrs(_func(ENGINE, "sync_sketch"))
 
 
 def test_sync_claims_follow_the_object_that_really_changed():
