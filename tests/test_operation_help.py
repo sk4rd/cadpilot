@@ -114,6 +114,7 @@ _NON_FEATURE_TOPICS = {
     "delete_object",
     "diagnose",
     "edit_object",
+    "editing",
     "execute_code_async",
     "get_addon_log",
     "multi_agent",

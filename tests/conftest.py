@@ -245,10 +245,26 @@ class FakeFreeCADConnection:
         )
 
     def get_active_screenshot(
-        self, view_name="Isometric", width=None, height=None, focus_object=None, doc_name=None
+        self,
+        view_name="Isometric",
+        width=None,
+        height=None,
+        focus_object=None,
+        doc_name=None,
+        show_sketches=False,
+        isolate=False,
     ):
+        options = {"show_sketches": True} if show_sketches else {}
+        if isolate:
+            options["isolate"] = True
         self._record(
-            "get_active_screenshot", view_name, width, height, focus_object, doc_name=doc_name
+            "get_active_screenshot",
+            view_name,
+            width,
+            height,
+            focus_object,
+            doc_name=doc_name,
+            **options,
         )
         return self.SCREENSHOT
 
@@ -256,6 +272,13 @@ class FakeFreeCADConnection:
         """Empty string is the addon's "the last capture had no failure"."""
         self._record("get_last_screenshot_error")
         return self._result("get_last_screenshot_error", "")
+
+    def get_outline(self, doc_name, obj_name=None, limit=50, offset=0):
+        """The model tree for a document; None for an object, as the addon
+        answers for anything that is not a sheet, a body or a sketch."""
+        self._record("get_outline", doc_name, obj_name, limit, offset)
+        default = None if obj_name else f"{doc_name}: (never saved)"
+        return self.result_overrides.get("get_outline", default)
 
     def get_objects(self, doc_name):
         self._record("get_objects", doc_name)

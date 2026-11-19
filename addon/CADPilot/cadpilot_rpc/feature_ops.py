@@ -323,7 +323,8 @@ def _require_end_of_chain(body, base, op):
         f"{op} base '{base.Name}' is inside Body '{body.Name}' but is not its Tip "
         f"({tip_name}). A dress-up is built at the END of the chain, and FreeCAD would "
         "move the Body's Tip onto it, silently dropping every later feature (pockets and "
-        "patterns included). Dress the Tip instead, or reorder the features in FreeCAD's GUI."
+        f"patterns included). Dress the Tip instead, or pass after='{base.Name}' to put the "
+        f"{op} right behind its base, in the middle of the history."
     )
 
 
@@ -1206,24 +1207,50 @@ def _set_or_bind(obj, prop, value):
 def _build_variables(doc, spec):
     """Create or update a Spreadsheet parameter table (idempotent).
 
-    spec: {"type": "variables", "base": name|None,
-           "cells": {"A1": ["alias", value], ...}}
+    spec: {"type": "variables", "base": name|None, and any of
+           "cells": {"A1": ["alias", value], ...}   write cells by address
+           "set": {"alias": value}                  change a parameter by name
+           "rows": [["alias", value, "note"], ...]  add parameters under the last row
+           "remove": ["alias", ...]                 drop unused parameters}
     Values: number -> literal; string starting with '=' -> formula;
     other strings -> quoted text cell.
     """
-    cells = spec.get("cells")
-    if not isinstance(cells, dict) or not cells:
-        raise ValueError("variables requires a non-empty 'cells' dict.")
+    global _LAST_FEATURE_INFO
+    keys = [k for k in ("cells", "set", "rows", "remove") if spec.get(k)]
+    if not keys:
+        raise ValueError("variables requires at least one of cells, set, rows, remove.")
     name = spec.get("base") or spec.get("name") or "Spreadsheet"
     ss = doc.getObject(name)
     if ss is None:
+        if "set" in keys or "remove" in keys:
+            sheets = [o.Name for o in doc.Objects if o.TypeId == "Spreadsheet::Sheet"]
+            raise ValueError(
+                f"variables: no spreadsheet named '{name}' to change"
+                f"{' (the document has ' + ', '.join(sheets) + ')' if sheets else ''}."
+            )
         ss = doc.addObject("Spreadsheet::Sheet", name)
-    # The same setter ``edit_object`` uses for cells: shared so both paths
-    # validate identically ("Invalid alias" alone names nothing).
-    from .property_mapper import set_spreadsheet_cells
+    from .property_mapper import (
+        append_spreadsheet_rows,
+        remove_spreadsheet_aliases,
+        set_spreadsheet_cells,
+        set_spreadsheet_values,
+    )
 
-    set_spreadsheet_cells(ss, cells)
+    info = {}
+    # removals first, so a row freed here is not where `rows` then appends
+    if "remove" in keys:
+        info["removed"] = remove_spreadsheet_aliases(ss, spec["remove"])
+    if "cells" in keys:
+        # The same setter ``edit_object`` uses for cells: shared so both paths
+        # validate identically ("Invalid alias" alone names nothing).
+        set_spreadsheet_cells(ss, spec["cells"])
+    if "set" in keys:
+        info["set"] = set_spreadsheet_values(ss, spec["set"])
+    if "rows" in keys:
+        info["added"] = append_spreadsheet_rows(ss, spec["rows"])
     doc.recompute()
+    if info:
+        _LAST_FEATURE_INFO = {"variables": info}
     return ss
 
 
@@ -3027,6 +3054,8 @@ def describe_feature(feat, spec) -> dict:
                 f"— first reason: {skipped[0]['reason']}"
             ]
         return out
+    if op == "variables":
+        return dict((pop_last_feature_info() or {}).get("variables") or {})
     if op in ("fillet", "chamfer"):
         info = pop_last_feature_info() or {}
         out = {}
@@ -3436,6 +3465,8 @@ def create_feature_gui(doc, spec):
     problem = tip_policy.unknown_spec_keys(ftype, spec)
     if problem:
         raise ValueError(problem)
+    insert = _InsertAfter(doc, spec, ftype)
+    spec = insert.spec
     # Notes are per-build: a replay (step_engine) also calls this, and a note it
     # leaves behind must never be reported as the NEXT caller's outcome.
     global _AUTO_DIRECTION_NOTE, _LAST_FEATURE_INFO, _EDGE_SELECTION
@@ -3451,125 +3482,200 @@ def create_feature_gui(doc, spec):
     if ftype != "color":
         issues_before = model_issues(doc)
         volumes_before = body_volumes(doc)
-    feat = builder(doc, spec)
-    # "move" directly modifies Placement and "color" only the ViewObject —
-    # neither builds a feature, so the recompute/validity/volume checks below do
-    # not apply. They must not either: a color op has no business failing
-    # because the object it decorates is a half-built or invalid leftover.
-    if ftype in ("move", "color"):
-        if ftype == "move":
-            _MODEL_REPORT = recompute_report(doc, issues_before, volumes_before)
-        return feat
-    doc.recompute()
-    if _advance_body_tip(feat):
+    # `after` builds in the middle of the Body's history: the tip sits on that
+    # feature for the build and the checks, and is back at the end for the report.
+    with insert:
+        feat = builder(doc, spec)
+        # "move" directly modifies Placement and "color" only the ViewObject —
+        # neither builds a feature, so the recompute/validity/volume checks below do
+        # not apply. They must not either: a color op has no business failing
+        # because the object it decorates is a half-built or invalid leftover.
+        if ftype in ("move", "color"):
+            if ftype == "move":
+                _MODEL_REPORT = recompute_report(doc, issues_before, volumes_before)
+            return feat
         doc.recompute()
-    # A tip advance rebuilds the Body's display node with FreeCAD's DEFAULT
-    # material, so a colour set earlier visually vanishes (see
-    # _refresh_appearance). Refresh BEFORE the caller reads anything back.
-    body = _parent_body(feat)
-    if body is not None and getattr(body, "Tip", None) is feat:
-        _refresh_appearance(body)
-    state = [str(s) for s in getattr(feat, "State", [])]
-    # A dress-up can come out Invalid/Null from a STALE recompute alone (see
-    # _dress_retry_repair): re-apply the same edges once before believing it.
-    dress = ftype in ("fillet", "chamfer")
-    repaired = False
-    if "Invalid" in state and dress and _dress_retry_repair():
-        repaired = True
-        state = [str(s) for s in getattr(feat, "State", [])]
-    if "Invalid" in state:
-        # FreeCAD's actual failure reason (bad support, missing subelement,
-        # "Revolve axis intersects the sketch", …) — "check parameters/geometry"
-        # alone sends the caller hunting blind. 1.1.4 exposes it as the METHOD
-        # getStatusString(); the old property read returned nothing, so every
-        # failure lost its reason.
-        status = _status_string(feat)
-        detail = f" — {status}" if status and status != "Invalid" else ""
-        hint = _FAILURE_HINTS.get(ftype, "check parameters/geometry.")
-        raise RuntimeError(
-            f"{ftype} failed to recompute{detail} ({hint}){_dress_failure_detail(ftype)}"
-        )
-    global _SHAPE_CHECK_NOTE
-    _SHAPE_CHECK_NOTE = _dress_repaired_note(ftype, feat) if repaired else ""
-    shape = None
-    check_error = ""
-    # The read is retried internally (see _read_shape_state): a lazily built
-    # PartDesign shape raises FreeCAD's bare "shape is invalid" on its FIRST
-    # access and reads fine on the second.
-    shape, valid, volume, solids, check_error = _read_shape_state(feat, doc)
-    if not valid and not repaired:
-        # A feature that reads as unbuildable may simply have been built on a
-        # lazy predecessor: settle those caches and read again before giving up.
-        _settle_shape_caches(doc, spec)
-        shape, valid, volume, solids, check_error = _read_shape_state(feat, doc)
-    if not valid and _unrefine_if_broken(doc, feat, spec):
-        shape, valid, volume, solids, check_error = _read_shape_state(feat, doc)
-    if not valid and dress and not repaired and _dress_retry_repair():
-        valid = True
-        check_error = ""
-        shape, valid, volume, solids, _err = _read_shape_state(feat, doc)
-        _SHAPE_CHECK_NOTE = _dress_repaired_note(ftype, feat)
-    if not valid:
-        status = _status_string(feat)
-        if check_error or (status and status != "Valid"):
-            raise RuntimeError(
-                _invalid_shape_error(ftype, feat, check_error or status)
-                + _dress_failure_detail(ftype)
-            )
-        # FreeCAD says Valid, the shape is non-null, the recompute committed and
-        # the volume is sane: OCC's BRepCheck disagrees, which it does for good
-        # PartDesign fillets (see _SHAPE_CHECK_NOTE). Advisory, not fatal — a
-        # false negative that hard-fails a correct model is worse than a warning.
-        volume_note = ""
-        with contextlib.suppress(Exception):
-            volume_note = (
-                f" — it holds {len(shape.Solids)} solid(s), volume {float(shape.Volume):.1f} mm^3"
-                if shape is not None
-                else ""
-            )
-        _SHAPE_CHECK_NOTE = (
-            f"{ftype} '{feat.Name}' recomputed and FreeCAD reports it Valid, but OCC's "
-            f"own validity check (Shape.isValid) says otherwise{volume_note}. The "
-            "geometry was kept, since that combination is usually a false negative "
-            "(it happens on ordinary PartDesign fillets). Verify with Part > Check "
-            "geometry if this part matters."
-        )
-    if feat.Name in _UNREFINED:
-        _SHAPE_CHECK_NOTE = (
-            f"Refine was turned off on '{feat.Name}': refining its result gave a shape that "
-            "fails OCC's validity check, and the unrefined one is valid. Pass refine=false "
-            "on the features after it too, or each one is retried the same way."
-        )
-    # A negative volume is never a legitimate solid: OCC returns one for a
-    # self-intersecting result (a profile straddling its revolve axis is the
-    # classic case) and FreeCAD still calls the feature valid — the caller
-    # would get silent garbage. Only shapes that actually HOLD solids are
-    # judged: a PartDesign::Plane's infinite face reports a garbage "volume"
-    # whose SIGN follows its offset, so an unscoped check refused every
-    # datum_plane with a negative offset (live: offset -5 → "volume -1.3e+98").
-    if volume < -1e-6 and solids > 0:
-        hint = (
-            "the profile probably crosses its revolve axis"
-            if ftype in ("revolution", "groove")
-            else "check the profile/parameters"
-        )
-        raise RuntimeError(
-            f"{ftype} produced a self-intersecting solid (volume {volume:.1f} mm^3 < 0); {hint}."
-        )
-    if ftype in ("pad", "revolution"):
-        _refuse_shrunk_body(feat)
-    # Settle the lazy Shape caches INSIDE this op: a read immediately after the
-    # commit (the caller's measure_geometry, the connectivity audit) otherwise
-    # saw an interim result — live: a datum-plane pocket reported Body volume
-    # 239100.0 for a cut that is exactly 239057.5 once the caches catch up.
-    with contextlib.suppress(Exception):
-        _ = feat.Shape
+        if _advance_body_tip(feat):
+            doc.recompute()
+        # A tip advance rebuilds the Body's display node with FreeCAD's DEFAULT
+        # material, so a colour set earlier visually vanishes (see
+        # _refresh_appearance). Refresh BEFORE the caller reads anything back.
         body = _parent_body(feat)
-        if body is not None:
-            _ = body.Shape
+        if body is not None and getattr(body, "Tip", None) is feat:
+            _refresh_appearance(body)
+        state = [str(s) for s in getattr(feat, "State", [])]
+        # A dress-up can come out Invalid/Null from a STALE recompute alone (see
+        # _dress_retry_repair): re-apply the same edges once before believing it.
+        dress = ftype in ("fillet", "chamfer")
+        repaired = False
+        if "Invalid" in state and dress and _dress_retry_repair():
+            repaired = True
+            state = [str(s) for s in getattr(feat, "State", [])]
+        if "Invalid" in state:
+            # FreeCAD's actual failure reason (bad support, missing subelement,
+            # "Revolve axis intersects the sketch", …) — "check parameters/geometry"
+            # alone sends the caller hunting blind. 1.1.4 exposes it as the METHOD
+            # getStatusString(); the old property read returned nothing, so every
+            # failure lost its reason.
+            status = _status_string(feat)
+            detail = f" — {status}" if status and status != "Invalid" else ""
+            hint = _FAILURE_HINTS.get(ftype, "check parameters/geometry.")
+            raise RuntimeError(
+                f"{ftype} failed to recompute{detail} ({hint}){_dress_failure_detail(ftype)}"
+            )
+        global _SHAPE_CHECK_NOTE
+        _SHAPE_CHECK_NOTE = _dress_repaired_note(ftype, feat) if repaired else ""
+        shape = None
+        check_error = ""
+        # The read is retried internally (see _read_shape_state): a lazily built
+        # PartDesign shape raises FreeCAD's bare "shape is invalid" on its FIRST
+        # access and reads fine on the second.
+        shape, valid, volume, solids, check_error = _read_shape_state(feat, doc)
+        if not valid and not repaired:
+            # A feature that reads as unbuildable may simply have been built on a
+            # lazy predecessor: settle those caches and read again before giving up.
+            _settle_shape_caches(doc, spec)
+            shape, valid, volume, solids, check_error = _read_shape_state(feat, doc)
+        if not valid and _unrefine_if_broken(doc, feat, spec):
+            shape, valid, volume, solids, check_error = _read_shape_state(feat, doc)
+        if not valid and dress and not repaired and _dress_retry_repair():
+            valid = True
+            check_error = ""
+            shape, valid, volume, solids, _err = _read_shape_state(feat, doc)
+            _SHAPE_CHECK_NOTE = _dress_repaired_note(ftype, feat)
+        if not valid:
+            status = _status_string(feat)
+            if check_error or (status and status != "Valid"):
+                raise RuntimeError(
+                    _invalid_shape_error(ftype, feat, check_error or status)
+                    + _dress_failure_detail(ftype)
+                )
+            # FreeCAD says Valid, the shape is non-null, the recompute committed and
+            # the volume is sane: OCC's BRepCheck disagrees, which it does for good
+            # PartDesign fillets (see _SHAPE_CHECK_NOTE). Advisory, not fatal — a
+            # false negative that hard-fails a correct model is worse than a warning.
+            volume_note = ""
+            with contextlib.suppress(Exception):
+                volume_note = (
+                    f" — it holds {len(shape.Solids)} solid(s), volume {float(shape.Volume):.1f} mm^3"
+                    if shape is not None
+                    else ""
+                )
+            _SHAPE_CHECK_NOTE = (
+                f"{ftype} '{feat.Name}' recomputed and FreeCAD reports it Valid, but OCC's "
+                f"own validity check (Shape.isValid) says otherwise{volume_note}. The "
+                "geometry was kept, since that combination is usually a false negative "
+                "(it happens on ordinary PartDesign fillets). Verify with Part > Check "
+                "geometry if this part matters."
+            )
+        if feat.Name in _UNREFINED:
+            _SHAPE_CHECK_NOTE = (
+                f"Refine was turned off on '{feat.Name}': refining its result gave a shape that "
+                "fails OCC's validity check, and the unrefined one is valid. Pass refine=false "
+                "on the features after it too, or each one is retried the same way."
+            )
+        # A negative volume is never a legitimate solid: OCC returns one for a
+        # self-intersecting result (a profile straddling its revolve axis is the
+        # classic case) and FreeCAD still calls the feature valid — the caller
+        # would get silent garbage. Only shapes that actually HOLD solids are
+        # judged: a PartDesign::Plane's infinite face reports a garbage "volume"
+        # whose SIGN follows its offset, so an unscoped check refused every
+        # datum_plane with a negative offset (live: offset -5 → "volume -1.3e+98").
+        if volume < -1e-6 and solids > 0:
+            hint = (
+                "the profile probably crosses its revolve axis"
+                if ftype in ("revolution", "groove")
+                else "check the profile/parameters"
+            )
+            raise RuntimeError(
+                f"{ftype} produced a self-intersecting solid (volume {volume:.1f} mm^3 < 0); {hint}."
+            )
+        if ftype in ("pad", "revolution"):
+            _refuse_shrunk_body(feat)
+        # Settle the lazy Shape caches INSIDE this op: a read immediately after the
+        # commit (the caller's measure_geometry, the connectivity audit) otherwise
+        # saw an interim result — live: a datum-plane pocket reported Body volume
+        # 239100.0 for a cut that is exactly 239057.5 once the caches catch up.
+        with contextlib.suppress(Exception):
+            _ = feat.Shape
+            body = _parent_body(feat)
+            if body is not None:
+                _ = body.Shape
     body = _parent_body(feat)
     own = body is not None and tip_policy.advances_tip(getattr(feat, "TypeId", ""))
     _MODEL_REPORT = recompute_report(
         doc, issues_before, volumes_before, skip={feat.Name}, bodies={body.Name} if own else None
     )
     return feat
+
+
+def _insertion_point(doc, spec, ftype):
+    """The Body and the feature of it that ``after`` names."""
+    name = spec["after"]
+    anchor = doc.getObject(name)
+    if anchor is None:
+        labelled = [o for o in doc.Objects if o.Label == name]
+        anchor = labelled[0] if len(labelled) == 1 else None
+    if anchor is None:
+        raise ValueError(f"{ftype}: after='{name}' names no object in '{doc.Name}'.")
+    body = _parent_body(anchor)
+    solid = body is not None and tip_policy.advances_tip(anchor.TypeId)
+    if not solid:
+        features = [o.Name for o in body.Group if tip_policy.advances_tip(o.TypeId)] if body else []
+        raise ValueError(
+            f"{ftype}: after='{name}' must be a feature that shapes a PartDesign Body (a pad, "
+            "pocket, pattern, fillet, ...), not a sketch or datum"
+            + (f"; '{body.Name}' has {', '.join(features)}." if features else ".")
+        )
+    named = spec.get("body")
+    if named and named not in (body.Name, body.Label):
+        raise ValueError(f"{ftype}: after='{name}' is in Body '{body.Name}', not '{named}'.")
+    return body, anchor
+
+
+class _InsertAfter:
+    """Builds a feature in the middle of a Body's history, as a person does it:
+    move the tip to ``after``, add the feature, move the tip back.
+
+    With the tip on an earlier feature ``Body.newObject`` puts the new object
+    right behind it and hands the feature that used to follow as the new one's
+    successor (live on 1.1.4: a pad inserted after the second of eight features
+    left every later one valid and relinked). The later features then rebuild on
+    top of the insert, so what they break is this op's to report: the tip is
+    restored before the caller's recompute report. Without ``after`` in the spec
+    this does nothing.
+    """
+
+    def __init__(self, doc, spec, ftype):
+        self.doc = doc
+        self.spec = spec
+        self.body = None
+        self.end = None
+        if not spec.get("after"):
+            return
+        body, anchor = _insertion_point(doc, spec, ftype)
+        if ftype == "sketch" and not spec.get("body"):
+            self.spec = {**spec, "body": body.Name}
+        if body.Tip is None or body.Tip is anchor:
+            return  # already the end of the history: an ordinary build
+        self.body, self.anchor, self.end = body, anchor, body.Tip
+
+    def __enter__(self):
+        if self.body is not None:
+            self.body.Tip = self.anchor
+            self.doc.recompute()
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        if self.body is None:
+            return False
+        # also on a failure: the caller aborts the transaction, but a tip left
+        # mid-history would hide every later feature if anything kept the change
+        with contextlib.suppress(Exception):
+            self.body.Tip = self.end
+            self.doc.recompute()
+        if exc_type is None:
+            with contextlib.suppress(Exception):
+                _ = self.body.Shape
+                _refresh_appearance(self.body)
+        return False

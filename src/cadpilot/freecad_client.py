@@ -29,6 +29,7 @@ _RETRYABLE_METHODS = frozenset(
         "get_last_screenshot_error",
         "get_objects",
         "get_object",
+        "get_outline",
         "list_documents",
         "inspect_freecad",
         "measure_geometry",
@@ -578,17 +579,26 @@ class FreeCADConnection:
         height: int | None = None,
         focus_object: str | None = None,
         doc_name: str | None = None,
+        show_sketches: bool = False,
+        isolate: bool = False,
     ) -> str | None:
         try:
-            if doc_name is None:
+            if doc_name is None and not show_sketches and not isolate:
                 return self._invoke("get_active_screenshot", view_name, width, height, focus_object)
             try:
                 return self._invoke(
-                    "get_active_screenshot", view_name, width, height, focus_object, doc_name
+                    "get_active_screenshot",
+                    view_name,
+                    width,
+                    height,
+                    focus_object,
+                    doc_name,
+                    show_sketches,
+                    isolate,
                 )
             except xmlrpc.client.Fault as e:
-                # Old addon without doc_name: a screenshot of the foreground
-                # view beats no screenshot at all.
+                # Old addon without doc_name or the view options: a screenshot of
+                # the foreground view beats no screenshot at all.
                 if "TypeError" not in str(e):
                     raise
                 logger.info("Addon does not support bound screenshots; using the active view")
@@ -630,6 +640,18 @@ class FreeCADConnection:
             if "object" in res:
                 return res["object"] or {}
         return res if isinstance(res, dict) else {}
+
+    def get_outline(
+        self, doc_name: str, obj_name: str | None = None, limit: int = 50, offset: int = 0
+    ) -> str | None:
+        """The model tree as text; None for an object that has no outline."""
+        res = self._invoke("get_outline", doc_name, obj_name or "", limit, offset)
+        self._keep_late_completions(res)
+        if not isinstance(res, dict) or res.get("success") is False:
+            raise RuntimeError(
+                res.get("error", "get_outline failed") if isinstance(res, dict) else str(res)
+            )
+        return res.get("text")
 
     def list_documents(self) -> list[str]:
         res = self._invoke("list_documents")

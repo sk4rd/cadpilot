@@ -60,6 +60,7 @@ def get_last_doc_name() -> str | None:
 def reset_last_doc_name() -> None:
     global _last_doc_name
     _last_doc_name = None
+    _REPORTED_ISLANDS.clear()
 
 
 def _set_last_doc(doc_name: str | None) -> None:
@@ -482,10 +483,15 @@ def get_view_operation(
     height: int | None = None,
     focus_object: str | None = None,
     doc_name: str | None = None,
+    show_sketches: bool = False,
+    isolate: bool = False,
 ) -> ToolResponse:
     try:
+        options = {"show_sketches": True} if show_sketches else {}
+        if isolate:
+            options["isolate"] = True
         screenshot = freecad.get_active_screenshot(
-            view_name, width, height, focus_object, doc_name=doc_name
+            view_name, width, height, focus_object, doc_name=doc_name, **options
         )
         if screenshot is not None:
             return [screenshot_content(screenshot)]
@@ -542,8 +548,13 @@ def get_objects_operation(
     obj_name: str | None = None,
     limit: int = 50,
     offset: int = 0,
+    raw: bool = False,
 ) -> ToolResponse:
     try:
+        if not raw:
+            text = freecad.get_outline(doc_name, obj_name, limit, offset)
+            if text is not None:
+                return text_response(text)
         if obj_name is not None:
             return json_response(freecad.get_object(doc_name, obj_name))
         objects = freecad.get_objects(doc_name)
@@ -604,6 +615,10 @@ CAD_NO_BASE_OPERATIONS = ("loft", "sketch", "variables", "datum_plane", "hull")
 CAD_OPERATIONS = ("create_object", "edit_object", "delete_object", "batch", *CAD_FEATURE_OPERATIONS)
 
 _AUTO_AUDIT_MAX_OBJECTS = 300
+# document -> the islands already warned about. A part file with a second body
+# (a sibling part, a reference rail) is one island for good: repeating the
+# warning after every edit of the file taught the caller to ignore it.
+_REPORTED_ISLANDS: dict[str, set[frozenset[str]]] = {}
 _ISLAND_OBJECTS_PREVIEW = 4
 
 # Result keys that are transport bookkeeping rather than findings: `objects` is
@@ -666,7 +681,10 @@ def _format_connectivity_warning(audit: dict[str, Any]) -> str:
         lines.append(f"  - [{preview}]{loc}")
     if count > 5:
         lines.append(f"  ... and {count - 5} more island(s)")
-    lines.append("Fix gaps so parts touch (≤0.5mm) or intersect before continuing.")
+    lines.append(
+        "If they belong to one assembly, close the gaps (≤0.5mm) before continuing; separate "
+        "parts kept in one file are fine. Not repeated for these objects."
+    )
     return "\n" + "\n".join(lines)
 
 
@@ -678,7 +696,16 @@ def _auto_connectivity_audit(freecad: FreeCADConnection, doc_name: str) -> str:
             return ""
         if int(audit.get("object_count", 0)) > _AUTO_AUDIT_MAX_OBJECTS:
             return ""
-        return _format_connectivity_warning(audit)
+        islands = audit.get("islands")
+        if not islands:
+            return _format_connectivity_warning(audit)
+        reported = _REPORTED_ISLANDS.setdefault(doc_name, set())
+        fresh = [i for i in islands if frozenset(i.get("objects", [])) not in reported]
+        reported.update(frozenset(i.get("objects", [])) for i in fresh)
+        if not fresh:
+            return ""
+        summary = {**audit.get("summary", {}), "island_count": len(fresh)}
+        return _format_connectivity_warning({**audit, "islands": fresh, "summary": summary})
     except Exception as e:
         logger.warning(f"auto connectivity audit failed: {e}")
         return ""

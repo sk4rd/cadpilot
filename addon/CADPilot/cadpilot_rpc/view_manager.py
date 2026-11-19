@@ -1,5 +1,6 @@
 """Active-view orientation, sizing, and screenshot capture."""
 
+import contextlib
 from typing import Any
 
 import FreeCAD
@@ -95,6 +96,63 @@ def _send_viewselection(gdoc) -> None:
         FreeCADGui.SendMsgToActiveView("ViewSelection")
 
 
+_HELPERS = (
+    "Sketcher::SketchObject",
+    "PartDesign::Plane",
+    "PartDesign::Line",
+    "PartDesign::Point",
+    "PartDesign::CoordinateSystem",
+    "PartDesign::ShapeBinder",
+    "PartDesign::SubShapeBinder",
+    "App::Origin",
+    "App::Plane",
+    "App::Line",
+    "App::Point",
+)
+
+
+def _owner(obj):
+    """The Body or Part a member is shown through, else the object itself."""
+    for parent in getattr(obj, "InList", []):
+        if parent.TypeId in ("PartDesign::Body", "App::Part") and obj in getattr(
+            parent, "Group", []
+        ):
+            return _owner(parent)
+    return obj
+
+
+def _tidy(doc, focus, show_sketches: bool, isolate: bool) -> list:
+    """Hide what gets in the way of looking at the part; returns what to restore.
+
+    Sketches and datums draw over the faces they lie on, and the selection
+    highlight paints whole faces, so a capture taken as the user left the view
+    hides the seams and edges it is taken to check. The focus object is always
+    shown, sketch or not. ``isolate`` also hides every other top-level object.
+    """
+    changed = []
+
+    def show(obj, visible):
+        view = getattr(obj, "ViewObject", None)
+        if view is None or bool(view.Visibility) == visible:
+            return
+        changed.append((view, bool(view.Visibility)))
+        view.Visibility = visible
+
+    keep = _owner(focus) if focus is not None else None
+    for obj in doc.Objects:
+        if obj is focus:
+            continue
+        helper = obj.TypeId in _HELPERS and not show_sketches
+        other = isolate and keep is not None and _owner(obj) is obj and obj is not keep
+        if helper or other:
+            show(obj, False)
+    if focus is not None:
+        show(focus, True)
+        if keep is not focus:
+            show(keep, True)
+    return changed
+
+
 def save_active_screenshot(
     save_path: str,
     view_name: str = "Isometric",
@@ -102,6 +160,8 @@ def save_active_screenshot(
     height: int | None = None,
     focus_object: str | None = None,
     doc_name: str | None = None,
+    show_sketches: bool = False,
+    isolate: bool = False,
 ):
     """Save a PNG of the DOCUMENT's active view to ``save_path``.
 
@@ -113,9 +173,18 @@ def save_active_screenshot(
     on 1.1.x, and flipping the foreground tab would yank the MDI focus out
     from under a concurrent agent.
 
+    The capture shows the part as built: sketches, datums and the selection
+    highlight are hidden for it (see ``_tidy``) and put back afterwards, and
+    the document's unsaved-changes flag is left as it was, so looking at a part
+    never reads as an edit.
+
     Returns ``True`` on success, or an error string on failure (preserves the
     legacy GUI-handler return contract).
     """
+    gdoc = None
+    hidden: list = []
+    modified = None
+    prior_selection: list = []
     try:
         if doc_name:
             doc = FreeCAD.getDocument(doc_name)
@@ -131,55 +200,67 @@ def save_active_screenshot(
         if not hasattr(view, "saveImage"):
             return "Current view does not support screenshots"
 
-        apply_view_orientation(view, view_name)
+        focus_target = doc.getObject(focus_object) if (doc and focus_object) else None
+        modified = bool(gdoc.Modified)
+        # The selection is process-global GUI state and belongs to the user (or
+        # another agent): save it, clear it for the capture, hand it back.
+        prior_selection = [
+            (s.DocumentName, s.ObjectName, list(s.SubElementNames))
+            for s in FreeCADGui.Selection.getSelectionEx("", 0)
+        ]
+        hidden = _tidy(doc, focus_target, show_sketches, isolate)
+        # FreeCAD turns the camera over half a second, and framing the focus
+        # object in the middle of that turn stops it there: a Front view of one
+        # object came out at whatever angle the turn had reached.
+        animated = None
+        with contextlib.suppress(Exception):
+            animated = bool(view.isAnimationEnabled())
+            if animated:
+                view.setAnimationEnabled(False)
+        try:
+            apply_view_orientation(view, view_name)
+        finally:
+            if animated:
+                with contextlib.suppress(Exception):
+                    view.setAnimationEnabled(True)
 
-        focused_selection = False
-        # The resolved object we frame on (when focus_object is given), kept so
-        # the framing can be re-applied synchronously right before saveImage().
-        focus_target = None
-        # The user's (or another agent's) selection is process-global GUI
-        # state; the focus path used to clearSelection() it away and leave
-        # nothing behind. Save it and hand it back after the capture.
-        prior_selection = list(FreeCADGui.Selection.getSelection())
-
-        if focus_object:
-            obj = doc.getObject(focus_object) if doc else None
-            if obj:
-                FreeCADGui.Selection.clearSelection()
-                FreeCADGui.Selection.addSelection(obj)
-                _send_viewselection(gdoc)
-                focused_selection = True
-                focus_target = obj
-                _flush_gui_events()
-                FreeCADGui.Selection.clearSelection()
-            else:
+        def frame():
+            if focus_target is None:
                 view.fitAll()
-        else:
-            view.fitAll()
+                return
+            # The selection is how FreeCAD frames one object; it must be gone
+            # again before the capture, or the object comes out highlighted.
+            FreeCADGui.Selection.clearSelection()
+            FreeCADGui.Selection.addSelection(focus_target)
+            _send_viewselection(gdoc)
+            FreeCADGui.Selection.clearSelection()
 
+        FreeCADGui.Selection.clearSelection()
+        frame()
         _flush_gui_events()
         # On macOS, when the FreeCAD window is not exposed (fully occluded or
         # minimized), saveImage() right after pumping the event loop grabs a blank
         # frame. Re-issuing the framing synchronously forces a redraw first. The
         # flush above is kept intentionally — Linux needs it for the stale-frame
         # fix (#51/#53).
-        if focused_selection and focus_target is not None:
-            FreeCADGui.Selection.addSelection(focus_target)
-            _send_viewselection(gdoc)
-        else:
-            view.fitAll()
+        frame()
         resolved_width, resolved_height = _resolve_screenshot_size(view, width, height)
         view.saveImage(save_path, resolved_width, resolved_height, "Current")
-
-        if focused_selection:
-            # Hand the selection back: the focus framing cleared the caller's
-            # (or another agent's) process-global selection, and the old
-            # post-saveImage clearSelection() then left NOTHING selected.
-            # Restore exactly what was selected before the capture.
-            FreeCADGui.Selection.clearSelection()
-            for sel in prior_selection:
-                FreeCADGui.Selection.addSelection(sel)
-            _flush_gui_events(delay_ms=0)
         return True
     except Exception as e:
         return str(e)
+    finally:
+        with contextlib.suppress(Exception):
+            for view_object, visible in hidden:
+                view_object.Visibility = visible
+        with contextlib.suppress(Exception):
+            FreeCADGui.Selection.clearSelection()
+            for doc_n, obj_n, subs in prior_selection:
+                for sub in subs or [""]:
+                    FreeCADGui.Selection.addSelection(doc_n, obj_n, sub)
+        with contextlib.suppress(Exception):
+            if hidden or prior_selection:
+                _flush_gui_events(delay_ms=0)
+        with contextlib.suppress(Exception):
+            if modified is not None and gdoc is not None and bool(gdoc.Modified) != modified:
+                gdoc.Modified = modified

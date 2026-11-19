@@ -189,6 +189,159 @@ def set_spreadsheet_cells(ss, cells: dict) -> None:
             ) from None
 
 
+def _write_cell(ss, cell: str, value, what: str) -> None:
+    if isinstance(value, bool):
+        raise ValueError(f"{what}: bool is not a valid value.")
+    if isinstance(value, (int, float)):
+        ss.set(cell, repr(value))
+    elif isinstance(value, str):
+        ss.set(cell, value if value.startswith("=") or _is_quantity(value) else f"'{value}")
+    else:
+        raise ValueError(f"{what}: unsupported value {value!r}.")
+
+
+def _split_cell(cell: str) -> tuple[str, int]:
+    col = "".join(ch for ch in cell if ch.isalpha())
+    return col, int(cell[len(col) :])
+
+
+def _shift_column(col: str, by: int) -> str:
+    """The column ``by`` to the right (negative: left); '' off the sheet's left edge."""
+    n = 0
+    for ch in col:
+        n = n * 26 + ord(ch) - 64
+    n += by
+    out = ""
+    while n > 0:
+        n, rem = divmod(n - 1, 26)
+        out = chr(65 + rem) + out
+    return out
+
+
+def _aliases(ss) -> dict[str, str]:
+    """alias -> cell, for every aliased cell of the sheet."""
+    out = {}
+    for cell in ss.getUsedCells():
+        alias = ss.getAlias(cell)
+        if alias:
+            out[alias] = cell
+    return out
+
+
+def _unknown_alias(ss, alias: str, what: str) -> ValueError:
+    import difflib
+
+    known = sorted(_aliases(ss))
+    close = difflib.get_close_matches(str(alias), known, n=3)
+    hint = f" Did you mean {', '.join(map(repr, close))}?" if close else ""
+    return ValueError(
+        f"{what}: '{ss.Name}' has no alias {alias!r}.{hint} Add a new parameter with `rows`."
+    )
+
+
+def set_spreadsheet_values(ss, values: dict) -> dict:
+    """Change existing parameters by alias; returns ``{alias: [old, new]}`` (contents)."""
+    if not isinstance(values, dict) or not values:
+        raise ValueError("set must be a non-empty dict of {alias: value}.")
+    aliases = _aliases(ss)
+    changed = {}
+    for alias, value in values.items():
+        cell = aliases.get(str(alias))
+        if cell is None:
+            raise _unknown_alias(ss, alias, "set")
+        old = ss.getContents(cell)
+        _write_cell(ss, cell, value, f"set[{alias!r}]")
+        changed[str(alias)] = [old, ss.getContents(cell)]
+    return changed
+
+
+def append_spreadsheet_rows(ss, rows: list) -> dict:
+    """Add parameters under the last used row: name, aliased value, note.
+
+    The value goes in the column the sheet's aliases already use (B on a new
+    sheet), the name in the column before it and the note in the one after, so
+    an added row reads like the rows a person or an earlier call wrote.
+    Returns ``{alias: cell}``.
+    """
+    if not isinstance(rows, list) or not rows:
+        raise ValueError("rows must be a non-empty list of [alias, value] or [alias, value, note].")
+    aliases = _aliases(ss)
+    columns: dict[str, int] = {}
+    for cell in aliases.values():
+        col = _split_cell(cell)[0]
+        columns[col] = columns.get(col, 0) + 1
+    value_col = max(columns, key=columns.get) if columns else "B"
+    name_col, note_col = _shift_column(value_col, -1), _shift_column(value_col, 1)
+    row = max((_split_cell(c)[1] for c in ss.getUsedCells()), default=0)
+    placed = {}
+    for entry in rows:
+        if not (isinstance(entry, (list, tuple)) and len(entry) in (2, 3)):
+            raise ValueError(f"rows: {entry!r} must be [alias, value] or [alias, value, note].")
+        alias, value = str(entry[0]), entry[1]
+        if alias in aliases or alias in placed:
+            raise ValueError(f"rows: alias {alias!r} already exists; change it with `set`.")
+        row += 1
+        cell = f"{value_col}{row}"
+        set_spreadsheet_cells(ss, {cell: [alias, value]})
+        if name_col:
+            ss.set(f"{name_col}{row}", f"'{alias}")
+        if len(entry) == 3 and entry[2]:
+            ss.set(f"{note_col}{row}", f"'{entry[2]}")
+        placed[alias] = cell
+    return placed
+
+
+def _alias_users(ss, alias: str) -> list[str]:
+    """What reads an alias: other cells of the sheet, and expressions anywhere in the document."""
+    import re
+
+    word = re.compile(rf"(?<![A-Za-z0-9_.]){re.escape(alias)}(?![A-Za-z0-9_])")
+    qualified = re.compile(
+        rf"(?:\b{re.escape(ss.Name)}|<<{re.escape(ss.Label)}>>)\.{re.escape(alias)}(?![A-Za-z0-9_])"
+    )
+    own = _aliases(ss).get(alias)
+    users = []
+    for cell in ss.getUsedCells():
+        if cell == own:
+            continue
+        content = ss.getContents(cell)
+        if content.startswith("=") and word.search(content):
+            users.append(f"{ss.Name}.{ss.getAlias(cell) or cell}")
+    for obj in ss.Document.Objects:
+        if obj is ss:
+            continue
+        for path, expr in getattr(obj, "ExpressionEngine", []):
+            if qualified.search(expr):
+                users.append(f"{obj.Name}.{path.lstrip('.')}")
+    return users
+
+
+def remove_spreadsheet_aliases(ss, names: list) -> list[str]:
+    """Remove unused parameters: the whole row when the alias is alone in it, else its cell."""
+    if not isinstance(names, list) or not names:
+        raise ValueError("remove must be a non-empty list of aliases.")
+    removed = []
+    for alias in map(str, names):
+        cell = _aliases(ss).get(alias)
+        if cell is None:
+            raise _unknown_alias(ss, alias, "remove")
+        users = _alias_users(ss, alias)
+        if users:
+            raise ValueError(
+                f"remove: {alias!r} is still used by {', '.join(users[:8])}"
+                f"{' ...' if len(users) > 8 else ''}; rebind or remove those first."
+            )
+        row = _split_cell(cell)[1]
+        shared = [c for a, c in _aliases(ss).items() if a != alias and _split_cell(c)[1] == row]
+        if shared:
+            ss.setAlias(cell, "")
+            ss.clear(cell)
+        else:
+            ss.removeRows(str(row), 1)
+        removed.append(alias)
+    return removed
+
+
 #: Names an expression already reads as something else, so FreeCAD refuses
 #: them as aliases. Unit symbols are the trap: W, H, T and N are the natural
 #: names for width, height, thickness and count (live: all four refused).

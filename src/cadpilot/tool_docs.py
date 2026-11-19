@@ -70,7 +70,34 @@ cannot recompute with is refused and put back; a literal written to an
 expression-bound property warns (the expression wins). What the recompute
 broke elsewhere is reported like `variables` does.""",
     "delete_object": """\
-delete_object — remove an object. Required: obj_name.""",
+delete_object — remove an object. Required: obj_name.
+A PartDesign feature comes out of the middle of its Body the way FreeCAD's
+Delete key takes it: the next feature is relinked to the one before, and the
+rest of the history stays. Its sketch is left behind (delete it too if it is
+no longer wanted). A feature something else is built on (a pattern repeating
+it, a sketch on its face) is refused: delete or rebind that first.""",
+    "editing": """\
+Changing a part that already exists — the smallest edit that does it, so the
+history, the names and the user's own edits survive:
+
+  read first        get_objects(doc) is the model tree: sheets, each body's
+                    features in order, what is selected. get_objects(doc, sketch)
+                    lists a sketch's geometry and constraints by index.
+  a dimension       variables {"set": {"Width": 42}} when it is a sheet value;
+                    sketch_edit {"set": {"Name": 12}} for a sketch dimension;
+                    edit_object {"Length": 8} for a feature property.
+  a shape           sketch_edit: delete_geometry / geometry / constraints change
+                    the profile in place; the pad or pocket on it follows.
+  a new feature     at the end by default. In the middle of the history: pass
+                    "after": "<feature>" to the sketch AND to the feature built
+                    on it (see operation_help("pad")).
+  remove a feature  delete_object, then its sketch; variables {"remove": [...]}
+                    for sheet rows nothing uses any more.
+
+Never rebuild a body or a document to change it: a rebuild renames objects,
+drops the user's edits and loses what they built on the old names. A sketch
+"replace": true redraws one sketch and keeps its object, for a profile that
+changes shape entirely.""",
     "batch": """\
 batch — many ops in one call (one undo unit, at most one screenshot).
 Required: ops (list). Optional: stop_on_error (default False).
@@ -115,9 +142,11 @@ yields a Part::Fillet at the document root, and that base object's Visibility
 is turned OFF (the result is the same solid with rounded edges, so showing
 both means two overlapping parts — the reply names it as hidden_base; its
 data is untouched). A base inside a Body must BE that
-Body's Tip: dressing a mid-chain feature is refused, because FreeCAD moves the
-Body's Tip onto the new dress-up and would silently drop every later feature
-(pockets, patterns).
+Body's Tip, or be named in after: "<base>", which puts the dress-up right
+behind its base in the middle of the history (edges are then selected on the
+part as it was at that feature). Without `after`, dressing a mid-chain feature
+is refused, because FreeCAD moves the Body's Tip onto the new dress-up and
+would silently drop every later feature (pockets, patterns).
 Many edges in one call can defeat OCC: live on 1.1.4 the six bore rims of a
 patterned plate failed at 0.5 mm while every rim was fine on its own. When a
 multi-edge call does fail, the error says what the retry found (each edge alone
@@ -265,10 +294,22 @@ recorded color.""",
     "variables": """\
 variables — create/update a Spreadsheet parameter table (idempotent).
 obj_name = spreadsheet name (default "Spreadsheet", may be omitted).
-Required in obj_properties: cells — maps a cell to [alias, value]; values are
-numbers, "=formula" strings, or text. Everything downstream references cells
-as =Spreadsheet.alias. FreeCAD refuses unit symbols and constants as aliases
-(W, H, T, N, mm, deg, e, pi, ...): use Width, Height, Thick, Count.
+obj_properties, at least one of:
+- set: {"Width": 42, "Pitch": "=Width / 4"} — change existing parameters by
+  alias. An unknown alias is refused, with the closest names.
+- rows: [["Alias", value, "what it is"], ...] — add parameters under the last
+  used row: the name left of the value, the note right of it, in the columns
+  the sheet already uses (A/B/C on a new sheet). The note may be left out.
+- remove: ["Alias", ...] — drop parameters nothing reads any more (the whole
+  row when the alias is alone in it). One that a cell or an expression still
+  uses is refused, naming the users.
+- cells: {"B2": ["Alias", value], "C2": ["", "a note"]} — write cells by
+  address, for a layout rows does not give.
+Values are numbers, "=formula" strings, or text. Everything downstream
+references cells as =Spreadsheet.alias. FreeCAD refuses unit symbols and
+constants as aliases (W, H, T, N, mm, deg, e, pi, ...): use Width, Height,
+Thick, Count. The reply lists what was set (old and new contents), added
+(alias -> cell) and removed.
 The reply names what the recompute BROKE downstream (warnings + `broken`): an
 Invalid feature, a link to an edge/face that no longer exists ('?Edge8'), a
 sketch that no longer solves. `model` rows give each changed Body's tip and
@@ -281,6 +322,8 @@ created with that label, and without `body` the document's only Body is used
 or one is created). Geometry +
 constraints in ONE transaction; the solver runs immediately.
 obj_name = sketch name (default "Sketch", may be omitted).
+after: "<feature>" puts the sketch behind that feature of the Body instead of
+at the end of its history (see operation_help("pad")).
 Required in obj_properties: geometry.
 Optional: plane, offset, body, construction, external, constraints, replace.
 
@@ -520,7 +563,15 @@ The feature is built in the profile's own Body; `body` is only needed for a
 profile outside any Body, and naming a different body is refused (the same
 holds for pocket, revolution, groove, thickness, draft and a face datum_plane).
 Attachment fusion: on a face-attached sketch, pad FUSES into the supporting
-solid automatically — do not pad-then-boolean.""",
+solid automatically — do not pad-then-boolean.
+after: "<feature>" builds the feature in the middle of the Body's history,
+right behind that feature, as moving the tip there, adding it and moving the
+tip back does by hand: the later features rebuild on top of it, and the reply's
+model row gives the whole Body's volume before and after. Give the profile
+sketch the same `after`, so it sits next to its feature in the tree. Every op
+that builds inside a Body takes it (sketch, pad, pocket, revolution, groove,
+hole, fillet, chamfer, thickness, draft, datum_plane, mirror, pattern); it must
+name a feature that shapes the Body, not a sketch or datum.""",
     "pocket": """\
 pocket — cut a closed sketch profile out of a solid (obj_name = profile sketch).
 Optional: length (default 10), through_all, pad_type, length2, up_to_face,
@@ -1001,7 +1052,17 @@ the mouse-guard note under operation_help("diagnose")), and so on. An
 occluded or minimized FreeCAD window, or a model that changed in the same
 breath, is the common non-view-type case: pass focus_object=<object name>.
 Framing an object skips the automatic fit and forces a repaint before
-saveImage, which is what turns a stale frame into a capture.""",
+saveImage, which is what turns a stale frame into a capture.
+
+What a capture shows: the part as built. Sketches, datums and origins are
+hidden for it and the selection is cleared (a selected face is painted over,
+which hides the seams a capture is taken to check); all of it, and the
+document's unsaved-changes flag, is put back afterwards, so looking never reads
+as an edit. show_sketches=true leaves sketches and datums in the picture, and
+a sketch named as focus_object is always shown. isolate=true hides every body
+and part but the one focus_object belongs to. The camera turns without
+animation, so a view change and a focus in one call come out at the right
+angle.""",
     "step_labels": """\
 step_labels: what the Steps panel's "Step" column says, and how to write it.
 
@@ -1058,8 +1119,10 @@ HELP_TOPICS: dict[str, str] = {
             "session",
             "screenshots",
             "step_labels",
+            "editing",
         )
     },
+    "editing": "changing a part that already exists, in place",
     "assembly_session": "assembly_session tool (persistent-joint assembly)",
     "assemble": "assemble tool (one-shot anchor snapping)",
     "step_plan": "step_plan tool (submit a plan without executing it)",

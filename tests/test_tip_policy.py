@@ -155,3 +155,28 @@ def test_non_feature_types_never_take_the_tip():
         tip_is_feat=False,
         feat_depends_on_tip=True,
     )
+
+
+# --- `after`: building in the middle of a Body's history --------------------------------
+
+
+def test_ops_that_build_inside_a_body_take_after():
+    for op in ("sketch", "pad", "pocket", "fillet", "chamfer", "pattern", "mirror", "hole"):
+        assert tp.unknown_spec_keys(op, {"after": "Base"}) == "", op
+
+
+def test_ops_outside_a_body_refuse_after():
+    """`after` on an op that has no place in a Body's history would be dropped
+    silently; a refusal names the keys the op does take."""
+    for op in ("variables", "boolean", "move", "color", "loft"):
+        assert "'after'" in tp.unknown_spec_keys(op, {"after": "Base"}), op
+
+
+def test_variables_takes_edits_by_alias():
+    spec = {
+        "set": {"Width": 4},
+        "rows": [["Depth", 2]],
+        "remove": ["Old"],
+        "cells": {"A1": ["X", 1]},
+    }
+    assert tp.unknown_spec_keys("variables", spec) == ""

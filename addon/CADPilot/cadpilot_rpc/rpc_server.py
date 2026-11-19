@@ -15,7 +15,7 @@ import FreeCADGui
 import Part  # also pre-imported for execute_code snippets (exec_snippet copies globals)
 from PySide import QtCore
 
-from cadpilot_rpc import dbglog, gui_dispatch, step_engine, step_journal, watchdog
+from cadpilot_rpc import dbglog, gui_dispatch, outline, step_engine, step_journal, watchdog
 from cadpilot_rpc.assembly_ops import (
     assemble as _assemble,
 )
@@ -124,16 +124,50 @@ def exec_snippet(code: str, out=None) -> None:
 
     Assignments must not leak into (and corrupt) the RPC server's globals, and
     a journal-replayed snippet must see exactly the names it was written
-    against: ``FreeCAD`` (also ``App``), ``FreeCADGui`` and ``Part`` are
-    imported at module level here, so they are pre-imported for every snippet.
+    against: ``FreeCAD`` (also ``App``), ``FreeCADGui`` (also ``Gui``) and
+    ``Part`` are pre-imported for every snippet.
     Shared by the ``execute_code`` RPC and by journal replay.
     """
-    ns = {**globals()}
-    if out is None:
-        exec(code, ns)
+    ns = {**globals(), "App": FreeCAD, "Gui": FreeCADGui}
+    try:
+        compiled = compile(code, _SNIPPET_FILE, "exec")
+        if out is None:
+            exec(compiled, ns)
+        else:
+            with contextlib.redirect_stdout(out):
+                exec(compiled, ns)
+    except Exception as e:
+        _name_snippet_line(e, code)
+        raise
+
+
+_SNIPPET_FILE = "<snippet>"
+
+
+def _name_snippet_line(exc: Exception, code: str) -> None:
+    """Add the snippet's failing line to the error's message.
+
+    The caller reports only ``type: message``, and FreeCAD's own messages name
+    nothing ("TypeError: a string or integer is required" for a wrong argument
+    somewhere in forty lines), so the line is the one clue to where.
+    """
+    line = None
+    tb = exc.__traceback__
+    while tb is not None:
+        if tb.tb_frame.f_code.co_filename == _SNIPPET_FILE:
+            line = tb.tb_lineno
+        tb = tb.tb_next
+    if line is None and isinstance(exc, SyntaxError) and exc.filename == _SNIPPET_FILE:
+        return  # a SyntaxError already carries its line
+    if line is None:
+        return
+    lines = code.splitlines()
+    source = lines[line - 1].strip() if 0 < line <= len(lines) else ""
+    where = f" (snippet line {line}: {source[:160]})"
+    if exc.args and isinstance(exc.args[0], str):
+        exc.args = (exc.args[0] + where, *exc.args[1:])
     else:
-        with contextlib.redirect_stdout(out):
-            exec(code, ns)
+        exc.args = (*exc.args, where.strip())
 
 
 # --- execute_code_async: document access only through commit() ----------------
@@ -1783,6 +1817,29 @@ class FreeCADRPC:
         FreeCAD.Console.PrintWarning(f"CADPilot: get_object failed: {res}\n")
         return {"success": False, "error": str(res), "object": None}
 
+    def get_outline(self, doc_name, obj_name="", limit=50, offset=0):
+        """The model tree as text (see ``outline``); ``text`` is None for an
+        object that has no outline, which the caller reads with get_object."""
+        res = dispatch_to_gui(lambda: self._get_outline_gui(doc_name, obj_name, limit, offset))
+        if isinstance(res, tuple):
+            return {"success": True, "text": res[1]}
+        return {"success": False, "error": str(res), "text": None}
+
+    def _get_outline_gui(self, doc_name, obj_name, limit, offset):
+        try:
+            doc = FreeCAD.getDocument(doc_name)
+        except Exception:
+            return f"Document '{doc_name}' not found."
+        if not obj_name:
+            return (True, outline.document_outline(doc, int(limit), int(offset)))
+        obj = doc.getObject(obj_name)
+        if obj is None:
+            labelled = [o.Name for o in doc.Objects if o.Label == obj_name]
+            if len(labelled) != 1:
+                return f"Object '{obj_name}' not found in document '{doc_name}'."
+            obj = doc.getObject(labelled[0])
+        return (True, outline.object_outline(obj))
+
     def list_documents(self):
         res = dispatch_to_gui(lambda: list(FreeCAD.listDocuments().keys()))
         if isinstance(res, list):
@@ -1815,6 +1872,8 @@ class FreeCADRPC:
         height: int | None = None,
         focus_object: str | None = None,
         doc_name: str | None = None,
+        show_sketches: bool = False,
+        isolate: bool = False,
     ) -> str | None:
         """Get a screenshot of the active view as a base64-encoded PNG string.
 
@@ -1859,7 +1918,14 @@ class FreeCADRPC:
                 )
                 return False
             res = save_active_screenshot(
-                tmp_path, view_name, width, height, focus_object, doc_name=doc_name
+                tmp_path,
+                view_name,
+                width,
+                height,
+                focus_object,
+                doc_name=doc_name,
+                show_sketches=bool(show_sketches),
+                isolate=bool(isolate),
             )
             if res is not True:
                 _last_screenshot_error = f"the capture failed ({res or 'no detail'})"
@@ -2065,6 +2131,7 @@ _RELOAD_ORDER = [
     "cadpilot_rpc.tip_policy",
     "cadpilot_rpc.step_journal",
     "cadpilot_rpc.geometry_query",
+    "cadpilot_rpc.outline",
     "cadpilot_rpc.gui_dispatch",
     "cadpilot_rpc.trim_ops",
     "cadpilot_rpc.commands",

@@ -183,9 +183,23 @@ def test_execute_operations_reports_per_op_results(fake_freecad):
 # --- misc read operations ----------------------------------------------------
 
 
-def test_get_objects_returns_paginated_json(fake_freecad):
+def test_get_objects_reads_the_model_tree(fake_freecad):
+    fake_freecad.result_overrides["get_outline"] = "Doc: part.FCStd\n\nBody (Body: 1 features)"
+    resp = get_objects_operation(fake_freecad, "Doc", None, 20, 5)
+    assert fake_freecad.calls == [("get_outline", ("Doc", None, 20, 5), {})]
+    assert resp[0].text.startswith("Doc: part.FCStd")
+
+
+def test_get_objects_reads_a_sketch_as_its_outline(fake_freecad):
+    fake_freecad.result_overrides["get_outline"] = "Profile (Sketch on XY_Plane)"
+    resp = get_objects_operation(fake_freecad, "Doc", "Profile")
+    assert fake_freecad.called_methods() == ["get_outline"]
+    assert resp[0].text == "Profile (Sketch on XY_Plane)"
+
+
+def test_get_objects_raw_returns_paginated_json(fake_freecad):
     fake_freecad.objects_by_doc["Doc"] = ["Box"]
-    resp = get_objects_operation(fake_freecad, "Doc")
+    resp = get_objects_operation(fake_freecad, "Doc", raw=True)
     assert fake_freecad.called_methods() == ["get_objects"]
     data = json.loads(resp[0].text)
     assert data["objects"][0]["Name"] == "Box"
@@ -193,9 +207,9 @@ def test_get_objects_returns_paginated_json(fake_freecad):
     assert data["has_more"] is False and data["next_offset"] is None
 
 
-def test_get_objects_pagination_window(fake_freecad):
+def test_get_objects_raw_pagination_window(fake_freecad):
     fake_freecad.objects_by_doc["Doc"] = ["A", "B", "C", "D"]
-    data = json.loads(get_objects_operation(fake_freecad, "Doc", None, 2, 1)[0].text)
+    data = json.loads(get_objects_operation(fake_freecad, "Doc", None, 2, 1, raw=True)[0].text)
     assert [o["Name"] for o in data["objects"]] == ["B", "C"]
     assert data["total"] == 4 and data["offset"] == 1
     assert data["has_more"] is True and data["next_offset"] == 3
@@ -203,9 +217,16 @@ def test_get_objects_pagination_window(fake_freecad):
 
 def test_get_objects_with_obj_name_returns_one_object(fake_freecad):
     resp = get_objects_operation(fake_freecad, "Doc", "Box")
-    assert fake_freecad.called_methods() == ["get_object"]
+    assert fake_freecad.called_methods() == ["get_outline", "get_object"]
     data = json.loads(resp[0].text)
     assert data["TypeId"] == "Part::Box"
+
+
+def test_get_view_passes_the_view_options(fake_freecad):
+    get_view_operation(fake_freecad, "Front", focus_object="Body", isolate=True)
+    name, _args, kwargs = fake_freecad.calls[0]
+    assert name == "get_active_screenshot"
+    assert kwargs == {"doc_name": None, "isolate": True}
 
 
 def test_list_documents(fake_freecad):
@@ -341,7 +362,7 @@ def test_align_shapes_center(fake_freecad):
 def test_get_objects_document_not_found_returns_error_text(fake_freecad):
     # With the fixed addon, a missing document surfaces as an error (raised by
     # the client), not as a misleading empty list.
-    fake_freecad.errors["get_objects"] = RuntimeError("Document 'Nope' not found.")
+    fake_freecad.errors["get_outline"] = RuntimeError("Document 'Nope' not found.")
     resp = get_objects_operation(fake_freecad, "Nope")
     assert "not found" in resp[0].text
 

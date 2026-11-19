@@ -104,3 +104,25 @@ def test_format_warning_truncates_object_lists():
 
 def test_format_warning_empty_when_no_islands():
     assert _format_connectivity_warning({"islands": [], "summary": {"island_count": 0}}) == ""
+
+
+def test_an_island_is_reported_once_per_document(fake_freecad):
+    """A part file with a second body is one island for good: the warning after
+    every edit taught the caller to ignore it."""
+    fake_freecad.result_overrides["verify_assembly"] = _audit_with_islands()
+    first = cad_operation(fake_freecad, "create_object", "Doc", obj_type="Part::Box", obj_name="A")
+    second = cad_operation(fake_freecad, "create_object", "Doc", obj_type="Part::Box", obj_name="B")
+    assert "Connectivity" in first[0].text
+    assert "Connectivity" not in second[0].text
+
+
+def test_a_new_island_is_still_reported(fake_freecad):
+    fake_freecad.result_overrides["verify_assembly"] = _audit_with_islands()
+    cad_operation(fake_freecad, "create_object", "Doc", obj_type="Part::Box", obj_name="A")
+    audit = _audit_with_islands()
+    audit["islands"].append({"objects": ["Stray"], "size": 1, "gap_mm": 9.0, "nearest_main": "A"})
+    fake_freecad.result_overrides["verify_assembly"] = audit
+    text = cad_operation(
+        fake_freecad, "create_object", "Doc", obj_type="Part::Box", obj_name="Stray"
+    )[0].text
+    assert "1 disconnected island(s)" in text and "Stray" in text

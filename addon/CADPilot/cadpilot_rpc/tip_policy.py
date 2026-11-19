@@ -200,7 +200,7 @@ SPEC_KEYS: dict[str, frozenset[str]] = {
             "visible",
             "objects",
         ),
-        "variables": ("cells", "name"),
+        "variables": ("cells", "set", "rows", "remove", "name"),
         "sketch": (
             "geometry",
             "plane",
@@ -243,6 +243,27 @@ TRANSFORM_STEP_KEYS: dict[str, frozenset[str]] = {
     "mirror": frozenset({"pattern_type", "plane", "face"}),
 }
 TRANSFORM_STEP_KEYS["any"] = frozenset().union(*TRANSFORM_STEP_KEYS.values()) - {"pattern_type"}
+
+#: Ops that build inside a Body and so can go in the middle of its history:
+#: ``after`` names the feature the new one follows.
+INSERT_OPS = frozenset(
+    {
+        "sketch",
+        "pad",
+        "pocket",
+        "revolution",
+        "groove",
+        "hole",
+        "fillet",
+        "chamfer",
+        "thickness",
+        "draft",
+        "datum_plane",
+        "mirror",
+        "pattern",
+    }
+)
+SPEC_KEYS = {op: keys | {"after"} if op in INSERT_OPS else keys for op, keys in SPEC_KEYS.items()}
 
 # The feature spec's own fields, filled in by the dispatcher, not the caller.
 _SPEC_FIELDS = frozenset({"type", "base", "description"})

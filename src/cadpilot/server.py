@@ -401,25 +401,36 @@ def get_view(
     height: Annotated[int, Field(ge=16, le=8192)] | None = None,
     focus_object: str | None = None,
     doc_name: str | None = None,
+    show_sketches: bool = False,
+    isolate: bool = False,
 ) -> list[TextContent]:
     """Capture one document's view and return the saved PNG's path.
 
-    Costly in context: reserve it for visual checks; prefer get_objects or measure_geometry for numbers. Without width/height the long edge is capped at 384 px.
+    Sketches, datums and the selection highlight are hidden for it. Costly in context: for numbers use get_objects or measure_geometry.
 
     Args:
-        view_name: Camera view, one of the nine names.
-        width/height: Pixel size; a smaller image saves context.
+        width/height: Pixels; the long edge is 384 without them.
         focus_object: Fit this object; the default frames everything.
-        doc_name: Frame this document; another agent may have switched the foreground tab.
+        show_sketches: Leave sketches and datums visible.
+        isolate: Hide every body but focus_object's.
+
+    Reference: operation_help("screenshots").
     """
     if state.only_text_feedback:
         return text_response("Screenshots are disabled by --only-text-feedback.")
     return get_view_operation(
-        get_freecad_connection(), view_name, width, height, focus_object, doc_name
+        get_freecad_connection(),
+        view_name,
+        width,
+        height,
+        focus_object,
+        doc_name,
+        show_sketches,
+        isolate,
     )
 
 
-@mcp.tool(annotations=_read_only("List Objects / Get Object"))
+@mcp.tool(annotations=_read_only("Read Model Tree / Get Object"))
 @_reports_user_changes
 def get_objects(
     ctx: Context,
@@ -427,12 +438,13 @@ def get_objects(
     obj_name: str | None = None,
     limit: Annotated[int, Field(ge=1, le=500)] = 50,
     offset: Annotated[int, Field(ge=0, le=10_000_000)] = 0,
+    raw: bool = False,
 ) -> list[TextContent]:
-    """List a document's objects, or read one object's full properties.
+    """Read a document's model tree (sheets, each body's features in order, the selection), or one object.
 
     Args:
-        obj_name: Omit to list the objects; pass a name to read that object instead.
-        limit/offset: Page size and start index for the object list.
+        obj_name: A sheet, body or sketch in full (a sketch's geometry and constraints by index); else its properties.
+        raw: Every property as JSON.
     """
     return get_objects_operation(
         get_freecad_connection(),
@@ -440,6 +452,7 @@ def get_objects(
         obj_name,
         limit,
         offset,
+        raw,
     )
 
 
