@@ -1227,6 +1227,11 @@ class FreeCADRPC:
                     if not doc.FileName:
                         return f"Document '{doc_name}' has never been saved; provide a path."
                     doc.save()
+                # Document.save() writes the file and leaves the GUI's flag set:
+                # the tab kept its asterisk, FreeCAD asked to save again on close,
+                # and every part saved here read as edited by hand since.
+                with contextlib.suppress(Exception):
+                    FreeCADGui.getDocument(doc.Name).Modified = False
                 FreeCAD.Console.PrintMessage(f"Document '{doc_name}' saved to '{doc.FileName}'.\n")
                 return {"success": True, "file_name": doc.FileName}
             except Exception as e:

@@ -15,7 +15,12 @@ import sys
 from live_port import require_test_port
 
 from cadpilot.freecad_client import FreeCADConnection
-from cadpilot.operations import cad_operation, get_objects_operation, get_view_operation
+from cadpilot.operations import (
+    cad_operation,
+    get_objects_operation,
+    get_view_operation,
+    save_document_operation,
+)
 
 require_test_port()
 c = FreeCADConnection()
@@ -232,6 +237,16 @@ check(
 )
 tree = text(get_objects_operation(c, DOC))
 check("the tree names the selected face", "selected: Hole (Pocket) Face1: " in tree, tree[-300:])
+
+# --- a save leaves nothing unsaved ---------------------------------------------------------------
+SAVED = run("import tempfile, os\nprint(os.path.join(tempfile.mkdtemp(), 'edit-in-place.FCStd'))")
+saved = text(save_document_operation(c, DOC, SAVED))
+tree = text(get_objects_operation(c, DOC))
+check(
+    "a saved document has no unsaved changes",
+    "unsaved changes" not in tree,
+    f"{saved} {tree[:200]}",
+)
 
 # --- a failing snippet says where -------------------------------------------------------------
 res = c.execute_code("# bad\nx = 1\nApp.getDocument('Nope')\nprint(x)", doc_name=DOC)
