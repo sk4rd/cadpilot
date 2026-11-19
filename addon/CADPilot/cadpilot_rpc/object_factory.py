@@ -238,12 +238,58 @@ def repair_body_tips(doc) -> bool:
     return repaired
 
 
+def _chain_body(obj):
+    """The Body to take ``obj`` out of, when the only thing built on it is the next
+    feature of that Body's chain (through BaseFeature); else None.
+
+    Such a feature comes out of the middle of a body cleanly: the Body relinks the
+    next feature to the one before. Anything else built on it (a pattern repeating
+    it, a sketch on its face, an expression) still refuses the delete, because the
+    Body does not repair those.
+    """
+    if not obj.TypeId.startswith("PartDesign::") or "BaseFeature" not in obj.PropertiesList:
+        return None
+    body = next((o for o in obj.InList if o.TypeId == "PartDesign::Body"), None)
+    if body is None or obj not in body.Group:
+        return None
+    for dep in obj.InList:
+        if dep is body:
+            continue
+        if (
+            dep in body.Group
+            and getattr(dep, "BaseFeature", None) is obj
+            and not _references_besides_base(dep, obj)
+        ):
+            continue
+        return None
+    return body
+
+
+def _references_besides_base(dep, obj) -> bool:
+    """Whether ``dep`` links to ``obj`` through a property other than BaseFeature."""
+    for prop in dep.PropertiesList:
+        if prop == "BaseFeature":
+            continue
+        try:
+            value = dep.getPropertyByName(prop)
+        except Exception:
+            continue
+        values = value if isinstance(value, (list, tuple)) else [value]
+        for v in values:
+            if v is obj or (isinstance(v, tuple) and v and v[0] is obj):
+                return True
+    return any(obj.Name in expr for _path, expr in getattr(dep, "ExpressionEngine", []))
+
+
 def delete_object_gui(doc_name: str, obj_name: str):
     """Remove an object and recompute. True on success.
 
-    Refuses when other objects are built on it (see :func:`_dependents`):
-    FreeCAD would leave the consumers behind with their base link cleared,
-    turning a subtractive feature additive and a body silently wrong.
+    A PartDesign feature whose only consumer is the next feature of its Body comes
+    out of the middle of the chain, as FreeCAD's Delete key takes it (see
+    :func:`_chain_body`). Anything else built on the object refuses the delete
+    (see :func:`_dependents`): FreeCAD would leave the consumers behind with their
+    base link cleared, turning a subtractive feature additive and a body silently
+    wrong.
     """
     try:
         doc = FreeCAD.getDocument(doc_name)
@@ -255,6 +301,19 @@ def delete_object_gui(doc_name: str, obj_name: str):
         obj = doc.getObject(obj_name)
         if obj is None:
             return f"Object '{obj_name}' not found in document '{doc_name}'."
+        body = _chain_body(obj)
+        if body is not None:
+            # Body.removeObject is what FreeCAD's Delete key does to a feature: the next
+            # feature takes this one's base, and the body's Tip moves back if it pointed here.
+            body.removeObject(obj)
+            doc.removeObject(obj_name)
+            doc.recompute()
+            if repair_body_tips(doc):
+                doc.recompute()
+            FreeCAD.Console.PrintMessage(
+                f"Feature '{obj_name}' removed from {body.Name} via RPC.\n"
+            )
+            return True
         dependents = _dependents(obj)
         if dependents:
             return (
