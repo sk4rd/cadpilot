@@ -1567,8 +1567,19 @@ def step_plan_operation(
     ]
     if description:
         lines.append(description)
-    for i, step in enumerate(steps, start=1):
+    # The numbers step_control takes are the journal's, and a part that already
+    # has a history starts its plan far from 1: a plan listed as 1-5 was run
+    # with run_to(2), which did nothing, in a journal where it was 51-55.
+    count, planned = res.get("count"), res.get("planned")
+    appended = isinstance(count, int) and isinstance(planned, int) and count >= planned > 0
+    first = count - planned + 1 if appended else 1
+    for i, step in enumerate(steps, start=first):
         lines.append(f"  {i}. {step.get('description') or step.get('operation')}")
+    if first > 1:
+        lines.append(
+            f"These are steps {first}-{first + len(steps) - 1} of the document's journal; "
+            "step_control's index means these numbers."
+        )
     lines.append(
         "Release them in FreeCAD's CADPilot Steps panel, or call "
         "step_control(action='run_next') / action='run_all'. Then review each "

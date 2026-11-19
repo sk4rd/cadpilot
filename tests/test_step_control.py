@@ -53,6 +53,16 @@ def test_step_plan_forwards_set_plan_spec(fake_freecad):
     assert "base plate" in out
 
 
+def test_step_plan_numbers_its_steps_as_the_journal_does(fake_freecad):
+    """A part with a history starts its plan far from 1, and step_control's index
+    is the journal's: a plan listed 1-2 was run with run_to(2), which did nothing."""
+    fake_freecad.result_overrides["journal_op"] = {"success": True, "count": 52, "planned": 2}
+    steps = [{"operation": "sketch", "obj_name": "S"}, {"operation": "pad", "obj_name": "S"}]
+    out = _text(step_plan_operation(fake_freecad, "Doc", steps))
+    assert "  51. sketch" in out and "  52. pad" in out
+    assert "steps 51-52 of the document's journal" in out
+
+
 def test_step_plan_reads_its_steps_from_a_file(fake_freecad, tmp_path):
     steps = [{"operation": "create_object", "obj_type": "Part::Box", "obj_name": "Base"}]
     plan = tmp_path / "plan.json"
