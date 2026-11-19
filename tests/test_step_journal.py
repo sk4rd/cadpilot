@@ -1391,3 +1391,16 @@ def test_normalize_expression_keeps_string_literals():
     out = sj._normalize_expression(raw)
     assert out == 'IF(A1="a b",1,2)'  # whitespace outside quotes stripped, inside kept
     assert sj._normalize_expression('"a""b"  c') == '"a""b"c'
+
+
+def test_a_formula_matches_itself_written_with_spaces():
+    """A spec written "=(L - 2 * Inset) / 2" is read back live as "=(L-2*Inset)/2".
+    Comparing the two as text reported every spaced formula of a freshly opened part
+    as an edit by the user, rewrote the journal and left the document marked changed."""
+    assert sj.same_value("=(L - 2 * Inset) / 2", "=(L-2*Inset)/2")
+    assert sj.same_value(
+        sj.map_cell_value("=RailW / 2 + Clear", "=RailW / 2 + Clear"), "=RailW / 2 + Clear"
+    )
+    assert not sj.same_value("=(L - 2 * Inset) / 2", "=(L-3*Inset)/2")
+    assert not sj.same_value('=IF(A1="a b";1;2)', '=IF(A1="ab";1;2)')
+    assert not sj.same_value("=1", 1)

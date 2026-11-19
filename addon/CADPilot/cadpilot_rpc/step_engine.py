@@ -2075,7 +2075,7 @@ def _json_scalar(value) -> int | float | str | bool | None:
 def _same_scalar(a, b) -> bool:
     if isinstance(a, (int, float)) and isinstance(b, (int, float)):
         return abs(float(a) - float(b)) <= 1e-9
-    return a == b
+    return sj.same_value(a, b)
 
 
 # Feature-op property -> spec-key mapping lives in step_journal (pure,

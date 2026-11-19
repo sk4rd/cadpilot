@@ -1824,7 +1824,15 @@ def _same_value(a: Any, b: Any) -> bool:
         return a is b
     if isinstance(a, (int, float)) and isinstance(b, (int, float)):
         return abs(float(a) - float(b)) <= 1e-9
+    if isinstance(a, str) and isinstance(b, str) and a.startswith("=") and b.startswith("="):
+        # A live formula is read back without its spaces, the spec's may have
+        # them: "=(L - 2 * Inset) / 2" against "=(L-2*Inset)/2" reported every
+        # spaced formula of a freshly opened part as the user's edit, once.
+        return _normalize_expression(a[1:]) == _normalize_expression(b[1:])
     return a == b
+
+
+same_value = _same_value
 
 
 def append_change(log: list[dict[str, Any]], event: dict[str, Any]) -> None:
