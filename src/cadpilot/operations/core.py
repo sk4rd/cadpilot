@@ -1569,6 +1569,9 @@ def step_control_operation(
         # sketch's geometry): tens of KB to learn which step is next. The rows
         # are what a caller reads; full=true still returns everything.
         params = {"summary": True, **(params or {})}
+    brief = action in _BRIEF_ACTIONS and not (params or {}).get("full")
+    if action in _BRIEF_ACTIONS and params and "full" in params:
+        params = {k: v for k, v in params.items() if k != "full"}
     spec: dict[str, Any] = {
         "operation": action,
         "index": index,
@@ -1624,7 +1627,48 @@ def step_control_operation(
         if objs is not None:
             detail = f"{detail}\nThe document now holds: {', '.join(objs) or '(nothing)'}"
         return text_response(f"step_control '{action}' failed: {detail}")
+    if brief and isinstance(res.get("executed"), list):
+        res = {**res, "executed": [_brief_step(e) for e in res["executed"]]}
+        res["brief"] = "each step's whole result: params={'full': true}"
     return json_response(res)
+
+
+# A plan of a few dozen steps answers run_all with every sketch's plane, ids and counts:
+# tens of KB a caller rarely reads. These actions report each step briefly unless asked.
+_BRIEF_ACTIONS = ("run_all", "run_to")
+
+
+def _brief_step(entry: dict[str, Any]) -> dict[str, Any]:
+    """One executed step as a long run reports it: what it made, its body's volume, and only
+    what needs a look (an error, warnings, a sketch with freedom left). A failed step keeps
+    everything."""
+    out = {k: entry[k] for k in ("index", "operation", "success") if k in entry}
+    result = entry.get("result") or {}
+    if not entry.get("success"):
+        out["error"] = entry.get("error", "")
+        if result:
+            out["result"] = result
+        return out
+    if result.get("object_name"):
+        out["object"] = result["object_name"]
+    if result.get("fully_constrained") is False or result.get("dof"):
+        out["dof"] = result.get("dof")
+    for key in ("warning", "warnings", "diagnostics"):
+        if result.get(key):
+            out[key] = result[key]
+    model = result.get("model")
+    if isinstance(model, list) and model and isinstance(model[-1], dict):
+        out["volume"] = model[-1].get("volume_after")
+    ops = result.get("results")
+    if isinstance(ops, list):
+        # a batch: the same few facts for each of its ops
+        out["results"] = [
+            {"op": r.get("op"), **_brief_step({"success": True, "result": r})}
+            if isinstance(r, dict)
+            else r
+            for r in ops
+        ]
+    return out
 
 
 def get_addon_log_operation(

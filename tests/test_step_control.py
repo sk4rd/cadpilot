@@ -308,3 +308,83 @@ def test_insert_rejects_empty_params_before_the_rpc(fake_freecad):
     resp = step_control_operation(fake_freecad, "Doc", "insert", index=1, params={})
     assert "steps" in _text(resp)
     assert fake_freecad.calls == []
+
+
+def test_run_all_reports_each_step_briefly_unless_full_is_asked_for(fake_freecad):
+    sketch = {
+        "body": "Body",
+        "dof": 0,
+        "fully_constrained": True,
+        "geometry_count": 6,
+        "plane": {"plane": "XY", "normal": [0.0, 0.0, 1.0]},
+        "object_name": "Sketch",
+    }
+    loose = {**sketch, "dof": 2, "fully_constrained": False, "object_name": "Loose"}
+    pad = {
+        "model": [{"body": "Body", "tip": "Pad", "volume_before": 0.0, "volume_after": 125.0}],
+        "object_name": "Pad",
+        "warnings": ["Body 'Body' did not exist, so it was created."],
+    }
+    fake_freecad.result_overrides["journal_op"] = {
+        "success": True,
+        "count": 3,
+        "done": 3,
+        "error": "",
+        "skipped": [],
+        "executed": [
+            {"index": 1, "operation": "sketch", "success": True, "error": "", "result": sketch},
+            {"index": 2, "operation": "sketch", "success": True, "error": "", "result": loose},
+            {"index": 3, "operation": "pad", "success": True, "error": "", "result": pad},
+        ],
+    }
+    out = json.loads(_text(step_control_operation(fake_freecad, "Doc", "run_all")))
+    assert out["executed"] == [
+        {"index": 1, "operation": "sketch", "success": True, "object": "Sketch"},
+        {"index": 2, "operation": "sketch", "success": True, "object": "Loose", "dof": 2},
+        {
+            "index": 3,
+            "operation": "pad",
+            "success": True,
+            "object": "Pad",
+            "warnings": ["Body 'Body' did not exist, so it was created."],
+            "volume": 125.0,
+        },
+    ]
+    assert "full" in out["brief"]
+
+    full = json.loads(
+        _text(step_control_operation(fake_freecad, "Doc", "run_all", params={"full": True}))
+    )
+    assert full["executed"][0]["result"]["plane"] == {"plane": "XY", "normal": [0.0, 0.0, 1.0]}
+    assert fake_freecad.calls[-1][1][1]["params"] == {}
+
+
+def test_a_brief_batch_step_keeps_each_ops_object_and_volume(fake_freecad):
+    fake_freecad.result_overrides["journal_op"] = {
+        "success": True,
+        "count": 1,
+        "done": 1,
+        "error": "",
+        "skipped": [],
+        "executed": [
+            {
+                "index": 1,
+                "operation": "batch",
+                "success": True,
+                "error": "",
+                "result": {
+                    "results": [
+                        {
+                            "op": "pad",
+                            "object_name": "Plate",
+                            "model": [{"body": "Body", "volume_after": 12500.0}],
+                        }
+                    ]
+                },
+            }
+        ],
+    }
+    out = json.loads(_text(step_control_operation(fake_freecad, "Doc", "run_all")))
+    assert out["executed"][0]["results"] == [
+        {"op": "pad", "success": True, "object": "Plate", "volume": 12500.0}
+    ]

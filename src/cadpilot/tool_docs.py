@@ -737,6 +737,10 @@ Execution:
   run_next      execute the first planned step
   run_all       execute planned steps until one fails or none remain
   run_to        execute until step `index` is done
+                run_all and run_to report each step briefly: its object, its body's
+                volume, and any warnings, diagnostics or sketch freedom left; a
+                failed step keeps its whole result. params.full=true returns every
+                step's whole result
   replay        roll back to `index` (default 0) and re-run everything —
                 rebuilds the model from the journal after manual edits
 

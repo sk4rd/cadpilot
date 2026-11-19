@@ -509,8 +509,14 @@ out = json.loads(text(step_control_operation(c, d, "run_all")))
 entry = out["executed"][-1]
 check(
     "[batch] a batch step reports its ops",
-    "volume_after" in json.dumps(entry.get("result", {})),
+    [r.get("object") for r in entry.get("results", [])] == ["Plate"]
+    and entry["results"][0].get("volume") == 12500.0,
     json.dumps(entry)[:300],
+)
+check(
+    "[batch] run_all's brief reply says how to get the whole result",
+    "full" in out.get("brief", ""),
+    json.dumps(out)[:300],
 )
 
 # [journal] ----------------------------------------------------------------------
