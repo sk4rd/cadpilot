@@ -231,8 +231,21 @@ run(
     f"Gui.Selection.addSelection({DOC!r}, 'Plate', 'Hole.Face1')"
 )
 run(f"Gui.getDocument({DOC!r}).Modified = False")
-shot = text(get_view_operation(c, "Front", 200, 200, "Plate", DOC, isolate=True))
-check("a view is captured", "Screenshot saved to" in shot, shot)
+CAMERA = "import hashlib\nprint(hashlib.md5(Gui.getDocument(%r).activeView().getCamera().encode()).hexdigest())"
+camera = run(CAMERA % DOC)
+shot = text(get_view_operation(c, "Rear", 300, None, "Plate", DOC))
+check("a view is captured, and Rear means Back", "Screenshot saved to" in shot, shot)
+# the plate is 70 x 5 seen from behind: the picture is as wide as allowed for its height
+check("the picture takes its subject's shape", "(300x100)" in shot, shot)
+check("the user's camera is put back", run(CAMERA % DOC) == camera, "the camera moved")
+pixels = run(
+    "from PySide import QtGui\n"
+    f"img = QtGui.QImage({shot.split('saved to ')[1].split(' (')[0]!r})\n"
+    "bg = img.pixel(0, 0)\n"
+    "cols = [x for x in range(img.width()) if any(img.pixel(x, y) != bg for y in range(img.height()))]\n"
+    "print((max(cols) - min(cols) + 1) / img.width() if cols else 0)"
+)
+check("the subject fills the picture", float(pixels) > 0.85, pixels)
 state = run(
     f"d = App.getDocument({DOC!r})\n"
     "sel = Gui.Selection.getSelectionEx('', 0)\n"

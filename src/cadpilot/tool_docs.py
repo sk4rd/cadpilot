@@ -1059,10 +1059,14 @@ hidden for it and the selection is cleared (a selected face is painted over,
 which hides the seams a capture is taken to check); all of it, and the
 document's unsaved-changes flag, is put back afterwards, so looking never reads
 as an edit. show_sketches=true leaves sketches and datums in the picture, and
-a sketch named as focus_object is always shown. isolate=true hides every body
-and part but the one focus_object belongs to. The camera turns without
-animation, so a view change and a focus in one call come out at the right
-angle.""",
+a sketch named as focus_object is always shown.
+
+What it is fitted to: the focus object, shown alone (isolate=false keeps the
+other bodies and parts in the picture), or everything visible when no object
+is named. The picture takes the subject's proportions, between 1:3 and 3:1:
+give width or height and the other follows; give both to force a shape. The
+user's own camera is put back after the capture. "Rear" is accepted for
+"Back". A perspective camera is framed by FreeCAD's own fit, which is looser.""",
     "step_labels": """\
 step_labels: what the Steps panel's "Step" column says, and how to write it.
 

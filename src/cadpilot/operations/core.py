@@ -484,11 +484,15 @@ def get_view_operation(
     focus_object: str | None = None,
     doc_name: str | None = None,
     show_sketches: bool = False,
-    isolate: bool = False,
+    isolate: bool | None = None,
 ) -> ToolResponse:
     try:
+        # "Rear" is what FreeCAD's own menu calls the view, and what callers reach for.
+        view_name = {"Rear": "Back"}.get(view_name, view_name)
         options = {"show_sketches": True} if show_sketches else {}
-        if isolate:
+        # A focused object is looked at alone unless its neighbours are asked for:
+        # with the whole assembly in the picture the object under review is a detail of it.
+        if focus_object if isolate is None else isolate:
             options["isolate"] = True
         screenshot = freecad.get_active_screenshot(
             view_name, width, height, focus_object, doc_name=doc_name, **options

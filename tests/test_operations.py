@@ -229,6 +229,17 @@ def test_get_view_passes_the_view_options(fake_freecad):
     assert kwargs == {"doc_name": None, "isolate": True}
 
 
+def test_get_view_shows_a_focused_object_alone_by_default(fake_freecad):
+    get_view_operation(fake_freecad, "Rear", focus_object="Body")
+    _name, args, kwargs = fake_freecad.calls[0]
+    assert args[0] == "Back", "Rear is FreeCAD's own name for the view"
+    assert kwargs.get("isolate") is True
+    get_view_operation(fake_freecad, "Front", focus_object="Body", isolate=False)
+    assert "isolate" not in fake_freecad.calls[1][2]
+    get_view_operation(fake_freecad, "Front")
+    assert "isolate" not in fake_freecad.calls[2][2]
+
+
 def test_list_documents(fake_freecad):
     fake_freecad.documents = ["Doc1"]
     resp = list_documents_operation(fake_freecad)

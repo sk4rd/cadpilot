@@ -395,24 +395,32 @@ def execute_code(
 def get_view(
     ctx: Context,
     view_name: Literal[
-        "Isometric", "Front", "Top", "Right", "Back", "Left", "Bottom", "Dimetric", "Trimetric"
+        "Isometric",
+        "Front",
+        "Top",
+        "Right",
+        "Back",
+        "Rear",
+        "Left",
+        "Bottom",
+        "Dimetric",
+        "Trimetric",
     ],
     width: Annotated[int, Field(ge=16, le=8192)] | None = None,
     height: Annotated[int, Field(ge=16, le=8192)] | None = None,
     focus_object: str | None = None,
     doc_name: str | None = None,
     show_sketches: bool = False,
-    isolate: bool = False,
+    isolate: bool | None = None,
 ) -> list[TextContent]:
     """Capture one document's view and return the saved PNG's path.
 
-    Sketches, datums and the selection highlight are hidden for it. Costly in context: for numbers use get_objects or measure_geometry.
+    The picture is fitted to its subject, without sketches, datums or selection highlight. Costly in context: for numbers use get_objects or measure_geometry.
 
     Args:
-        width/height: Pixels; the long edge is 384 without them.
-        focus_object: Fit this object; the default frames everything.
-        show_sketches: Leave sketches and datums visible.
-        isolate: Hide every body but focus_object's.
+        width/height: Pixels; give one, the other follows the subject (long edge 384 with neither).
+        focus_object: Show this object alone; default: everything.
+        isolate: false keeps the other bodies in view.
 
     Reference: operation_help("screenshots").
     """
