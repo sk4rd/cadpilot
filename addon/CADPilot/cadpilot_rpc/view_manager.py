@@ -59,6 +59,7 @@ def _resolve_screenshot_size(
 # A subject much longer than it is wide still gets a frame a person can read.
 _MAX_ASPECT = 3.0
 _MARGIN = 1.08
+_SKETCH_MARGIN = 2.0
 
 
 def _camera_axes(view):
@@ -170,7 +171,7 @@ def _image_size(view, width, height, extent) -> tuple[int, int]:
     return max(1, round(DEFAULT_MAX_DIM * aspect)), DEFAULT_MAX_DIM
 
 
-def _fit_camera(view, extent, image_width: int, image_height: int) -> bool:
+def _fit_camera(view, extent, image_width: int, image_height: int, margin=_MARGIN) -> bool:
     """Fill the picture with the subject. True when the camera was set.
 
     FreeCAD's own framing fits the subject's bounding sphere into the WINDOW, so
@@ -189,7 +190,7 @@ def _fit_camera(view, extent, image_width: int, image_height: int) -> bool:
         if position is None or re.search(r"^\s*height\s+\S+\s*$", text, re.M) is None:
             return False
         centre, wide, high, (nearest, farthest) = extent
-        wide, high = wide * _MARGIN, high * _MARGIN
+        wide, high = wide * margin, high * margin
         aspect = image_width / image_height
         height = max(high, wide / aspect) if aspect >= 1 else max(wide, high * aspect)
         right, up = _camera_axes(view)
@@ -299,7 +300,8 @@ def _tidy(doc, focus, show_sketches: bool, isolate: bool) -> list:
     Sketches and datums draw over the faces they lie on, and the selection
     highlight paints whole faces, so a capture taken as the user left the view
     hides the seams and edges it is taken to check. The focus object is always
-    shown, sketch or not. ``isolate`` also hides everything that is not the
+    shown, and a focused sketch is shown on its Body (see ``_overlay``).
+    ``isolate`` also hides everything that is not the
     focus object, inside it, or a container it is shown through: its siblings
     inside a shared App::Part go too, which hiding other top-level objects
     alone left in the picture.
@@ -310,13 +312,20 @@ def _tidy(doc, focus, show_sketches: bool, isolate: bool) -> list:
         view = getattr(obj, "ViewObject", None)
         if view is None or bool(view.Visibility) == visible:
             return
-        changed.append((view, bool(view.Visibility)))
+        changed.append((view, "Visibility", bool(view.Visibility)))
         view.Visibility = visible
 
     keep = set()
+    sketch = focus is not None and focus.TypeId == "Sketcher::SketchObject"
     if focus is not None:
         keep = {focus.Name, *(c.Name for c in _containers(focus))}
         keep.update(o.Name for o in getattr(focus, "OutListRecursive", []))
+        # A sketch is looked at on its Body, which shows through its features:
+        # they stay. (A focused FEATURE hides the later ones, and so shows the
+        # part as it was at that feature.)
+        body = _sketch_body(focus) if sketch else None
+        if body is not None:
+            keep.update(o.Name for o in body.Group)
     for obj in doc.Objects:
         if obj is focus:
             continue
@@ -328,6 +337,47 @@ def _tidy(doc, focus, show_sketches: bool, isolate: bool) -> list:
         show(focus, True)
         for container in _containers(focus):
             show(container, True)
+        if sketch:
+            changed += _overlay(focus)
+    return changed
+
+
+def _sketch_body(sketch):
+    return next((c for c in _containers(sketch) if c.TypeId == "PartDesign::Body"), None)
+
+
+# A sketch shown on its part: drawn to be seen, through a part made of glass.
+_OVERLAY_LINE = (1.0, 0.0, 0.75)
+_OVERLAY_WIDTH = 6.0
+_OVERLAY_GLASS = 75
+
+
+def _overlay(sketch) -> list:
+    """Make a sketch readable on the part it belongs to; returns what to restore.
+
+    A sketch is drawn in the same thin dark line as the solid's own edges, and
+    one on a plane through the solid is behind its faces: over the part it could
+    not be told from the part, or not be seen at all. The sketch gets a thick
+    line in a colour no part has, and its Body turns translucent.
+    """
+    changed = []
+
+    def put(view, prop, value):
+        if view is None or prop not in view.PropertiesList:
+            return
+        with contextlib.suppress(Exception):
+            before = getattr(view, prop)
+            setattr(view, prop, value)
+            changed.append((view, prop, before))
+
+    view = getattr(sketch, "ViewObject", None)
+    put(view, "LineColor", _OVERLAY_LINE)
+    put(view, "PointColor", _OVERLAY_LINE)
+    put(view, "LineWidth", _OVERLAY_WIDTH)
+    put(view, "PointSize", _OVERLAY_WIDTH + 2)
+    body = _sketch_body(sketch)
+    if body is not None:
+        put(getattr(body, "ViewObject", None), "Transparency", _OVERLAY_GLASS)
     return changed
 
 
@@ -430,15 +480,19 @@ def save_active_screenshot(
         extent = _subject_extent(view, doc, focus_target)
         resolved_width, resolved_height = _image_size(view, width, height, extent)
         if extent is not None:
-            _fit_camera(view, extent, resolved_width, resolved_height)
+            # a sketch is looked at for where it sits, so it gets room around it
+            on_part = focus_target is not None and _sketch_body(focus_target) is not None
+            sketch = on_part and focus_target.TypeId == "Sketcher::SketchObject"
+            margin = _SKETCH_MARGIN if sketch else _MARGIN
+            _fit_camera(view, extent, resolved_width, resolved_height, margin)
         view.saveImage(save_path, resolved_width, resolved_height, "Current")
         return True
     except Exception as e:
         return str(e)
     finally:
-        with contextlib.suppress(Exception):
-            for view_object, visible in hidden:
-                view_object.Visibility = visible
+        for view_object, prop, value in reversed(hidden):
+            with contextlib.suppress(Exception):
+                setattr(view_object, prop, value)
         with contextlib.suppress(Exception):
             FreeCADGui.Selection.clearSelection()
             for doc_n, obj_n, subs in prior_selection:

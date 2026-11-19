@@ -246,6 +246,24 @@ pixels = run(
     "print((max(cols) - min(cols) + 1) / img.width() if cols else 0)"
 )
 check("the subject fills the picture", float(pixels) > 0.85, pixels)
+# a sketch is looked at on its part: magenta on glass, and nothing of that stays behind
+STYLE = (
+    f"d = App.getDocument({DOC!r})\n"
+    "s, b = d.getObject('HoleSketch').ViewObject, d.getObject('Plate').ViewObject\n"
+    "print(tuple(round(c, 2) for c in s.LineColor)[:3], s.LineWidth, s.Visibility, b.Transparency)"
+)
+style = run(STYLE)
+shot = text(get_view_operation(c, "Top", 240, 240, "HoleSketch", DOC))
+pixels = run(
+    "from PySide import QtGui\n"
+    f"img = QtGui.QImage({shot.split('saved to ')[1].split(' (')[0]!r})\n"
+    "n = sum(1 for x in range(img.width()) for y in range(img.height())\n"
+    "        if QtGui.QColor(img.pixel(x, y)).red() > 200 and QtGui.QColor(img.pixel(x, y)).green() < 90)\n"
+    "print(n)"
+)
+check("a focused sketch is drawn to be seen", int(pixels) > 300, pixels)
+check("its colour, width and the body's glass are put back", run(STYLE) == style, run(STYLE))
+
 state = run(
     f"d = App.getDocument({DOC!r})\n"
     "sel = Gui.Selection.getSelectionEx('', 0)\n"

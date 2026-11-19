@@ -1063,7 +1063,11 @@ a sketch named as focus_object is always shown.
 
 What it is fitted to: the focus object, shown alone (isolate=false keeps the
 other bodies and parts in the picture), or everything visible when no object
-is named. The picture takes the subject's proportions, between 1:3 and 3:1:
+is named. A focused feature shows the part as it was at that feature. A
+focused sketch is shown on its own Body, with room around it: the sketch in a
+thick magenta line and the Body translucent, so a sketch on a plane through
+the solid can be seen and told from the part's edges. A sketch seen along its
+own plane is a line; look at it from the side it faces. The picture takes the subject's proportions, between 1:3 and 3:1:
 give width or height and the other follows; give both to force a shape. The
 user's own camera is put back after the capture. "Rear" is accepted for
 "Back". A perspective camera is framed by FreeCAD's own fit, which is looser.""",
