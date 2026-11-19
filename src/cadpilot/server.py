@@ -443,7 +443,7 @@ def get_objects(
     """Read a document's model tree (sheets, each body's features in order, the selection), or one object.
 
     Args:
-        obj_name: A sheet, body or sketch in full (a sketch's geometry and constraints by index); else its properties.
+        obj_name: A sheet, body, sketch (geometry and constraints by index) or feature in full; else its properties.
         raw: Every property as JSON.
     """
     return get_objects_operation(

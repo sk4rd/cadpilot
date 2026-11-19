@@ -148,6 +148,13 @@ for needle in (
     check(f"the sketch shows {needle!r}", needle in sketch, sketch)
 sheet = text(get_objects_operation(c, DOC, "Parameters"))
 check("the sheet shows cells and notes", "B1 Length = 60  -- plate length" in sheet, sheet)
+feature = text(get_objects_operation(c, DOC, "Hole"))
+for needle in (
+    "Hole (Pocket in Plate; follows Base; the tip)",
+    "Type ThroughAll",
+    "the body up to here",
+):
+    check(f"a feature shows {needle!r}", needle in feature, feature)
 raw = text(get_objects_operation(c, DOC, "Base", raw=True))
 check("raw still gives every property", json.loads(raw)["TypeId"] == "PartDesign::Pad", raw[:200])
 
@@ -202,6 +209,8 @@ check(
     solids(names) == ["Base", "Edge", "Rib", "Hole"],
     str(names),
 )
+edge = text(get_objects_operation(c, DOC, "Edge"))
+check("a dress-up shows where its edges are", "Base.Edge" in edge and "Line (" in edge, edge)
 check("and the later features survive", tip == "Hole" and volume() < before, f"{tip} {volume()}")
 res = cad("pocket", "HoleSketch", after="HoleSketch", length=1)
 check("after refuses a sketch", "must be a feature that shapes" in res, res)

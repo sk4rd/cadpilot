@@ -472,12 +472,44 @@ def document_outline(doc, limit: int = 50, offset: int = 0) -> str:
     return "\n".join(out)
 
 
+def _feature_lines(obj, body) -> list[str]:
+    """One feature of a Body: what it is set to, what it is built on and where that is."""
+    text = _feature_text(obj)
+    base = getattr(obj, "BaseFeature", None)
+    users = [
+        o.Name for o in obj.InList if o is not body and getattr(o, "BaseFeature", None) is not obj
+    ]
+    out = [
+        f"{_label(obj)} ({_kind(obj)} in {body.Name}"
+        f"{'; follows ' + base.Name if base is not None else '; first feature'}"
+        f"{'; used by ' + ', '.join(users) if users else ''}"
+        f"{'; the tip' if body.Tip is obj else ''}){_state(obj)}"
+    ]
+    if text:
+        out.append("  " + text.replace("; ", "\n  "))
+    for prop in ("Base", "Profile"):
+        v = getattr(obj, prop, None)
+        if isinstance(v, tuple) and len(v) == 2 and hasattr(v[0], "Name"):
+            subs = [s for s in (v[1] if isinstance(v[1], (list, tuple)) else [v[1]]) if s]
+            for sub in subs[:24]:
+                out.append(f"  {v[0].Name}.{sub}{_element_text(v[0], sub)}")
+            if len(subs) > 24:
+                out.append(f"  ... {len(subs) - 24} more sub-elements")
+    shape = getattr(obj, "Shape", None)
+    if shape is not None and not shape.isNull():
+        out.append(f"  the body up to here: {round(shape.Volume, 1):g} mm3")
+    return out
+
+
 def object_outline(obj) -> str | None:
-    """One sheet, body or sketch in full; None for anything else."""
+    """One sheet, body, sketch or Body feature in full; None for anything else."""
     if obj.TypeId == "Spreadsheet::Sheet":
         return "\n".join(_sheet_lines(obj, notes=True))
     if obj.TypeId == "PartDesign::Body":
         return "\n".join(_body_lines(obj, dimensions=True))
     if obj.TypeId == "Sketcher::SketchObject":
         return "\n".join(_sketch_lines(obj))
+    body = next((o for o in obj.InList if o.TypeId == "PartDesign::Body" and obj in o.Group), None)
+    if body is not None and obj.TypeId.startswith("PartDesign::") and obj.TypeId not in _DATUMS:
+        return "\n".join(_feature_lines(obj, body))
     return None
