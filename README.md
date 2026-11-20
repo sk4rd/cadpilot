@@ -60,7 +60,7 @@ cp -r addon/CADPilot ~/Library/Application\ Support/FreeCAD/v1-1/Mod/
 Copy-Item -Recurse addon/CADPilot "$env:APPDATA\FreeCAD\v1-1\Mod\"
 ```
 
-Restart FreeCAD, select **CADPilot** from the workbench list, and start the RPC server with the **Start RPC Server** command in the **CADPilot** toolbar. To start it automatically on every launch, enable **Auto-Start Server** in the **CADPilot** menu.
+Restart FreeCAD, select **CADPilot** from the workbench list, and start the RPC server with the **Start RPC Server** command in the **CADPilot** toolbar. To start it automatically on every launch, enable **Auto-Start Server** in the **CADPilot** menu. The toolbar's **Hide** button puts the toolbar away until **Tools > CADPilot Toolbar** brings it back; **Tools** also has **CADPilot Server On/Off** and **CADPilot Steps Panel**, in every workbench. The Steps panel starts hidden, and both choices are remembered.
 
 ### Step 2: Install the MCP server
 

@@ -219,9 +219,109 @@ class ToggleStepPanelCommand:
         return True
 
 
+TOOLBAR_NAME = "CADPilot"
+
+_toolbar_wanted: bool | None = None
+
+
+def toolbar_wanted() -> bool:
+    """Whether the user wants the CADPilot toolbar shown (saved; default yes)."""
+    global _toolbar_wanted
+    if _toolbar_wanted is None:
+        _toolbar_wanted = bool(load_settings().get("toolbar_visible", True))
+    return _toolbar_wanted
+
+
+def set_toolbar_wanted(visible: bool) -> None:
+    global _toolbar_wanted
+    _toolbar_wanted = bool(visible)
+    settings = load_settings()
+    settings["toolbar_visible"] = _toolbar_wanted
+    save_settings(settings)
+    try:
+        bar = FreeCADGui.getMainWindow().findChild(QtWidgets.QToolBar, TOOLBAR_NAME)
+        if bar is not None:
+            bar.setVisible(_toolbar_wanted)
+    except Exception:
+        pass
+
+
+class ToggleToolbarCommand:
+    """Show or hide the CADPilot toolbar. Tools > CADPilot Toolbar brings it back."""
+
+    def GetResources(self):
+        return {
+            "MenuText": "CADPilot Toolbar",
+            "ToolTip": "Show or hide the CADPilot toolbar",
+        }
+
+    def Activated(self, checked=0):
+        set_toolbar_wanted(not toolbar_wanted())
+
+    def IsActive(self):
+        return True
+
+
+class MenuServerCommand:
+    """Tools-menu switch for the server. Not checkable: FreeCAD's own menu
+    actions are not reachable by objectName, so a check mark there could not
+    be kept truthful; this flips whatever the real state is."""
+
+    def GetResources(self):
+        return {
+            "MenuText": "CADPilot Server On/Off",
+            "ToolTip": "Start the CADPilot server if it is stopped, stop it if it is running",
+        }
+
+    def Activated(self, checked=0):
+        from . import rpc_server
+
+        ToggleRPCServerCommand().Activated(not rpc_server.rpc_server_instance)
+        QtCore.QTimer.singleShot(0, sync_all_toggle_states)
+
+    def IsActive(self):
+        return True
+
+
+class MenuStepPanelCommand:
+    def GetResources(self):
+        return {
+            "MenuText": "CADPilot Steps Panel",
+            "ToolTip": "Show or hide the CADPilot steps panel",
+        }
+
+    def Activated(self, checked=0):
+        ToggleStepPanelCommand().Activated(not _panel_visible())
+
+    def IsActive(self):
+        return True
+
+
+#: What the Tools menu gets in every workbench, so the server, the panel and
+#: the toolbar can be switched while the toolbar is hidden.
+TOOLS_MENU_COMMANDS = ("CADPilot_Server", "CADPilot_Steps", "CADPilot_Toolbar")
+
+
+class _ToolsMenuManipulator:
+    def modifyMenuBar(self):
+        # "append" adds to the end of the menu that holds menuItem. An "insert"
+        # with "after" did nothing here: Customize is the menu's last entry.
+        return [
+            {"append": name, "menuItem": "Std_DlgCustomize"}
+            for name in ("Separator", *TOOLS_MENU_COMMANDS)
+        ]
+
+
+_tools_menu_manipulator = _ToolsMenuManipulator()
+
+
 def register_commands() -> None:
     if register_commands._done:  # FreeCAD re-imports InitGui on every workbench switch
         return
+    FreeCADGui.addCommand("CADPilot_Server", MenuServerCommand())
+    FreeCADGui.addCommand("CADPilot_Steps", MenuStepPanelCommand())
+    FreeCADGui.addCommand("CADPilot_Toolbar", ToggleToolbarCommand())
+    FreeCADGui.addWorkbenchManipulator(_tools_menu_manipulator)
     FreeCADGui.addCommand("Toggle_Step_Panel", ToggleStepPanelCommand())
     FreeCADGui.addCommand("Toggle_RPC_Server", ToggleRPCServerCommand())
     FreeCADGui.addCommand("Toggle_Auto_Start", ToggleAutoStartCommand())
@@ -248,6 +348,7 @@ def toolbar_button_specs():
         ("Toggle_Auto_Start", "Auto-Start Server", True, ToggleAutoStartCommand()),
         ("Toggle_Remote_Connections", "Remote Connections", True, ToggleRemoteConnectionsCommand()),
         ("Configure_Allowed_IPs", "Configure Allowed IPs", False, ConfigureAllowedIPsCommand()),
+        ("CADPilot_Toolbar", "Hide", False, ToggleToolbarCommand()),
     ]
 
 

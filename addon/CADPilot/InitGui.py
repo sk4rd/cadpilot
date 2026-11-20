@@ -1,6 +1,9 @@
 # CADPilot workbench + resident (persistent) toolbar.
 #
-# Goal: the CADPilot buttons stay visible no matter which workbench is active.
+# Goal: while the user wants the CADPilot toolbar (the saved toolbar_visible
+# setting, switched by the bar's Hide button and Tools > CADPilot Toolbar), its
+# buttons stay visible no matter which workbench is active. Hidden, it stays
+# hidden.
 #
 # Root cause of the disappearing toolbar — FreeCAD's src/Gui/ToolBarManager.cpp,
 # ToolBarManager::setup() runs on EVERY workbench switch:
@@ -296,8 +299,13 @@ def _bootstrap():
                 # Immunity: ToolBarManager skips toolbars whose toggleViewAction
                 # is invisible. Does NOT hide the bar itself.
                 bar.toggleViewAction().setVisible(False)
-                if not bar.isVisible():
-                    bar.show()
+                # isHidden, not isVisible: before the main window is shown
+                # every bar reads as invisible. A new bar is always set: Qt
+                # queues a show for a widget added to a layout unless it was
+                # hidden explicitly, and a fresh one only reads as hidden.
+                wanted = _commands.toolbar_wanted()
+                if created or bar.isHidden() == wanted:
+                    bar.setVisible(wanted)
                 dbg(f"ensure_bar({reason}) created={created} actions={len(bar.actions())}")
             except Exception:
                 dbg(f"ensure_bar({reason}) FAILED")
@@ -323,7 +331,8 @@ def _bootstrap():
                     bar = mw.findChild(QtWidgets.QToolBar, bar_name)
                     needed = {spec[0] for spec in _commands.toolbar_button_specs()}
                     have = {a.objectName() for a in bar.actions()} if bar else set()
-                    if bar is None or not needed <= have or not bar.isVisible():
+                    wanted = _commands.toolbar_wanted()
+                    if bar is None or not needed <= have or bar.isHidden() == wanted:
                         ensure_bar("watchdog")
                 except Exception:
                     pass

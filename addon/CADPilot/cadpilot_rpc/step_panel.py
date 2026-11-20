@@ -182,6 +182,12 @@ def _tooltip_text(rec) -> str:
 
 
 class StepPanel(QtWidgets.QDockWidget):
+    def closeEvent(self, event):
+        # The dock's own X. Only the toolbar toggle used to save the choice, so
+        # a panel closed this way came back on the next start.
+        _panel_closed_by_user()
+        super().closeEvent(event)
+
     def __init__(self, parent=None):
         super().__init__(PANEL_TITLE, parent)
         self.setObjectName(PANEL_NAME)
@@ -1198,6 +1204,17 @@ def _drop_panel(parent, panel) -> None:
     panel.deleteLater()
 
 
+def _panel_closed_by_user() -> None:
+    _save_visible(False)
+    try:
+        from cadpilot_rpc import commands
+
+        # Deferred: inside closeEvent the dock still reads as visible.
+        QtCore.QTimer.singleShot(0, commands.sync_all_toggle_states)
+    except Exception:
+        pass
+
+
 def panel_visible() -> bool:
     try:
         parent = FreeCADGui.getMainWindow()
@@ -1249,7 +1266,7 @@ def _load_visible() -> bool:
     try:
         from cadpilot_rpc.settings import load_settings
 
-        return bool(load_settings().get("step_panel_visible", True))
+        return bool(load_settings().get("step_panel_visible", False))
     except Exception:
         return False
 
